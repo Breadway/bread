@@ -32,10 +32,19 @@ impl SubscriptionTable {
             return false;
         };
 
+        // swap_remove moves the last element into `idx`. We need to update by_id
+        // for that element. But first, remove its stale entry (it was at the last
+        // position before the swap); then re-insert it at the new position.
+        let last_idx = self.entries.len() - 1;
         self.entries.swap_remove(idx);
-        if let Some(swapped) = self.entries.get(idx) {
-            self.by_id.insert(swapped.id, idx);
+
+        if idx < self.entries.len() {
+            // The element that was at `last_idx` is now at `idx`.
+            let swapped_id = self.entries[idx].id;
+            self.by_id.remove(&swapped_id); // remove stale last_idx entry
+            self.by_id.insert(swapped_id, idx);
         }
+
         true
     }
 

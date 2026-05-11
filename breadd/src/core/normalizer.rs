@@ -1,21 +1,24 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use bread_shared::{AdapterSource, BreadEvent, RawEvent};
 use serde_json::{json, Value};
 
 use crate::core::types::DeviceClass;
 
+/// How many multiples of `dedup_window_ms` an entry must be idle before eviction.
+const EVICT_MULTIPLIER: u64 = 60;
+
 pub struct EventNormalizer {
     dedup_window_ms: u64,
-    recent: Mutex<HashMap<String, u64>>,
+    recent: RwLock<HashMap<String, u64>>,
 }
 
 impl EventNormalizer {
     pub fn new(dedup_window_ms: u64) -> Self {
         Self {
             dedup_window_ms,
-            recent: Mutex::new(HashMap::new()),
+            recent: RwLock::new(HashMap::new()),
         }
     }
 
@@ -164,16 +167,36 @@ impl EventNormalizer {
 
     fn accept(&self, event: &BreadEvent) -> bool {
         let key = format!("{}:{}", event.event, event.data);
-        let mut recent = self.recent.lock().expect("normalizer dedup mutex poisoned");
         let now = event.timestamp;
 
+        // Fast path: check under read lock first.
+        {
+            let recent = self.recent.read().unwrap_or_else(|p| p.into_inner());
+            if let Some(last) = recent.get(&key) {
+                if now.saturating_sub(*last) < self.dedup_window_ms {
+                    return false;
+                }
+            }
+        }
+
+        // Slow path: acquire write lock, re-check, insert, and periodically evict.
+        let mut recent = self.recent.write().unwrap_or_else(|p| p.into_inner());
+
+        // Re-check after acquiring write lock (another thread may have inserted between locks).
         if let Some(last) = recent.get(&key) {
             if now.saturating_sub(*last) < self.dedup_window_ms {
                 return false;
             }
         }
 
-        recent.insert(key, now);
+        recent.insert(key.clone(), now);
+
+        // Evict stale entries to prevent unbounded growth.
+        let evict_before = now.saturating_sub(self.dedup_window_ms.saturating_mul(EVICT_MULTIPLIER));
+        if evict_before > 0 {
+            recent.retain(|_, &mut last| last >= evict_before);
+        }
+
         true
     }
 }

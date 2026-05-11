@@ -8,6 +8,7 @@ use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent};
 use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Value};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task;
 use tracing::{error, info, warn};
 
 use crate::core::config::Config;
@@ -239,13 +240,27 @@ impl LuaEngine {
         profile_tbl.set("activate", activate_fn)?;
         bread.set("profile", profile_tbl)?;
 
+        // Fire-and-forget: the process is launched on a blocking thread and the
+        // Lua handler returns immediately. The Lua runtime is never stalled waiting
+        // for a slow or hanging process. Exit code is logged but not returned to Lua.
         let exec_fn = self.lua.create_function(move |_lua, cmd: String| {
-            let status = std::process::Command::new("sh")
-                .arg("-lc")
-                .arg(&cmd)
-                .status()
-                .map_err(mlua::Error::external)?;
-            Ok(status.code().unwrap_or_default())
+            task::spawn_blocking(move || {
+                match std::process::Command::new("sh")
+                    .arg("-lc")
+                    .arg(&cmd)
+                    .status()
+                {
+                    Ok(status) => {
+                        if !status.success() {
+                            tracing::warn!(cmd = %cmd, code = ?status.code(), "bread.exec exited non-zero");
+                        }
+                    }
+                    Err(err) => {
+                        tracing::error!(cmd = %cmd, error = %err, "bread.exec failed to spawn");
+                    }
+                }
+            });
+            Ok(())
         })?;
         bread.set("exec", exec_fn)?;
 
