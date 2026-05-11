@@ -52,13 +52,7 @@ impl Adapter for UdevAdapter {
 
     async fn run(&self, tx: mpsc::Sender<RawEvent>) -> Result<()> {
         debug!("udev adapter started");
-        match run_udev_monitor(self.subsystems.clone(), tx.clone()).await {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                tracing::warn!(error = %err, "udev netlink monitor unavailable, falling back to sysfs polling (add user to 'plugdev' group for real-time events)");
-            }
-        }
-
+        
         // Fallback: poll sysfs every 2 seconds for environments where the
         // netlink socket is unavailable (missing plugdev membership, containers, etc).
         let mut known: HashMap<String, ScannedDevice> = scan_devices(&self.subsystems)
@@ -101,67 +95,6 @@ struct ScannedDevice {
     id: String,
     name: String,
     subsystem: String,
-}
-
-async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -> Result<()> {
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut builder = udev::MonitorBuilder::new()?;
-        for subsystem in &subsystems {
-            builder = builder.match_subsystem(subsystem)?;
-        }
-        let monitor = builder.listen()?;
-
-        for event in monitor.iter() {
-            let action = event
-                .action()
-                .map(|a| a.to_string_lossy().to_string())
-                .unwrap_or_else(|| "change".to_string());
-            let subsystem = event
-                .subsystem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-            let name = event
-                .property_value("ID_MODEL")
-                .or_else(|| event.property_value("NAME"))
-                .map(|v| v.to_string_lossy().to_string())
-                .or_else(|| event.devnode().map(|n| n.display().to_string()))
-                .unwrap_or_else(|| "unknown".to_string());
-            let id = event
-                .syspath()
-                .to_string_lossy()
-                .to_string();
-
-            let msg = RawEvent {
-                source: AdapterSource::Udev,
-                kind: "udev.change".to_string(),
-                payload: json!({
-                    "action": action,
-                    "id": id,
-                    "name": name,
-                    "subsystem": subsystem,
-                    "id_input_keyboard": prop_bool(&event, "ID_INPUT_KEYBOARD"),
-                    "id_input_mouse": prop_bool(&event, "ID_INPUT_MOUSE"),
-                    "id_input_joystick": prop_bool(&event, "ID_INPUT_JOYSTICK"),
-                    "id_input_touchpad": prop_bool(&event, "ID_INPUT_TOUCHPAD"),
-                    "id_input_tablet": prop_bool(&event, "ID_INPUT_TABLET"),
-                    "id_usb_class": prop_str(&event, "ID_USB_CLASS"),
-                    "id_usb_interfaces": prop_str(&event, "ID_USB_INTERFACES"),
-                    "id_vendor": prop_str(&event, "ID_VENDOR"),
-                    "id_model": prop_str(&event, "ID_MODEL"),
-                }),
-                timestamp: now_unix_ms(),
-            };
-
-            if tx.blocking_send(msg).is_err() {
-                break;
-            }
-        }
-
-        Ok(())
-    })
-    .await??;
-
-    Ok(())
 }
 
 fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {

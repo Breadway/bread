@@ -1,9 +1,9 @@
 # Maintainer: Your Name <you@example.com>
 
-pkgname=breadd
+pkgname=bread
 pkgver=0.1.0
 pkgrel=1
-pkgdesc="Bread daemon - event normalizer and automation runtime"
+pkgdesc="Bread - event normalizer and automation runtime"
 arch=('x86_64')
 url="https://github.com/Breadway/bread"
 license=('MIT')
@@ -19,7 +19,6 @@ build() {
 
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
-  install -Dm755 target/release/breadd "${pkgdir}/usr/bin/breadd"
   install -Dm755 target/release/bread "${pkgdir}/usr/bin/bread"
-  install -Dm644 packaging/systemd/breadd.service "${pkgdir}/usr/lib/systemd/user/breadd.service"
+  install -Dm644 packaging/systemd/bread.service "${pkgdir}/usr/lib/systemd/user/bread.service"
 }
