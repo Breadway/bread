@@ -36,6 +36,7 @@ pub enum StateCommand {
         id: SubscriptionId,
     },
     ClearSubscriptions,
+    ClearModules,
     SetModuleStatus {
         name: String,
         status: ModuleLoadState,
@@ -110,6 +111,10 @@ impl StateHandle {
 
     pub fn clear_subscriptions(&self) {
         let _ = self.command_tx.send(StateCommand::ClearSubscriptions);
+    }
+
+    pub fn clear_modules(&self) {
+        let _ = self.command_tx.send(StateCommand::ClearModules);
     }
 
     pub fn set_module_status(
@@ -235,6 +240,9 @@ async fn handle_command(
             subscriptions.clear();
             watches.clear();
             subscription_count.store(0, Ordering::Relaxed);
+        }
+        StateCommand::ClearModules => {
+            state.write().await.modules.clear();
         }
         StateCommand::SetModuleStatus {
             name,
@@ -421,6 +429,14 @@ fn apply_device_change(state: &mut RuntimeState, data: &Value, connected: bool) 
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string(),
+            vendor_id: data
+                .get("vendor_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            product_id: data
+                .get("product_id")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
         });
     } else {
         state.devices.connected.retain(|d| d.id != id);
