@@ -289,33 +289,104 @@ fn split_hyprland_fields(data: &str) -> Vec<&str> {
 }
 
 fn classify_device(payload: &Value) -> DeviceClass {
-    let name = payload
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_lowercase();
     let subsystem = payload
         .get("subsystem")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_lowercase();
 
-    if name.contains("dock") {
-        return DeviceClass::Dock;
-    }
-    if subsystem == "input" && name.contains("keyboard") {
+    // --- Property-based classification (reliable, hardware-agnostic) ---
+
+    // udev sets ID_INPUT_KEYBOARD=1 for anything that presents as a keyboard HID device.
+    if payload.get("id_input_keyboard").and_then(Value::as_bool).unwrap_or(false) {
         return DeviceClass::Keyboard;
     }
-    if subsystem == "input" && name.contains("mouse") {
+
+    // ID_INPUT_MOUSE=1 covers mice and trackballs.
+    if payload.get("id_input_mouse").and_then(Value::as_bool).unwrap_or(false) {
         return DeviceClass::Mouse;
     }
+
+    // ID_INPUT_TABLET=1 covers drawing tablets (Wacom etc).
+    if payload.get("id_input_tablet").and_then(Value::as_bool).unwrap_or(false) {
+        return DeviceClass::Tablet;
+    }
+
+    // USB class 0x09 = Hub. Docks expose a hub interface; they also typically
+    // expose video (0x0e), audio (0x01), and ethernet (CDC 0x02) interfaces.
+    // We check for hub + at least one of those secondary interfaces.
+    if let Some(ifaces) = payload.get("id_usb_interfaces").and_then(Value::as_str) {
+        let ifaces_lc = ifaces.to_lowercase();
+        let has_hub = ifaces_lc.contains(":0900") || ifaces_lc.contains(":0902");
+        let has_secondary = ifaces_lc.contains(":0e")   // video
+            || ifaces_lc.contains(":0200") // CDC ethernet
+            || ifaces_lc.contains(":0100") // audio
+            || ifaces_lc.contains(":0801"); // mass storage
+        if has_hub && has_secondary {
+            return DeviceClass::Dock;
+        }
+    }
+
+    // USB class 0x01 = Audio.
+    if let Some(cls) = payload.get("id_usb_class").and_then(Value::as_str) {
+        if cls == "01" || cls.to_lowercase() == "0x01" {
+            return DeviceClass::Audio;
+        }
+        // USB class 0x08 = Mass Storage.
+        if cls == "08" || cls.to_lowercase() == "0x08" {
+            return DeviceClass::Storage;
+        }
+    }
+
+    // DRM subsystem = display connector.
     if subsystem == "drm" {
         return DeviceClass::Display;
     }
-    if subsystem == "sound" || name.contains("audio") {
+
+    // Block devices = storage.
+    if subsystem == "block" {
+        return DeviceClass::Storage;
+    }
+
+    // Sound subsystem = audio.
+    if subsystem == "sound" {
         return DeviceClass::Audio;
     }
-    if subsystem == "block" || name.contains("storage") {
+
+    // --- Name-based fallback (catches user-registered patterns and obvious names) ---
+    // This runs last so the property-based rules above always win.
+
+    let name = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("id_model").and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let vendor = payload
+        .get("id_vendor")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+
+    let combined = format!("{name} {vendor}");
+
+    if combined.contains("dock") || combined.contains("hub") || combined.contains("thunderbolt") {
+        return DeviceClass::Dock;
+    }
+    if combined.contains("keyboard") || combined.contains("kbd") {
+        return DeviceClass::Keyboard;
+    }
+    if combined.contains("mouse") || combined.contains("trackball") || combined.contains("trackpoint") {
+        return DeviceClass::Mouse;
+    }
+    if combined.contains("tablet") || combined.contains("wacom") || combined.contains("stylus") {
+        return DeviceClass::Tablet;
+    }
+    if combined.contains("audio") || combined.contains("headset") || combined.contains("speaker") || combined.contains("dac") {
+        return DeviceClass::Audio;
+    }
+    if combined.contains("storage") || combined.contains("drive") || combined.contains("flash") || combined.contains("disk") {
         return DeviceClass::Storage;
     }
 

@@ -20,6 +20,6 @@ build() {
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
   install -Dm755 target/release/breadd "${pkgdir}/usr/bin/breadd"
-  install -Dm755 target/release/bread-cli "${pkgdir}/usr/bin/bread-cli"
+  install -Dm755 target/release/bread "${pkgdir}/usr/bin/bread"
   install -Dm644 packaging/systemd/breadd.service "${pkgdir}/usr/lib/systemd/user/breadd.service"
 }
