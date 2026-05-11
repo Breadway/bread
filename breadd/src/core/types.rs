@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
@@ -121,6 +122,8 @@ pub struct ModuleStatus {
     pub name: String,
     pub status: ModuleLoadState,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub store: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,4 +132,6 @@ pub enum ModuleLoadState {
     Loaded,
     LoadError,
     NotFound,
+    Degraded,
+    Disabled,
 }

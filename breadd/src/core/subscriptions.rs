@@ -35,7 +35,7 @@ impl SubscriptionTable {
         // swap_remove moves the last element into `idx`. We need to update by_id
         // for that element. But first, remove its stale entry (it was at the last
         // position before the swap); then re-insert it at the new position.
-        let last_idx = self.entries.len() - 1;
+        let _last_idx = self.entries.len() - 1;
         self.entries.swap_remove(idx);
 
         if idx < self.entries.len() {
@@ -68,5 +68,94 @@ fn matches_pattern(pattern: &str, event_name: &str) -> bool {
         return event_name.starts_with(prefix);
     }
 
-    pattern == event_name
+    if let Some(prefix) = pattern.strip_suffix(".**") {
+        if event_name == prefix {
+            return true;
+        }
+    }
+
+    matches_glob(pattern.as_bytes(), event_name.as_bytes())
+}
+
+fn matches_glob(pattern: &[u8], text: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+
+    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
+        let mut idx = 2;
+        while pattern.len() >= idx + 2 && pattern[idx] == b'*' && pattern[idx + 1] == b'*' {
+            idx += 2;
+        }
+        let rest = &pattern[idx..];
+        if rest.is_empty() {
+            return true;
+        }
+        for offset in 0..=text.len() {
+            if matches_glob(rest, &text[offset..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    match pattern[0] {
+        b'*' => {
+            let mut offset = 0;
+            loop {
+                if matches_glob(&pattern[1..], &text[offset..]) {
+                    return true;
+                }
+                if offset == text.len() || text[offset] == b'.' {
+                    break;
+                }
+                offset += 1;
+            }
+            false
+        }
+        b'?' => {
+            if text.is_empty() || text[0] == b'.' {
+                return false;
+            }
+            matches_glob(&pattern[1..], &text[1..])
+        }
+        ch => {
+            if text.first().copied() != Some(ch) {
+                return false;
+            }
+            matches_glob(&pattern[1..], &text[1..])
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_pattern;
+
+    #[test]
+    fn exact_match() {
+        assert!(matches_pattern("bread.device.dock.connected", "bread.device.dock.connected"));
+        assert!(!matches_pattern("bread.device.dock.connected", "bread.device.dock.disconnected"));
+    }
+
+    #[test]
+    fn single_segment_wildcard() {
+        assert!(matches_pattern("bread.device.*", "bread.device.dock.connected"));
+        assert!(matches_pattern("bread.device.*", "bread.device.foo"));
+        assert!(!matches_pattern("bread.device.*", "bread.device"));
+    }
+
+    #[test]
+    fn recursive_wildcard() {
+        assert!(matches_pattern("bread.device.**", "bread.device.dock.connected"));
+        assert!(matches_pattern("bread.**", "bread.device.dock.connected"));
+        assert!(matches_pattern("bread.**", "bread"));
+    }
+
+    #[test]
+    fn single_char_wildcard() {
+        assert!(matches_pattern("bread.monitor.?", "bread.monitor.1"));
+        assert!(!matches_pattern("bread.monitor.?", "bread.monitor.10"));
+        assert!(!matches_pattern("bread.monitor.?", "bread.monitor."));
+    }
 }
