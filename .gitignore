@@ -3,4 +3,5 @@ Overview.md
 DAEMON.md
 .claude
 CLAUDE.md
-.github/
+.github/workflows/ci.yml
+.github
