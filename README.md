@@ -191,28 +191,41 @@ Events follow the namespace convention `bread.<subsystem>.<noun>.<verb>`.
 | `bread.system.startup` | Daemon fully initialized |
 | `bread.device.connected` | Any device attached |
 | `bread.device.disconnected` | Any device removed |
-| `bread.device.dock.connected` | Dock attached |
-| `bread.device.dock.disconnected` | Dock removed |
-| `bread.device.keyboard.connected` | Keyboard attached |
+| `bread.device.changed` | Any device changed |
+| `bread.device.<class>.connected` | Device attached by class |
+| `bread.device.<class>.disconnected` | Device removed by class |
+| `bread.device.<class>.changed` | Device changed by class |
 | `bread.monitor.connected` | Display connected |
 | `bread.monitor.disconnected` | Display disconnected |
 | `bread.workspace.changed` | Active workspace changed |
+| `bread.workspace.created` | Workspace created |
+| `bread.workspace.destroyed` | Workspace destroyed |
 | `bread.window.focus.changed` | Focused window changed |
+| `bread.window.focused` | Focus moved (address only) |
 | `bread.window.opened` | Window opened |
 | `bread.window.closed` | Window closed |
+| `bread.window.moved` | Window moved workspaces |
 | `bread.power.ac.connected` | AC adapter plugged in |
 | `bread.power.ac.disconnected` | AC adapter unplugged |
 | `bread.power.battery.low` | Battery ≤ 20% |
 | `bread.power.battery.very_low` | Battery ≤ 10% |
 | `bread.power.battery.critical` | Battery ≤ 5% |
 | `bread.power.battery.full` | Battery at 100% |
-| `bread.network.connected` | Network interface came online |
-| `bread.network.disconnected` | Network interface went offline |
-| `bread.profile.activated` | Profile switched |
+| `bread.power.changed` | Power state changed (fallback) |
+| `bread.network.connected` | Network came online |
+| `bread.network.disconnected` | Network went offline |
+| `bread.profile.activated` | Profile switched via IPC |
+| `bread.notify.sent` | Notification dispatched |
+| `bread.state.changed.<path>` | State watch fired |
+| `bread.hyprland.event` | Raw Hyprland event (unhandled kind) |
 
 ---
 
 ## Lua API
+
+Full reference and usage notes live in [documentation.md](documentation.md). This section is a compact quick-reference to every API that exists today.
+
+Practical walkthroughs and ports from existing Hyprland configs live in [Examples.md](Examples.md).
 
 ### Events
 
@@ -239,6 +252,14 @@ end)
 
 -- Emit a custom event (for cross-module communication)
 bread.emit("mymodule.something", { key = "value" })
+
+-- Wait for an event (coroutine-only)
+bread.spawn(function()
+    local event = bread.wait("bread.device.dock.connected", { timeout = 5000 })
+    if event then
+        bread.log("dock arrived")
+    end
+end)
 ```
 
 ### State
@@ -254,6 +275,15 @@ local devices = bread.state.get("devices")
 bread.state.watch("active_workspace", function(new, old)
     print("workspace changed from " .. tostring(old) .. " to " .. tostring(new))
 end)
+
+-- Convenience helpers
+local monitors = bread.state.monitors()
+local active_ws = bread.state.active_workspace()
+local active_win = bread.state.active_window()
+local devices = bread.state.devices()
+local power = bread.state.power()
+local network = bread.state.network()
+local profile = bread.state.profile()
 ```
 
 ### Profiles
@@ -291,6 +321,10 @@ bread.cancel(id)
 local fn = bread.debounce(200, function(event)
     reconfigure_monitors()
 end)
+
+-- Cancel a timer
+local timer_id = bread.after(500, function() bread.exec("echo ready") end)
+bread.cancel(timer_id)
 ```
 
 ### Logging
@@ -299,6 +333,44 @@ end)
 bread.log("Module loaded")
 bread.warn("Unexpected state")
 bread.error("Something failed")
+
+### Hyprland
+
+```lua
+bread.hyprland.dispatch("workspace", "2")
+bread.hyprland.keyword("monitor", "HDMI-A-1, 2560x1440, 0x0, 1")
+
+local win = bread.hyprland.active_window()
+local monitors = bread.hyprland.monitors()
+local workspaces = bread.hyprland.workspaces()
+local clients = bread.hyprland.clients()
+
+-- Raw Hyprland event filtering (kind matches hyprland event name)
+bread.hyprland.on_raw("openwindow", function(event)
+    bread.log(event.data.raw)
+end)
+```
+
+### Modules
+
+```lua
+local M = bread.module({ name = "my.module", version = "0.1.0", after = { "bread.devices" } })
+
+function M.on_load()
+    bread.on("bread.device.*", function(event)
+        bread.log(event.event)
+    end)
+end
+
+function M.on_unload()
+    bread.log("unloaded")
+end
+
+M.store.set("last_seen", os.time())
+local last = M.store.get("last_seen")
+
+return M
+```
 ```
 
 ---
