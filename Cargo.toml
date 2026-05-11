@@ -2,7 +2,8 @@
 members = [
     "bread-shared",
     "breadd",
-    "bread-cli"
+    "bread-cli",
+    "bread-sync",
 ]
 resolver = "2"
 
@@ -13,3 +14,8 @@ tokio = { version = "1.40", features = ["full"] }
 anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+git2 = "0.18"
+dirs = "5.0"
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
+glob = "0.3"

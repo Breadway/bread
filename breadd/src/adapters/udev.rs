@@ -52,7 +52,13 @@ impl Adapter for UdevAdapter {
 
     async fn run(&self, tx: mpsc::Sender<RawEvent>) -> Result<()> {
         debug!("udev adapter started");
-        
+        match run_udev_monitor(self.subsystems.clone(), tx.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                tracing::warn!(error = %err, "udev netlink monitor unavailable, falling back to sysfs polling (add user to 'plugdev' group for real-time events)");
+            }
+        }
+
         // Fallback: poll sysfs every 2 seconds for environments where the
         // netlink socket is unavailable (missing plugdev membership, containers, etc).
         let mut known: HashMap<String, ScannedDevice> = scan_devices(&self.subsystems)
@@ -95,6 +101,71 @@ struct ScannedDevice {
     id: String,
     name: String,
     subsystem: String,
+    vendor_id: Option<String>,
+    product_id: Option<String>,
+}
+
+async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -> Result<()> {
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut builder = udev::MonitorBuilder::new()?;
+        for subsystem in &subsystems {
+            builder = builder.match_subsystem(subsystem)?;
+        }
+        let monitor = builder.listen()?;
+
+        for event in monitor.iter() {
+            let action = event
+                .action()
+                .map(|a| a.to_string_lossy().to_string())
+                .unwrap_or_else(|| "change".to_string());
+            let subsystem = event
+                .subsystem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let name = event
+                .property_value("ID_MODEL")
+                .or_else(|| event.property_value("NAME"))
+                .map(|v| v.to_string_lossy().to_string())
+                .or_else(|| event.devnode().map(|n| n.display().to_string()))
+                .unwrap_or_else(|| "unknown".to_string());
+            let id = event
+                .syspath()
+                .to_string_lossy()
+                .to_string();
+
+            let msg = RawEvent {
+                source: AdapterSource::Udev,
+                kind: "udev.change".to_string(),
+                payload: json!({
+                    "action": action,
+                    "id": id,
+                    "name": name,
+                    "subsystem": subsystem,
+                    "id_input_keyboard": prop_bool(&event, "ID_INPUT_KEYBOARD"),
+                    "id_input_mouse": prop_bool(&event, "ID_INPUT_MOUSE"),
+                    "id_input_joystick": prop_bool(&event, "ID_INPUT_JOYSTICK"),
+                    "id_input_touchpad": prop_bool(&event, "ID_INPUT_TOUCHPAD"),
+                    "id_input_tablet": prop_bool(&event, "ID_INPUT_TABLET"),
+                    "id_usb_class": prop_str(&event, "ID_USB_CLASS"),
+                    "id_usb_interfaces": prop_str(&event, "ID_USB_INTERFACES"),
+                    "id_vendor": prop_str(&event, "ID_VENDOR"),
+                    "id_model": prop_str(&event, "ID_MODEL"),
+                    "vendor_id": prop_str(&event, "ID_VENDOR_ID"),
+                    "product_id": prop_str(&event, "ID_MODEL_ID"),
+                }),
+                timestamp: now_unix_ms(),
+            };
+
+            if tx.blocking_send(msg).is_err() {
+                break;
+            }
+        }
+
+        Ok(())
+    })
+    .await??;
+
+    Ok(())
 }
 
 fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
@@ -116,11 +187,19 @@ fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
             .or_else(|| dev.sysname().to_str().map(ToString::to_string))
             .unwrap_or_else(|| "unknown".to_string());
         let id = dev.syspath().to_string_lossy().to_string();
+        let vendor_id = dev
+            .property_value("ID_VENDOR_ID")
+            .map(|v| v.to_string_lossy().to_string());
+        let product_id = dev
+            .property_value("ID_MODEL_ID")
+            .map(|v| v.to_string_lossy().to_string());
 
         out.push(ScannedDevice {
             id,
             name,
             subsystem,
+            vendor_id,
+            product_id,
         });
     }
 
@@ -136,6 +215,8 @@ fn raw_change_event(action: &str, dev: &ScannedDevice) -> RawEvent {
             "id": dev.id,
             "name": dev.name,
             "subsystem": dev.subsystem,
+            "vendor_id": dev.vendor_id,
+            "product_id": dev.product_id,
         }),
         timestamp: now_unix_ms(),
     }
@@ -159,6 +240,8 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                         id: format!("drm:{name}"),
                         name,
                         subsystem: "drm".to_string(),
+                        vendor_id: None,
+                        product_id: None,
                     });
                 }
             }
@@ -175,6 +258,8 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                     id: format!("input:{name}"),
                     name,
                     subsystem: "input".to_string(),
+                    vendor_id: None,
+                    product_id: None,
                 });
             }
         }
@@ -190,6 +275,8 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                     id: format!("power_supply:{name}"),
                     name,
                     subsystem: "power_supply".to_string(),
+                    vendor_id: None,
+                    product_id: None,
                 });
             }
         }
@@ -202,10 +289,19 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.contains(':') && name.chars().any(|c| c.is_ascii_digit()) {
+                    let syspath = entry.path();
+                    let vendor_id = fs::read_to_string(syspath.join("idVendor"))
+                        .ok()
+                        .map(|s| s.trim().to_string());
+                    let product_id = fs::read_to_string(syspath.join("idProduct"))
+                        .ok()
+                        .map(|s| s.trim().to_string());
                     out.push(ScannedDevice {
                         id: format!("usb:{name}"),
                         name,
                         subsystem: "usb".to_string(),
+                        vendor_id,
+                        product_id,
                     });
                 }
             }

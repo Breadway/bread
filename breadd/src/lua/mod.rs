@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent};
+use libc;
 use mlua::{Error as LuaError, Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -250,6 +251,7 @@ impl LuaEngine {
         self.run_on_unload();
         self.cancel_all_timers();
         self.state_handle.clear_subscriptions();
+        self.state_handle.clear_modules();
         self.lua = Lua::new();
         self.handlers
             .lock()
@@ -837,6 +839,66 @@ impl LuaEngine {
         })?;
         bread.set("module", module_fn)?;
 
+        // bread.machine — machine name and tags from sync.toml
+        let machine_tbl = self.lua.create_table()?;
+
+        let name_fn = self.lua.create_function(|_lua, ()| {
+            Ok(lua_machine_name())
+        })?;
+        machine_tbl.set("name", name_fn)?;
+
+        let tags_fn = self.lua.create_function(|lua, ()| {
+            let tags = lua_machine_tags();
+            let tbl = lua.create_table()?;
+            for (i, tag) in tags.iter().enumerate() {
+                tbl.set(i + 1, tag.clone())?;
+            }
+            Ok(tbl)
+        })?;
+        machine_tbl.set("tags", tags_fn)?;
+
+        let has_tag_fn = self.lua.create_function(|_lua, tag: String| {
+            Ok(lua_machine_tags().contains(&tag))
+        })?;
+        machine_tbl.set("has_tag", has_tag_fn)?;
+
+        bread.set("machine", machine_tbl)?;
+
+        // bread.fs — file system helpers
+        let fs_tbl = self.lua.create_table()?;
+
+        let write_fn = self.lua.create_function(|_lua, (path, content): (String, String)| {
+            let expanded = lua_expand_path(&path);
+            if let Some(parent) = expanded.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| LuaError::external(e.to_string()))?;
+            }
+            std::fs::write(&expanded, content)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        fs_tbl.set("write", write_fn)?;
+
+        let read_fn = self.lua.create_function(|_lua, path: String| {
+            let expanded = lua_expand_path(&path);
+            match std::fs::read_to_string(&expanded) {
+                Ok(s) => Ok(Some(s)),
+                Err(_) => Ok(None),
+            }
+        })?;
+        fs_tbl.set("read", read_fn)?;
+
+        let exists_fn = self.lua.create_function(|_lua, path: String| {
+            Ok(lua_expand_path(&path).exists())
+        })?;
+        fs_tbl.set("exists", exists_fn)?;
+
+        let expand_fn = self.lua.create_function(|_lua, path: String| {
+            Ok(lua_expand_path(&path).to_string_lossy().to_string())
+        })?;
+        fs_tbl.set("expand", expand_fn)?;
+
+        bread.set("fs", fs_tbl)?;
+
         globals.set("bread", bread)?;
         self.install_require_loader()?;
         self.install_wait_helper()?;
@@ -927,7 +989,7 @@ impl LuaEngine {
 
     fn load_module(&self, decl: &ModuleDecl) -> Result<()> {
         self.set_current_module(Some(decl.name.clone()));
-        let result = if let Some(source) = decl.source.as_deref() {
+        let result = if let Some(source) = decl.source {
             self.load_lua_source(source, &decl.name)
         } else {
             self.load_lua_file(&decl.path, &decl.name, decl.builtin)
@@ -1296,16 +1358,31 @@ impl LuaEngine {
             Err(LuaError::RuntimeError(MODULE_DECL_ABORT.to_string()))
         })?;
 
+        // Build a minimal bread stub: bread.module() captures the decl and aborts;
+        // all other bread.* accesses return a no-op callable so modules that call
+        // bread.log() or bread.fs.exists() before bread.module() don't crash during scanning.
         let bread = lua.create_table()?;
         bread.set("module", module_fn)?;
         lua.globals().set("bread", bread)?;
+        lua.load(r#"
+            local _noop = function(...) end
+            local _noop_tbl_mt = { __index = function() return _noop end, __call = _noop }
+            local _noop_tbl = setmetatable({}, _noop_tbl_mt)
+            setmetatable(bread, {
+                __index = function(_, k)
+                    if k == "module" then return rawget(bread, "module") end
+                    return _noop_tbl
+                end
+            })
+        "#).exec()?;
 
         let src = fs::read_to_string(path)?;
         let result = lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec();
+        // bread.module() throws MODULE_DECL_ABORT to abort scanning early.
+        // mlua may wrap the error in CallbackError, so match on string content.
         if let Err(err) = result {
-            match err {
-                LuaError::RuntimeError(msg) if msg == MODULE_DECL_ABORT => {}
-                other => return Err(anyhow!(other.to_string())),
+            if !err.to_string().contains(MODULE_DECL_ABORT) {
+                return Err(anyhow!(err.to_string()));
             }
         }
 
@@ -1557,6 +1634,91 @@ fn module_store_set(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: St
         builtin: false,
         store,
     });
+}
+
+fn lua_expand_path(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        if let Some(home) = dirs_home() {
+            return home;
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs_home() {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+fn dirs_home() -> Option<std::path::PathBuf> {
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(std::path::PathBuf::from(home));
+    }
+    None
+}
+
+fn lua_machine_name() -> String {
+    if let Ok(sync_toml) = read_sync_toml() {
+        if let Some(name) = sync_toml
+            .get("machine")
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+        {
+            return name.to_string();
+        }
+    }
+    lua_hostname()
+}
+
+fn lua_hostname() -> String {
+    // Try gethostname via libc
+    let mut buf = [0u8; 256];
+    unsafe {
+        if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0 {
+            if let Ok(s) = std::ffi::CStr::from_ptr(buf.as_ptr() as *const libc::c_char).to_str() {
+                if !s.is_empty() {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    // Fall back to /etc/hostname
+    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+        let trimmed = h.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("HOST"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn lua_machine_tags() -> Vec<String> {
+    if let Ok(sync_toml) = read_sync_toml() {
+        if let Some(tags) = sync_toml
+            .get("machine")
+            .and_then(|m| m.get("tags"))
+            .and_then(|v| v.as_array())
+        {
+            return tags
+                .iter()
+                .filter_map(|v| v.as_str().map(ToString::to_string))
+                .collect();
+        }
+    }
+    vec![]
+}
+
+fn read_sync_toml() -> anyhow::Result<toml::Value> {
+    let config_dir = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|_| {
+            std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from(".config"));
+    let path = config_dir.join("bread").join("sync.toml");
+    let raw = std::fs::read_to_string(path)?;
+    Ok(raw.parse::<toml::Value>()?)
 }
 
 const BUILTIN_MONITORS: &str = r#"
