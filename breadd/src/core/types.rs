@@ -57,6 +57,10 @@ pub struct Device {
     pub name: String,
     pub class: DeviceClass,
     pub subsystem: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub product_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
