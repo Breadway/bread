@@ -101,6 +101,8 @@ struct ScannedDevice {
     id: String,
     name: String,
     subsystem: String,
+    vendor_id: Option<String>,
+    product_id: Option<String>,
 }
 
 async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -> Result<()> {
@@ -148,6 +150,8 @@ async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -
                     "id_usb_interfaces": prop_str(&event, "ID_USB_INTERFACES"),
                     "id_vendor": prop_str(&event, "ID_VENDOR"),
                     "id_model": prop_str(&event, "ID_MODEL"),
+                    "vendor_id": prop_str(&event, "ID_VENDOR_ID"),
+                    "product_id": prop_str(&event, "ID_MODEL_ID"),
                 }),
                 timestamp: now_unix_ms(),
             };
@@ -183,11 +187,19 @@ fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
             .or_else(|| dev.sysname().to_str().map(ToString::to_string))
             .unwrap_or_else(|| "unknown".to_string());
         let id = dev.syspath().to_string_lossy().to_string();
+        let vendor_id = dev
+            .property_value("ID_VENDOR_ID")
+            .map(|v| v.to_string_lossy().to_string());
+        let product_id = dev
+            .property_value("ID_MODEL_ID")
+            .map(|v| v.to_string_lossy().to_string());
 
         out.push(ScannedDevice {
             id,
             name,
             subsystem,
+            vendor_id,
+            product_id,
         });
     }
 
@@ -203,6 +215,8 @@ fn raw_change_event(action: &str, dev: &ScannedDevice) -> RawEvent {
             "id": dev.id,
             "name": dev.name,
             "subsystem": dev.subsystem,
+            "vendor_id": dev.vendor_id,
+            "product_id": dev.product_id,
         }),
         timestamp: now_unix_ms(),
     }
@@ -226,6 +240,8 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                         id: format!("drm:{name}"),
                         name,
                         subsystem: "drm".to_string(),
+                        vendor_id: None,
+                        product_id: None,
                     });
                 }
             }
@@ -242,6 +258,8 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                     id: format!("input:{name}"),
                     name,
                     subsystem: "input".to_string(),
+                    vendor_id: None,
+                    product_id: None,
                 });
             }
         }
@@ -257,6 +275,8 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                     id: format!("power_supply:{name}"),
                     name,
                     subsystem: "power_supply".to_string(),
+                    vendor_id: None,
+                    product_id: None,
                 });
             }
         }
@@ -269,10 +289,19 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 if !name.contains(':') && name.chars().any(|c| c.is_ascii_digit()) {
+                    let syspath = entry.path();
+                    let vendor_id = fs::read_to_string(syspath.join("idVendor"))
+                        .ok()
+                        .map(|s| s.trim().to_string());
+                    let product_id = fs::read_to_string(syspath.join("idProduct"))
+                        .ok()
+                        .map(|s| s.trim().to_string());
                     out.push(ScannedDevice {
                         id: format!("usb:{name}"),
                         name,
                         subsystem: "usb".to_string(),
+                        vendor_id,
+                        product_id,
                     });
                 }
             }

@@ -267,6 +267,39 @@ impl Server {
                     "recent_errors": recent_errors,
                 }))
             }
+            "sync.status" => {
+                let cfg_home = std::env::var("XDG_CONFIG_HOME")
+                    .map(std::path::PathBuf::from)
+                    .or_else(|_| {
+                        std::env::var("HOME")
+                            .map(|h| std::path::PathBuf::from(h).join(".config"))
+                    })
+                    .unwrap_or_else(|_| std::path::PathBuf::from(".config"));
+                let sync_path = cfg_home.join("bread").join("sync.toml");
+                match std::fs::read_to_string(&sync_path)
+                    .ok()
+                    .and_then(|s| s.parse::<toml::Value>().ok())
+                {
+                    Some(toml) => {
+                        let machine = toml
+                            .get("machine")
+                            .and_then(|m| m.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let remote = toml
+                            .get("remote")
+                            .and_then(|r| r.get("url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        Ok(json!({
+                            "initialized": true,
+                            "machine": machine,
+                            "remote": remote,
+                        }))
+                    }
+                    None => Ok(json!({ "initialized": false })),
+                }
+            }
             "events.replay" => {
                 let since_ms = req.params.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
                 let cutoff = now_unix_ms().saturating_sub(since_ms);
