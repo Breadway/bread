@@ -1,20 +1,25 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent};
-use mlua::{Function, Lua, LuaSerdeExt, RegistryKey, Value};
-use tokio::sync::{mpsc, oneshot};
+use mlua::{Error as LuaError, Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
+use serde_json::Value as JsonValue;
+use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task;
+use tokio::time::{interval, sleep};
 use tracing::{error, info, warn};
 
 use crate::core::config::Config;
 use crate::core::state_engine::StateHandle;
 use crate::core::subscriptions::SubscriptionId;
-use crate::core::types::ModuleLoadState;
+use crate::core::types::{ModuleLoadState, RuntimeState};
 
 pub enum LuaMessage {
     Event {
@@ -23,6 +28,9 @@ pub enum LuaMessage {
     },
     SubscriptionCancelled {
         id: SubscriptionId,
+    },
+    TimerFired {
+        id: TimerId,
     },
     Reload {
         reply: oneshot::Sender<std::result::Result<(), String>>,
@@ -75,7 +83,7 @@ pub fn spawn_runtime(
                 .expect("failed to create lua runtime thread");
 
             rt.block_on(async move {
-                let mut engine = match LuaEngine::new(config, state_handle, emit_tx) {
+                let mut engine = match LuaEngine::new(config, state_handle, emit_tx, thread_tx.clone()) {
                     Ok(engine) => engine,
                     Err(err) => {
                         error!(error = %err, "failed to initialize lua engine");
@@ -100,6 +108,11 @@ pub fn spawn_runtime(
                         LuaMessage::SubscriptionCancelled { id } => {
                             engine.remove_handler(id);
                         }
+                        LuaMessage::TimerFired { id } => {
+                            if let Err(err) = engine.handle_timer(id) {
+                                error!(error = %err, "lua timer handler failed");
+                            }
+                        }
                         LuaMessage::Reload { reply } => {
                             let result = engine.reload_internal().map_err(|e| e.to_string());
                             let _ = reply.send(result);
@@ -118,39 +131,114 @@ pub fn spawn_runtime(
     Ok(handle)
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub(crate) struct TimerId(u64);
+
+struct HandlerEntry {
+    callback: RegistryKey,
+    filter: Option<RegistryKey>,
+    module: Option<String>,
+    raw_kind: Option<String>,
+    kind: HandlerKind,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HandlerKind {
+    Event,
+    StateWatch,
+}
+
+struct TimerEntry {
+    callback: RegistryKey,
+    repeating: bool,
+    cancel_tx: watch::Sender<bool>,
+}
+
+#[derive(Clone)]
+struct ModuleDecl {
+    name: String,
+    version: Option<String>,
+    after: Vec<String>,
+    path: PathBuf,
+}
+
+struct ModuleInfo {
+    table_key: RegistryKey,
+}
+
 struct LuaEngine {
     lua: Lua,
-    handlers: Arc<Mutex<HashMap<SubscriptionId, RegistryKey>>>,
+    handlers: Arc<Mutex<HashMap<SubscriptionId, HandlerEntry>>>,
+    watch_ids: Arc<Mutex<HashSet<SubscriptionId>>>,
+    timers: Arc<Mutex<HashMap<TimerId, TimerEntry>>>,
     next_sub_id: Arc<AtomicU64>,
+    next_timer_id: Arc<AtomicU64>,
+    current_module: Arc<Mutex<Option<String>>>,
+    modules: Arc<Mutex<HashMap<String, ModuleInfo>>>,
+    module_decls: Arc<Mutex<HashMap<String, ModuleDecl>>>,
+    module_order: Arc<Mutex<Vec<String>>>,
     state_handle: StateHandle,
     emit_tx: mpsc::UnboundedSender<BreadEvent>,
+    lua_tx: mpsc::UnboundedSender<LuaMessage>,
     entry_point: PathBuf,
     module_path: PathBuf,
 }
 
 impl LuaEngine {
-    fn new(config: Config, state_handle: StateHandle, emit_tx: mpsc::UnboundedSender<BreadEvent>) -> Result<Self> {
+    fn new(
+        config: Config,
+        state_handle: StateHandle,
+        emit_tx: mpsc::UnboundedSender<BreadEvent>,
+        lua_tx: mpsc::UnboundedSender<LuaMessage>,
+    ) -> Result<Self> {
         Ok(Self {
             lua: Lua::new(),
             handlers: Arc::new(Mutex::new(HashMap::new())),
+            watch_ids: Arc::new(Mutex::new(HashSet::new())),
+            timers: Arc::new(Mutex::new(HashMap::new())),
             next_sub_id: Arc::new(AtomicU64::new(1)),
+            next_timer_id: Arc::new(AtomicU64::new(1)),
+            current_module: Arc::new(Mutex::new(None)),
+            modules: Arc::new(Mutex::new(HashMap::new())),
+            module_decls: Arc::new(Mutex::new(HashMap::new())),
+            module_order: Arc::new(Mutex::new(Vec::new())),
             state_handle,
             emit_tx,
+            lua_tx,
             entry_point: config.lua_entry_point(),
             module_path: config.lua_module_path(),
         })
     }
 
     fn reload_internal(&mut self) -> Result<()> {
+        self.run_on_unload();
+        self.cancel_all_timers();
         self.state_handle.clear_subscriptions();
         self.lua = Lua::new();
         self.handlers
             .lock()
             .expect("lua handlers mutex poisoned")
             .clear();
+        self.watch_ids
+            .lock()
+            .expect("lua watch ids mutex poisoned")
+            .clear();
+        self.modules
+            .lock()
+            .expect("lua modules mutex poisoned")
+            .clear();
+        self.module_decls
+            .lock()
+            .expect("lua module decls mutex poisoned")
+            .clear();
+        self.module_order
+            .lock()
+            .expect("lua module order mutex poisoned")
+            .clear();
 
         self.install_api()?;
         self.load_init_and_modules()?;
+        self.run_on_reload();
         info!("lua runtime reloaded");
         Ok(())
     }
@@ -162,16 +250,30 @@ impl LuaEngine {
         let handlers = self.handlers.clone();
         let next_sub_id = self.next_sub_id.clone();
         let state_handle = self.state_handle.clone();
+        let current_module = self.current_module.clone();
         let on_fn = self.lua.create_function(move |lua, (pattern, callback): (String, Function)| {
             let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
             let key = lua.create_registry_value(callback)?;
+            let module = current_module
+                .lock()
+                .map_err(|_| LuaError::external("module context lock poisoned"))?
+                .clone();
             handlers
                 .lock()
-                .map_err(|_| mlua::Error::external("handler lock poisoned"))?
-                .insert(id, key);
+                .map_err(|_| LuaError::external("handler lock poisoned"))?
+                .insert(
+                    id,
+                    HandlerEntry {
+                        callback: key,
+                        filter: None,
+                        module,
+                        raw_kind: None,
+                        kind: HandlerKind::Event,
+                    },
+                );
             state_handle
                 .register_subscription(id, pattern, false)
-                .map_err(mlua::Error::external)?;
+                .map_err(LuaError::external)?;
             Ok(id.0)
         })?;
         bread.set("on", on_fn)?;
@@ -179,19 +281,92 @@ impl LuaEngine {
         let handlers = self.handlers.clone();
         let next_sub_id = self.next_sub_id.clone();
         let state_handle = self.state_handle.clone();
+        let current_module = self.current_module.clone();
         let once_fn = self.lua.create_function(move |lua, (pattern, callback): (String, Function)| {
             let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
             let key = lua.create_registry_value(callback)?;
+            let module = current_module
+                .lock()
+                .map_err(|_| LuaError::external("module context lock poisoned"))?
+                .clone();
             handlers
                 .lock()
-                .map_err(|_| mlua::Error::external("handler lock poisoned"))?
-                .insert(id, key);
+                .map_err(|_| LuaError::external("handler lock poisoned"))?
+                .insert(
+                    id,
+                    HandlerEntry {
+                        callback: key,
+                        filter: None,
+                        module,
+                        raw_kind: None,
+                        kind: HandlerKind::Event,
+                    },
+                );
             state_handle
                 .register_subscription(id, pattern, true)
-                .map_err(mlua::Error::external)?;
+                .map_err(LuaError::external)?;
             Ok(id.0)
         })?;
         bread.set("once", once_fn)?;
+
+        let handlers = self.handlers.clone();
+        let next_sub_id = self.next_sub_id.clone();
+        let state_handle = self.state_handle.clone();
+        let current_module = self.current_module.clone();
+        let filter_fn = self
+            .lua
+            .create_function(move |lua, (pattern, callback, opts): (String, Function, Option<Table>)| {
+                let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+                let key = lua.create_registry_value(callback)?;
+                let filter = if let Some(opts) = opts {
+                    let filter_fn: Function = opts
+                        .get("filter")
+                        .map_err(|_| LuaError::external("missing filter function"))?;
+                    Some(lua.create_registry_value(filter_fn)?)
+                } else {
+                    return Err(LuaError::external("missing filter options"));
+                };
+                let module = current_module
+                    .lock()
+                    .map_err(|_| LuaError::external("module context lock poisoned"))?
+                    .clone();
+                handlers
+                    .lock()
+                    .map_err(|_| LuaError::external("handler lock poisoned"))?
+                    .insert(
+                        id,
+                        HandlerEntry {
+                            callback: key,
+                            filter,
+                            module,
+                            raw_kind: None,
+                            kind: HandlerKind::Event,
+                        },
+                    );
+                state_handle
+                    .register_subscription(id, pattern, false)
+                    .map_err(LuaError::external)?;
+                Ok(id.0)
+            })?;
+        bread.set("filter", filter_fn)?;
+
+        let handlers = self.handlers.clone();
+        let watch_ids = self.watch_ids.clone();
+        let state_handle = self.state_handle.clone();
+        let off_fn = self.lua.create_function(move |_lua, id: u64| {
+            let sub_id = SubscriptionId(id);
+            if let Ok(mut map) = handlers.lock() {
+                map.remove(&sub_id);
+            }
+            state_handle.remove_subscription(sub_id);
+            if let Ok(mut set) = watch_ids.lock() {
+                if set.remove(&sub_id) {
+                    state_handle.remove_watch(sub_id);
+                }
+            }
+            Ok(())
+        })?;
+        bread.set("off", off_fn)?;
 
         let emit_tx = self.emit_tx.clone();
         let emit_fn = self.lua.create_function(move |lua, (event_name, payload): (String, Value)| {
@@ -203,7 +378,7 @@ impl LuaEngine {
             };
             emit_tx
                 .send(BreadEvent::new(event_name, AdapterSource::System, data))
-                .map_err(|_| mlua::Error::external("event channel closed"))?;
+                .map_err(|_| LuaError::external("event channel closed"))?;
             Ok(())
         })?;
         bread.set("emit", emit_fn)?;
@@ -211,24 +386,91 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let state_tbl = self.lua.create_table()?;
         let get_fn = self.lua.create_function(move |lua, path: String| {
-            let snapshot = state_arc.blocking_read();
-            let mut value = serde_json::to_value(&*snapshot)
-                .map_err(|e| mlua::Error::external(e.to_string()))?;
-            if path.is_empty() {
-                return lua
-                    .to_value(&value)
-                    .map_err(|e| mlua::Error::external(e.to_string()));
-            }
-            for part in path.split('.') {
-                value = value
-                    .get(part)
-                    .cloned()
-                    .ok_or_else(|| mlua::Error::external("state path not found"))?;
-            }
-            lua.to_value(&value)
-                .map_err(|e| mlua::Error::external(e.to_string()))
+            state_value_to_lua(lua, &state_arc, &path)
         })?;
         state_tbl.set("get", get_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let monitors_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "monitors"))?;
+        state_tbl.set("monitors", monitors_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let active_ws_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "active_workspace"))?;
+        state_tbl.set("active_workspace", active_ws_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let active_win_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "active_window"))?;
+        state_tbl.set("active_window", active_win_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let devices_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "devices"))?;
+        state_tbl.set("devices", devices_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let power_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "power"))?;
+        state_tbl.set("power", power_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let network_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "network"))?;
+        state_tbl.set("network", network_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let profile_state_fn = self
+            .lua
+            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "profile"))?;
+        state_tbl.set("profile", profile_state_fn)?;
+
+        let handlers = self.handlers.clone();
+        let watch_ids = self.watch_ids.clone();
+        let next_sub_id = self.next_sub_id.clone();
+        let state_handle = self.state_handle.clone();
+        let current_module = self.current_module.clone();
+        let watch_fn = self.lua.create_function(move |lua, (path, callback): (String, Function)| {
+            let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+            let key = lua.create_registry_value(callback)?;
+            let module = current_module
+                .lock()
+                .map_err(|_| LuaError::external("module context lock poisoned"))?
+                .clone();
+            handlers
+                .lock()
+                .map_err(|_| LuaError::external("handler lock poisoned"))?
+                .insert(
+                    id,
+                    HandlerEntry {
+                        callback: key,
+                        filter: None,
+                        module,
+                        raw_kind: None,
+                        kind: HandlerKind::StateWatch,
+                    },
+                );
+            watch_ids
+                .lock()
+                .map_err(|_| LuaError::external("watch id lock poisoned"))?
+                .insert(id);
+            state_handle
+                .register_watch(id, path.clone())
+                .map_err(LuaError::external)?;
+            state_handle
+                .register_subscription(id, format!("bread.state.changed.{path}"), false)
+                .map_err(LuaError::external)?;
+            Ok(id.0)
+        })?;
+        state_tbl.set("watch", watch_fn)?;
+
         bread.set("state", state_tbl)?;
 
         let profile_tbl = self.lua.create_table()?;
@@ -240,9 +482,6 @@ impl LuaEngine {
         profile_tbl.set("activate", activate_fn)?;
         bread.set("profile", profile_tbl)?;
 
-        // Fire-and-forget: the process is launched on a blocking thread and the
-        // Lua handler returns immediately. The Lua runtime is never stalled waiting
-        // for a slow or hanging process. Exit code is logged but not returned to Lua.
         let exec_fn = self.lua.create_function(move |_lua, cmd: String| {
             task::spawn_blocking(move || {
                 match std::process::Command::new("sh")
@@ -264,7 +503,249 @@ impl LuaEngine {
         })?;
         bread.set("exec", exec_fn)?;
 
+        let timers = self.timers.clone();
+        let next_timer_id = self.next_timer_id.clone();
+        let lua_tx = self.lua_tx.clone();
+        let after_fn = self.lua.create_function(move |lua, (delay_ms, callback): (u64, Function)| {
+            let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
+            let key = lua.create_registry_value(callback)?;
+            let (cancel_tx, mut cancel_rx) = watch::channel(false);
+            timers
+                .lock()
+                .map_err(|_| LuaError::external("timer lock poisoned"))?
+                .insert(
+                    id,
+                    TimerEntry {
+                        callback: key,
+                        repeating: false,
+                        cancel_tx,
+                    },
+                );
+            let lua_tx = lua_tx.clone();
+            task::spawn(async move {
+                tokio::select! {
+                    _ = sleep(Duration::from_millis(delay_ms)) => {
+                        if !*cancel_rx.borrow() {
+                            let _ = lua_tx.send(LuaMessage::TimerFired { id });
+                        }
+                    }
+                    _ = cancel_rx.changed() => {}
+                }
+            });
+            Ok(id.0)
+        })?;
+        bread.set("after", after_fn)?;
+
+        let timers = self.timers.clone();
+        let next_timer_id = self.next_timer_id.clone();
+        let lua_tx = self.lua_tx.clone();
+        let every_fn = self.lua.create_function(move |lua, (interval_ms, callback): (u64, Function)| {
+            let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
+            let key = lua.create_registry_value(callback)?;
+            let (cancel_tx, mut cancel_rx) = watch::channel(false);
+            timers
+                .lock()
+                .map_err(|_| LuaError::external("timer lock poisoned"))?
+                .insert(
+                    id,
+                    TimerEntry {
+                        callback: key,
+                        repeating: true,
+                        cancel_tx,
+                    },
+                );
+            let lua_tx = lua_tx.clone();
+            task::spawn(async move {
+                let mut ticker = interval(Duration::from_millis(interval_ms));
+                loop {
+                    tokio::select! {
+                        _ = ticker.tick() => {
+                            if *cancel_rx.borrow() {
+                                break;
+                            }
+                            let _ = lua_tx.send(LuaMessage::TimerFired { id });
+                        }
+                        _ = cancel_rx.changed() => {
+                            if *cancel_rx.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            Ok(id.0)
+        })?;
+        bread.set("every", every_fn)?;
+
+        let timers = self.timers.clone();
+        let cancel_fn = self.lua.create_function(move |_lua, id: u64| {
+            let timer_id = TimerId(id);
+            if let Ok(mut map) = timers.lock() {
+                if let Some(entry) = map.remove(&timer_id) {
+                    let _ = entry.cancel_tx.send(true);
+                }
+            }
+            Ok(())
+        })?;
+        bread.set("cancel", cancel_fn)?;
+
+        let hyprland_tbl = self.lua.create_table()?;
+        let dispatch_fn = self.lua.create_function(move |_lua, (cmd, args): (String, String)| {
+            let resp = hyprland_request(&format!("dispatch {cmd} {args}"))
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            Ok(resp)
+        })?;
+        hyprland_tbl.set("dispatch", dispatch_fn)?;
+
+        let keyword_fn = self.lua.create_function(move |_lua, (key, value): (String, String)| {
+            let resp = hyprland_request(&format!("keyword {key} {value}"))
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            Ok(resp)
+        })?;
+        hyprland_tbl.set("keyword", keyword_fn)?;
+
+        let active_window_fn = self.lua.create_function(move |lua, ()| {
+            let resp = hyprland_request("j/activewindow")
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue = serde_json::from_str(&resp)
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            lua.to_value(&json)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        hyprland_tbl.set("active_window", active_window_fn)?;
+
+        let monitors_fn = self.lua.create_function(move |lua, ()| {
+            let resp = hyprland_request("j/monitors")
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue = serde_json::from_str(&resp)
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            lua.to_value(&json)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        hyprland_tbl.set("monitors", monitors_fn)?;
+
+        let workspaces_fn = self.lua.create_function(move |lua, ()| {
+            let resp = hyprland_request("j/workspaces")
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue = serde_json::from_str(&resp)
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            lua.to_value(&json)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        hyprland_tbl.set("workspaces", workspaces_fn)?;
+
+        let clients_fn = self.lua.create_function(move |lua, ()| {
+            let resp = hyprland_request("j/clients")
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue = serde_json::from_str(&resp)
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            lua.to_value(&json)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        hyprland_tbl.set("clients", clients_fn)?;
+
+        let handlers = self.handlers.clone();
+        let next_sub_id = self.next_sub_id.clone();
+        let state_handle = self.state_handle.clone();
+        let current_module = self.current_module.clone();
+        let on_raw_fn = self
+            .lua
+            .create_function(move |lua, (event, callback): (String, Function)| {
+                let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+                let key = lua.create_registry_value(callback)?;
+                let module = current_module
+                    .lock()
+                    .map_err(|_| LuaError::external("module context lock poisoned"))?
+                    .clone();
+                handlers
+                    .lock()
+                    .map_err(|_| LuaError::external("handler lock poisoned"))?
+                    .insert(
+                        id,
+                        HandlerEntry {
+                            callback: key,
+                            filter: None,
+                            module,
+                            raw_kind: Some(event),
+                            kind: HandlerKind::Event,
+                        },
+                    );
+                state_handle
+                    .register_subscription(id, "bread.hyprland.event".to_string(), false)
+                    .map_err(LuaError::external)?;
+                Ok(id.0)
+            })?;
+        hyprland_tbl.set("on_raw", on_raw_fn)?;
+        bread.set("hyprland", hyprland_tbl)?;
+
+        let modules = self.modules.clone();
+        let module_decls = self.module_decls.clone();
+        let current_module = self.current_module.clone();
+        let state_arc = self.state_handle.state_arc();
+        let module_fn = self.lua.create_function(move |lua, decl: Table| {
+            let name: String = decl.get("name")?;
+            let expected = current_module
+                .lock()
+                .map_err(|_| LuaError::external("module context lock poisoned"))?
+                .clone();
+            if expected.as_deref() != Some(&name) {
+                return Err(LuaError::external("module name does not match current load"));
+            }
+
+            let decl = module_decls
+                .lock()
+                .map_err(|_| LuaError::external("module decls lock poisoned"))?
+                .get(&name)
+                .cloned()
+                .ok_or_else(|| LuaError::external("module declaration not found"))?;
+
+            let module_tbl = lua.create_table()?;
+            module_tbl.set("name", decl.name.clone())?;
+            if let Some(version) = decl.version.clone() {
+                module_tbl.set("version", version)?;
+            }
+
+            let store_tbl = lua.create_table()?;
+            let module_name = decl.name.clone();
+            let state_arc_get = state_arc.clone();
+            let get_fn = lua.create_function(move |lua, key: String| {
+                if let Some(value) = module_store_get(&state_arc_get, &module_name, &key) {
+                    return lua
+                        .to_value(&value)
+                        .map_err(|e| LuaError::external(e.to_string()));
+                }
+                Ok(Value::Nil)
+            })?;
+            store_tbl.set("get", get_fn)?;
+
+            let module_name = decl.name.clone();
+            let state_arc_set = state_arc.clone();
+            let set_fn = lua.create_function(move |lua, (key, value): (String, Value)| {
+                let json = lua
+                    .from_value::<JsonValue>(value)
+                    .unwrap_or_else(|_| JsonValue::Null);
+                module_store_set(&state_arc_set, &module_name, key, json);
+                Ok(())
+            })?;
+            store_tbl.set("set", set_fn)?;
+            module_tbl.set("store", store_tbl)?;
+
+            let key = lua.create_registry_value(module_tbl.clone())?;
+            modules
+                .lock()
+                .map_err(|_| LuaError::external("module registry lock poisoned"))?
+                .insert(
+                    decl.name.clone(),
+                    ModuleInfo { table_key: key },
+                );
+
+            Ok(module_tbl)
+        })?;
+        bread.set("module", module_fn)?;
+
         globals.set("bread", bread)?;
+        self.install_require_loader()?;
+        self.install_wait_helper()?;
         Ok(())
     }
 
@@ -273,20 +754,15 @@ impl LuaEngine {
 
         let mut files = list_lua_files(&self.module_path)?;
         files.sort();
-        for path in files {
-            let module_name = path
-                .file_stem()
-                .and_then(|v| v.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            match self.load_lua_file(&path, &module_name) {
-                Ok(()) => {
-                    self.state_handle
-                        .set_module_status(module_name, ModuleLoadState::Loaded, None);
-                }
+
+        let mut decls = Vec::new();
+        for path in files.into_iter().filter(|p| !is_lib_path(&self.module_path, p)) {
+            match self.scan_module_decl(&path) {
+                Ok(decl) => decls.push(decl),
                 Err(err) => {
+                    let name = module_name_from_path(&self.module_path, &path);
                     self.state_handle.set_module_status(
-                        module_name,
+                        name,
                         ModuleLoadState::LoadError,
                         Some(err.to_string()),
                     );
@@ -294,6 +770,60 @@ impl LuaEngine {
             }
         }
 
+        let (ordered, dep_errors) = order_module_decls(decls);
+
+        let mut decl_map = self
+            .module_decls
+            .lock()
+            .expect("module decls mutex poisoned");
+        decl_map.clear();
+        for decl in &ordered {
+            decl_map.insert(decl.name.clone(), decl.clone());
+        }
+        drop(decl_map);
+
+        for (name, err) in dep_errors {
+            self.state_handle
+                .set_module_status(name, ModuleLoadState::LoadError, Some(err));
+        }
+
+        let mut load_order = Vec::new();
+        for decl in ordered {
+            load_order.push(decl.name.clone());
+            match self.load_module(&decl) {
+                Ok(()) => {
+                    self.state_handle
+                        .set_module_status(decl.name.clone(), ModuleLoadState::Loaded, None);
+                }
+                Err(err) => {
+                    self.state_handle.set_module_status(
+                        decl.name.clone(),
+                        ModuleLoadState::LoadError,
+                        Some(err.to_string()),
+                    );
+                }
+            }
+        }
+
+        *self
+            .module_order
+            .lock()
+            .expect("module order mutex poisoned") = load_order;
+
+        Ok(())
+    }
+
+    fn load_module(&self, decl: &ModuleDecl) -> Result<()> {
+        self.set_current_module(Some(decl.name.clone()));
+        let result = self.load_lua_file(&decl.path, &decl.name);
+        self.set_current_module(None);
+        result?;
+
+        if !self.module_is_registered(&decl.name) {
+            return Err(anyhow!("module did not call bread.module"));
+        }
+
+        self.run_on_load(&decl.name);
         Ok(())
     }
 
@@ -314,14 +844,83 @@ impl LuaEngine {
     }
 
     fn handle_event(&self, id: SubscriptionId, event: BreadEvent) -> Result<()> {
-        let handlers = self.handlers.lock().expect("lua handlers mutex poisoned");
-        let Some(reg) = handlers.get(&id) else {
-            return Ok(());
+        let (callback, filter, raw_kind, kind, module) = {
+            let handlers = self.handlers.lock().expect("lua handlers mutex poisoned");
+            let Some(entry) = handlers.get(&id) else {
+                return Ok(());
+            };
+            let callback: Function = self.lua.registry_value(&entry.callback)?;
+            let filter = match entry.filter.as_ref() {
+                Some(key) => Some(self.lua.registry_value::<Function>(key)?),
+                None => None,
+            };
+            (
+                callback,
+                filter,
+                entry.raw_kind.clone(),
+                entry.kind,
+                entry.module.clone(),
+            )
         };
-        let callback: Function = self.lua.registry_value(reg)?;
-        let event_value = self.lua.to_value(&event)?;
-        if let Err(err) = callback.call::<_, ()>(event_value) {
+
+        if let Some(kind) = raw_kind.as_deref() {
+            let matches = event
+                .data
+                .get("kind")
+                .and_then(JsonValue::as_str)
+                .map(|k| k == kind)
+                .unwrap_or(false);
+            if !matches {
+                return Ok(());
+            }
+        }
+
+        if let Some(filter) = filter {
+            let event_value = self.lua.to_value(&event)?;
+            let allowed = filter.call::<_, bool>(event_value).unwrap_or(false);
+            if !allowed {
+                return Ok(());
+            }
+        }
+
+        let result = match kind {
+            HandlerKind::Event => {
+                let event_value = self.lua.to_value(&event)?;
+                callback.call::<_, ()>(event_value)
+            }
+            HandlerKind::StateWatch => {
+                let new_val = event.data.get("new").cloned().unwrap_or(JsonValue::Null);
+                let old_val = event.data.get("old").cloned().unwrap_or(JsonValue::Null);
+                let new_lua = self.lua.to_value(&new_val)?;
+                let old_lua = self.lua.to_value(&old_val)?;
+                callback.call::<_, ()>((new_lua, old_lua))
+            }
+        };
+
+        if let Err(err) = result {
             error!(subscription = id.0, error = %err, "lua callback failed");
+            self.handle_callback_error(module.as_deref(), id, err);
+        }
+        Ok(())
+    }
+
+    fn handle_timer(&self, id: TimerId) -> Result<()> {
+        let (callback, repeating) = {
+            let timers = self.timers.lock().expect("lua timers mutex poisoned");
+            let Some(entry) = timers.get(&id) else {
+                return Ok(());
+            };
+            let callback: Function = self.lua.registry_value(&entry.callback)?;
+            (callback, entry.repeating)
+        };
+        if let Err(err) = callback.call::<_, ()>(()) {
+            error!(timer = id.0, error = %err, "lua timer callback failed");
+        }
+
+        if !repeating {
+            if let Ok(mut map) = self.timers.lock() {
+                map.remove(&id);
+            }
         }
         Ok(())
     }
@@ -331,6 +930,388 @@ impl LuaEngine {
             map.remove(&id);
         }
     }
+
+    fn run_on_load(&self, name: &str) {
+        if let Some(hook) = self.get_module_hook(name, "on_load") {
+            if let Err(err) = hook.call::<_, ()>(()) {
+                error!(module = %name, error = %err, "module on_load failed");
+                self.state_handle
+                    .set_module_status(name.to_string(), ModuleLoadState::LoadError, Some(err.to_string()));
+            }
+        }
+    }
+
+    fn run_on_reload(&self) {
+        let order = self
+            .module_order
+            .lock()
+            .expect("module order mutex poisoned")
+            .clone();
+        for name in order {
+            if let Some(hook) = self.get_module_hook(&name, "on_reload") {
+                if let Err(err) = hook.call::<_, ()>(()) {
+                    error!(module = %name, error = %err, "module on_reload failed");
+                    self.state_handle.set_module_status(
+                        name.to_string(),
+                        ModuleLoadState::Degraded,
+                        Some(err.to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn run_on_unload(&self) {
+        let order = self
+            .module_order
+            .lock()
+            .expect("module order mutex poisoned")
+            .clone();
+        for name in order.into_iter().rev() {
+            if let Some(hook) = self.get_module_hook(&name, "on_unload") {
+                if let Err(err) = hook.call::<_, ()>(()) {
+                    error!(module = %name, error = %err, "module on_unload failed");
+                    self.state_handle.set_module_status(
+                        name.to_string(),
+                        ModuleLoadState::Degraded,
+                        Some(err.to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn handle_callback_error(&self, module: Option<&str>, id: SubscriptionId, err: LuaError) {
+        if let Some(module) = module {
+            self.state_handle.set_module_status(
+                module.to_string(),
+                ModuleLoadState::Degraded,
+                Some(err.to_string()),
+            );
+            if let Some(hook) = self.get_module_hook(module, "on_error") {
+                match hook.call::<_, bool>(err.to_string()) {
+                    Ok(keep) => {
+                        if !keep {
+                            self.remove_handler(id);
+                            self.state_handle.remove_subscription(id);
+                            self.state_handle.remove_watch(id);
+                        }
+                    }
+                    Err(hook_err) => {
+                        error!(module = %module, error = %hook_err, "module on_error failed");
+                    }
+                }
+            }
+        }
+    }
+
+    fn get_module_hook(&self, name: &str, hook: &str) -> Option<Function<'_>> {
+        let modules = self.modules.lock().ok()?;
+        let info = modules.get(name)?;
+        let table: Table = self.lua.registry_value(&info.table_key).ok()?;
+        match table.get::<_, Value>(hook).ok()? {
+            Value::Function(func) => Some(func),
+            _ => None,
+        }
+    }
+
+    fn module_is_registered(&self, name: &str) -> bool {
+        self.modules
+            .lock()
+            .map(|map| map.contains_key(name))
+            .unwrap_or(false)
+    }
+
+    fn set_current_module(&self, name: Option<String>) {
+        if let Ok(mut guard) = self.current_module.lock() {
+            *guard = name;
+        }
+    }
+
+    fn cancel_all_timers(&self) {
+        if let Ok(mut map) = self.timers.lock() {
+            for (_, entry) in map.drain() {
+                let _ = entry.cancel_tx.send(true);
+            }
+        }
+    }
+
+    fn scan_module_decl(&self, path: &Path) -> Result<ModuleDecl> {
+        const MODULE_DECL_ABORT: &str = "__bread_module_decl__";
+        let lua = Lua::new();
+        let decl_cell: Rc<RefCell<Option<ModuleDecl>>> = Rc::new(RefCell::new(None));
+        let decl_cell_cloned = decl_cell.clone();
+        let module_path = path.to_path_buf();
+
+        let module_fn = lua.create_function(move |_lua, table: Table| -> mlua::Result<()> {
+            let name: String = table.get("name")?;
+            let version: Option<String> = table.get("version").ok();
+            let after: Vec<String> = table.get("after").unwrap_or_default();
+            *decl_cell_cloned.borrow_mut() = Some(ModuleDecl {
+                name,
+                version,
+                after,
+                path: module_path.clone(),
+            });
+            Err(LuaError::RuntimeError(MODULE_DECL_ABORT.to_string()))
+        })?;
+
+        let bread = lua.create_table()?;
+        bread.set("module", module_fn)?;
+        lua.globals().set("bread", bread)?;
+
+        let src = fs::read_to_string(path)?;
+        let result = lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec();
+        if let Err(err) = result {
+            match err {
+                LuaError::RuntimeError(msg) if msg == MODULE_DECL_ABORT => {}
+                other => return Err(anyhow!(other.to_string())),
+            }
+        }
+
+        let decl = decl_cell.borrow().clone();
+        decl.ok_or_else(|| anyhow!("module missing bread.module declaration"))
+    }
+
+    fn install_require_loader(&self) -> Result<()> {
+        let module_path = self.module_path.clone();
+        let loader = self.lua.create_function(move |lua, name: String| {
+            if !name.starts_with("bread.") {
+                return Ok(Value::Nil);
+            }
+
+            let rel = name.trim_start_matches("bread.").replace('.', "/");
+            let path = module_path.join(format!("{rel}.lua"));
+            if !path.exists() {
+                return Ok(Value::Nil);
+            }
+
+            let src = fs::read_to_string(&path)
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            let func = lua
+                .load(&src)
+                .set_name(path.to_string_lossy().as_ref())
+                .into_function()
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            Ok(Value::Function(func))
+        })?;
+
+        let globals = self.lua.globals();
+        let bread: Table = globals.get("bread")?;
+        bread.set("__require_loader", loader)?;
+
+        self.lua.load(
+            r#"
+            local searchers = package.searchers or package.loaders
+            if searchers then
+                table.insert(searchers, 1, function(name)
+                    return bread.__require_loader(name)
+                end)
+            end
+            "#,
+        )
+        .exec()?;
+
+        Ok(())
+    }
+
+    fn install_wait_helper(&self) -> Result<()> {
+        self.lua
+            .load(
+                r#"
+                bread.wait = function(pattern, opts)
+                    if type(pattern) ~= "string" then
+                        error("bread.wait requires a pattern string")
+                    end
+                    opts = opts or {}
+                    local co = coroutine.running()
+                    if not co then
+                        error("bread.wait must be called inside a coroutine")
+                    end
+                    local id
+                    local timer
+                    id = bread.once(pattern, function(event)
+                        if timer then
+                            bread.cancel(timer)
+                        end
+                        coroutine.resume(co, event)
+                    end)
+                    if opts.timeout then
+                        timer = bread.after(opts.timeout, function()
+                            bread.off(id)
+                            coroutine.resume(co, nil)
+                        end)
+                    end
+                    return coroutine.yield()
+                end
+                "#,
+            )
+            .exec()?;
+        Ok(())
+    }
+}
+
+fn order_module_decls(decls: Vec<ModuleDecl>) -> (Vec<ModuleDecl>, Vec<(String, String)>) {
+    let mut errors = Vec::new();
+    let mut map: HashMap<String, ModuleDecl> = HashMap::new();
+    for decl in decls {
+        if map.contains_key(&decl.name) {
+            errors.push((decl.name.clone(), "duplicate module name".to_string()));
+            continue;
+        }
+        map.insert(decl.name.clone(), decl);
+    }
+
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut reverse: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut invalid: HashSet<String> = HashSet::new();
+
+    for (name, decl) in map.iter() {
+        let mut missing = Vec::new();
+        for dep in &decl.after {
+            if map.contains_key(dep) {
+                deps.entry(name.clone()).or_default().insert(dep.clone());
+                reverse.entry(dep.clone()).or_default().insert(name.clone());
+            } else {
+                missing.push(dep.clone());
+            }
+        }
+        if !missing.is_empty() {
+            errors.push((
+                name.clone(),
+                format!("missing dependency: {}", missing.join(", ")),
+            ));
+            invalid.insert(name.clone());
+        }
+    }
+
+    let mut ready: Vec<String> = map
+        .keys()
+        .filter(|name| !deps.contains_key(*name) && !invalid.contains(*name))
+        .cloned()
+        .collect();
+    ready.sort();
+
+    let mut ordered = Vec::new();
+    let mut deps = deps;
+
+    while let Some(name) = ready.pop() {
+        if let Some(decl) = map.get(&name) {
+            ordered.push(decl.clone());
+        }
+        if let Some(children) = reverse.remove(&name) {
+            for child in children {
+                if invalid.contains(&child) {
+                    continue;
+                }
+                if let Some(entry) = deps.get_mut(&child) {
+                    entry.remove(&name);
+                    if entry.is_empty() {
+                        deps.remove(&child);
+                        ready.push(child);
+                        ready.sort();
+                    }
+                }
+            }
+        }
+    }
+
+    for (name, _) in deps {
+        if !invalid.contains(&name) {
+            errors.push((name, "circular dependency".to_string()));
+        }
+    }
+
+    (ordered, errors)
+}
+
+fn module_name_from_path(module_root: &Path, path: &Path) -> String {
+    let rel = path.strip_prefix(module_root).unwrap_or(path);
+    let mut name = rel
+        .with_extension("")
+        .to_string_lossy()
+        .replace('/', ".");
+    if name.starts_with('.') {
+        name.remove(0);
+    }
+    name
+}
+
+fn is_lib_path(module_root: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(module_root).unwrap_or(path);
+    rel.components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|c| c == "lib")
+        .unwrap_or(false)
+}
+
+fn state_value_to_lua<'lua>(
+    lua: &'lua Lua,
+    state_arc: &Arc<RwLock<RuntimeState>>,
+    path: &str,
+) -> mlua::Result<Value<'lua>> {
+    let snapshot = state_arc.blocking_read();
+    let mut value = serde_json::to_value(&*snapshot)
+        .map_err(|e| LuaError::external(e.to_string()))?;
+    if path.is_empty() {
+        return lua
+            .to_value(&value)
+            .map_err(|e| LuaError::external(e.to_string()));
+    }
+    for part in path.split('.') {
+        value = value
+            .get(part)
+            .cloned()
+            .ok_or_else(|| LuaError::external("state path not found"))?;
+    }
+    lua.to_value(&value)
+        .map_err(|e| LuaError::external(e.to_string()))
+}
+
+fn module_store_get(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: &str) -> Option<JsonValue> {
+    let guard = state_arc.blocking_read();
+    let entry = guard.modules.iter().find(|m| m.name == module)?;
+    entry.store.get(key).cloned()
+}
+
+fn module_store_set(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: String, value: JsonValue) {
+    let mut guard = state_arc.blocking_write();
+    if let Some(entry) = guard.modules.iter_mut().find(|m| m.name == module) {
+        entry.store.insert(key, value);
+        return;
+    }
+
+    let mut store = HashMap::new();
+    store.insert(key, value);
+    guard.modules.push(crate::core::types::ModuleStatus {
+        name: module.to_string(),
+        status: ModuleLoadState::Loaded,
+        last_error: None,
+        store,
+    });
+}
+
+fn hyprland_request_socket() -> Result<PathBuf> {
+    let instance = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .map_err(|_| anyhow!("HYPRLAND_INSTANCE_SIGNATURE is not set"))?;
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    Ok(PathBuf::from(runtime)
+        .join("hypr")
+        .join(instance)
+        .join(".socket.sock"))
+}
+
+fn hyprland_request(request: &str) -> Result<String> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket = hyprland_request_socket()?;
+    let mut stream = UnixStream::connect(socket)?;
+    stream.write_all(request.as_bytes())?;
+    let mut buffer = String::new();
+    stream.read_to_string(&mut buffer)?;
+    Ok(buffer)
 }
 
 fn list_lua_files(root: &Path) -> Result<Vec<PathBuf>> {
