@@ -231,12 +231,11 @@ bread.once("bread.system.startup", function(event)
 end)
 
 -- Subscribe with a predicate filter
--- Third arg is an opts table with a 'filter' key whose value is the predicate
 bread.filter("bread.device.connected", function(event)
-    bread.exec("xset r rate 200 40")
-end, { filter = function(event)
     return event.data.class == "keyboard"
-end })
+end, function(event)
+    bread.exec("xset r rate 200 40")
+end)
 
 -- Emit a custom event (for cross-module communication)
 bread.emit("mymodule.something", { key = "value" })

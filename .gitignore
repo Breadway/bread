@@ -3,4 +3,8 @@ Overview.md
 DAEMON.md
 .claude
 CLAUDE.md
+<<<<<<< HEAD
 .github
+=======
+.github/
+>>>>>>> parent of e561156 (Begin Implementing V2 features)
