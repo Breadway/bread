@@ -296,12 +296,22 @@ fn print_event(event: &Value, fields: Option<&str>) {
 fn format_timestamp(ms: u64) -> String {
     let secs = ms / 1000;
     let millis = ms % 1000;
-    let time = UNIX_EPOCH + Duration::from_secs(secs);
-    let datetime = time.duration_since(UNIX_EPOCH).unwrap_or_default();
-    let seconds = datetime.as_secs() % 60;
-    let minutes = (datetime.as_secs() / 60) % 60;
-    let hours = (datetime.as_secs() / 3600) % 24;
-    format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
+
+    // SAFETY: localtime_r is thread-safe. We pass a valid pointer to a
+    // zeroed tm struct and read the result only after the call returns.
+    let local_secs = unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = secs as libc::time_t;
+        libc::localtime_r(&t, &mut tm);
+        tm.tm_hour as u64 * 3600
+            + tm.tm_min as u64 * 60
+            + tm.tm_sec as u64
+    };
+
+    let h = (local_secs / 3600) % 24;
+    let m = (local_secs / 60) % 60;
+    let s = local_secs % 60;
+    format!("{:02}:{:02}:{:02}.{:03}", h, m, s, millis)
 }
 
 fn print_reload(value: &Value) {
@@ -331,12 +341,34 @@ async fn watch_reload(socket: &Path) -> Result<()> {
     })?;
     watcher.watch(&config_dir, RecursiveMode::Recursive)?;
 
+    use tokio::time::{sleep, Duration};
+
+async fn watch_reload(socket: &Path) -> Result<()> {
+    let config_dir = config_directory();
+    println!("watching {} for changes...", config_dir.display());
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })?;
+    watcher.watch(&config_dir, RecursiveMode::Recursive)?;
+
     while let Some(msg) = rx.recv().await {
-        if msg.is_ok() {
-            let response = send_request(socket, "modules.reload", json!({})).await?;
-            print_reload(&response);
+        if msg.is_err() {
+            continue;
         }
+
+        // Debounce: drain any follow-up events that arrive within 150ms.
+        // A single file save typically generates 2-3 fs events in rapid succession.
+        sleep(Duration::from_millis(150)).await;
+        while rx.try_recv().is_ok() {}
+
+        let response = send_request(socket, "modules.reload", json!({})).await?;
+        print_reload(&response);
     }
+
+    Ok(())
+}
 
     Ok(())
 }
