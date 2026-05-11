@@ -2,8 +2,7 @@
 members = [
     "bread-shared",
     "breadd",
-    "bread-cli",
-    "bread-sync"
+    "bread-cli"
 ]
 resolver = "2"
 

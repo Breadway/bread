@@ -22,25 +22,20 @@ impl UdevAdapter {
     }
 
     pub async fn enumerate_existing(&self, tx: &mpsc::Sender<RawEvent>) -> Result<()> {
-        let payloads = match enumerate_with_udev(&self.subsystems) {
-            Ok(p) => p,
-            Err(_) => scan_devices(&self.subsystems)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|d| json!({
-                    "action": "add",
-                    "id": d.id,
-                    "name": d.name,
-                    "subsystem": d.subsystem,
-                }))
-                .collect(),
-        };
+        let devices = enumerate_with_udev(&self.subsystems).unwrap_or_else(|_| {
+            scan_devices(&self.subsystems).unwrap_or_default()
+        });
 
-        for payload in payloads {
+        for device in devices {
             tx.send(RawEvent {
                 source: AdapterSource::Udev,
                 kind: "udev.enumerate".to_string(),
-                payload,
+                payload: json!({
+                    "action": "add",
+                    "id": device.id,
+                    "name": device.name,
+                    "subsystem": device.subsystem,
+                }),
                 timestamp: now_unix_ms(),
             })
             .await?;
@@ -169,7 +164,7 @@ async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -
     Ok(())
 }
 
-fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<serde_json::Value>> {
+fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
     let mut enumerator = udev::Enumerator::new()?;
     for subsystem in subsystems {
         enumerator.match_subsystem(subsystem)?;
@@ -189,36 +184,14 @@ fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<serde_json::Value>> 
             .unwrap_or_else(|| "unknown".to_string());
         let id = dev.syspath().to_string_lossy().to_string();
 
-        out.push(json!({
-            "action": "add",
-            "id": id,
-            "name": name,
-            "subsystem": subsystem,
-            "id_input_keyboard": dev_prop_bool(&dev, "ID_INPUT_KEYBOARD"),
-            "id_input_mouse": dev_prop_bool(&dev, "ID_INPUT_MOUSE"),
-            "id_input_joystick": dev_prop_bool(&dev, "ID_INPUT_JOYSTICK"),
-            "id_input_touchpad": dev_prop_bool(&dev, "ID_INPUT_TOUCHPAD"),
-            "id_input_tablet": dev_prop_bool(&dev, "ID_INPUT_TABLET"),
-            "id_usb_class": dev_prop_str(&dev, "ID_USB_CLASS"),
-            "id_usb_interfaces": dev_prop_str(&dev, "ID_USB_INTERFACES"),
-            "id_vendor": dev_prop_str(&dev, "ID_VENDOR"),
-            "id_model": dev_prop_str(&dev, "ID_MODEL"),
-        }));
+        out.push(ScannedDevice {
+            id,
+            name,
+            subsystem,
+        });
     }
 
     Ok(out)
-}
-
-fn dev_prop_bool(dev: &udev::Device, key: &str) -> bool {
-    dev.property_value(key)
-        .and_then(|v| v.to_str())
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
-fn dev_prop_str(dev: &udev::Device, key: &str) -> Option<String> {
-    dev.property_value(key)
-        .map(|v| v.to_string_lossy().to_string())
 }
 
 fn raw_change_event(action: &str, dev: &ScannedDevice) -> RawEvent {
