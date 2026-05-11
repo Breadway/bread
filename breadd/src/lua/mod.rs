@@ -840,6 +840,8 @@ impl LuaEngine {
         globals.set("bread", bread)?;
         self.install_require_loader()?;
         self.install_wait_helper()?;
+        self.install_log_helpers()?;
+        self.install_debounce()?;
         Ok(())
     }
 
@@ -1186,6 +1188,90 @@ impl LuaEngine {
                 let _ = entry.cancel_tx.send(true);
             }
         }
+    }
+
+    fn install_log_helpers(&self) -> Result<()> {
+        // bread.log(msg)   → tracing::info
+        // bread.warn(msg)  → tracing::warn
+        // bread.error(msg) → tracing::error
+        //
+        // Each accepts any Lua value and coerces it to a string via tostring()
+        // so callers can do bread.log(some_table) without a crash.
+        self.lua.load(r#"
+            local _bread = bread
+
+            local function stringify(v)
+                if type(v) == "string" then
+                    return v
+                end
+                return tostring(v)
+            end
+
+            function _bread.log(msg)
+                _bread.__log_info(stringify(msg))
+            end
+
+            function _bread.warn(msg)
+                _bread.__log_warn(stringify(msg))
+            end
+
+            function _bread.error(msg)
+                _bread.__log_error(stringify(msg))
+            end
+        "#).exec()?;
+
+        // Register the raw Rust-backed log functions that the Lua wrappers call.
+        let globals = self.lua.globals();
+        let bread: mlua::Table = globals.get("bread")?;
+
+        let info_fn = self.lua.create_function(|_, msg: String| {
+            tracing::info!(target: "bread.lua", "{}", msg);
+            Ok(())
+        })?;
+        bread.set("__log_info", info_fn)?;
+
+        let warn_fn = self.lua.create_function(|_, msg: String| {
+            tracing::warn!(target: "bread.lua", "{}", msg);
+            Ok(())
+        })?;
+        bread.set("__log_warn", warn_fn)?;
+
+        let error_fn = self.lua.create_function(|_, msg: String| {
+            tracing::error!(target: "bread.lua", "{}", msg);
+            Ok(())
+        })?;
+        bread.set("__log_error", error_fn)?;
+
+        Ok(())
+    }
+
+    fn install_debounce(&self) -> Result<()> {
+        // bread.debounce(delay_ms, fn) → wrapped_fn
+        //
+        // Returns a new function. When that function is called, it resets a
+        // timer. The original function is only called once the timer expires
+        // without being reset. Useful for rapid hardware events (e.g. monitor
+        // topology changes that fire multiple events in quick succession).
+        //
+        // Because the Lua runtime is single-threaded, we implement this in
+        // pure Lua using bread.cancel / bread.after.
+        self.lua.load(r#"
+            function bread.debounce(delay_ms, fn)
+                local timer_id = nil
+                return function(...)
+                    local args = { ... }
+                    if timer_id then
+                        bread.cancel(timer_id)
+                        timer_id = nil
+                    end
+                    timer_id = bread.after(delay_ms, function()
+                        timer_id = nil
+                        fn(table.unpack(args))
+                    end)
+                end
+            end
+        "#).exec()?;
+        Ok(())
     }
 
     fn scan_module_decl(&self, path: &Path) -> Result<ModuleDecl> {
