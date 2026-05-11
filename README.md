@@ -72,16 +72,20 @@ Optional but preferred:
 ```bash
 git clone https://github.com/Breadway/bread.git
 cd bread
-cargo build --release
 ```
 
-Binaries will be at `target/release/breadd` and `target/release/bread`.
-
-Install them:
+Run the install script — it builds, installs to `/usr/bin`, sets up the systemd user service, and starts the daemon:
 
 ```bash
-sudo install -Dm755 target/release/breadd /usr/local/bin/breadd
-sudo install -Dm755 target/release/bread /usr/local/bin/bread
+bash scripts/install.sh
+```
+
+Or do it step by step:
+
+```bash
+cargo build --release
+sudo install -Dm755 target/release/breadd /usr/bin/breadd
+sudo install -Dm755 target/release/bread /usr/bin/bread
 ```
 
 ### Arch Linux (PKGBUILD)
@@ -130,6 +134,15 @@ enabled = true
 
 [events]
 dedup_window_ms = 100
+
+[notifications]
+default_timeout_ms = 5000
+default_urgency = "normal"
+notify_send_path = "notify-send"
+
+[modules]
+builtin = true               # load built-in modules (monitors, devices, etc.)
+disable = []                 # list of built-in module names to disable
 ```
 
 Your automation lives in `~/.config/bread/init.lua`:
@@ -153,15 +166,18 @@ All commands communicate with the running daemon over a Unix socket at `$XDG_RUN
 
 ```bash
 bread reload                          # Hot-reload all Lua modules
+bread reload --watch                  # Watch config dir and reload on changes
 bread state                           # Dump full runtime state as JSON
 bread events                          # Stream live normalized events
 bread events --filter bread.device.*  # Stream filtered events
+bread events --since 60               # Replay events from the last 60 seconds
 bread modules                         # List loaded modules and status
 bread profile-list                    # List defined profiles
 bread profile-activate <name>         # Activate a named profile
 bread emit <event> --data '{}'        # Manually fire an event (for testing)
 bread ping                            # Check daemon connectivity
 bread health                          # Daemon version, uptime, PID
+bread doctor                          # Diagnose daemon and module health
 ```
 
 ---
@@ -201,14 +217,24 @@ Events follow the namespace convention `bread.<subsystem>.<noun>.<verb>`.
 ### Events
 
 ```lua
--- Subscribe to an event
-bread.on("bread.monitor.connected", function(event)
+-- Subscribe to an event; returns a numeric ID
+local id = bread.on("bread.monitor.connected", function(event)
     print(event.data.name)
 end)
+
+-- Unsubscribe by ID
+bread.off(id)
 
 -- Subscribe once, then auto-unsubscribe
 bread.once("bread.system.startup", function(event)
     -- runs exactly once
+end)
+
+-- Subscribe with a predicate filter
+bread.filter("bread.device.connected", function(event)
+    return event.data.class == "keyboard"
+end, function(event)
+    bread.exec("xset r rate 200 40")
 end)
 
 -- Emit a custom event (for cross-module communication)
@@ -222,6 +248,12 @@ bread.emit("mymodule.something", { key = "value" })
 local monitors = bread.state.get("monitors")
 local workspace = bread.state.get("active_workspace")
 local power = bread.state.get("power")
+local devices = bread.state.get("devices")
+
+-- Watch a state key and fire on changes
+bread.state.watch("active_workspace", function(new, old)
+    print("workspace changed from " .. tostring(old) .. " to " .. tostring(new))
+end)
 ```
 
 ### Profiles
@@ -231,12 +263,42 @@ bread.profile.activate("desk")
 bread.profile.activate("default")
 ```
 
-### Execution
+### Execution and notifications
 
 ```lua
 -- Fire-and-forget: returns immediately, process runs in background
 bread.exec("kitty")
-bread.exec("notify-send 'Dock connected'")
+
+-- Desktop notification
+bread.notify("Dock connected", { urgency = "normal", timeout = 3000 })
+```
+
+### Timers
+
+```lua
+-- Run once after a delay (ms)
+bread.after(500, function()
+    bread.exec("some-delayed-command")
+end)
+
+-- Run on a repeating interval (ms); returns a timer ID
+local id = bread.every(60000, function()
+    bread.log("tick")
+end)
+bread.cancel(id)
+
+-- Debounce a rapidly-firing handler
+local fn = bread.debounce(200, function(event)
+    reconfigure_monitors()
+end)
+```
+
+### Logging
+
+```lua
+bread.log("Module loaded")
+bread.warn("Unexpected state")
+bread.error("Something failed")
 ```
 
 ---
@@ -255,7 +317,7 @@ Response:
 { "id": "1", "result": [ { "name": "HDMI-A-1", "connected": true } ] }
 ```
 
-Available methods: `ping`, `health`, `state.get`, `state.dump`, `modules.list`, `modules.reload`, `profile.list`, `profile.activate`, `events.subscribe`, `emit`.
+Available methods: `ping`, `health`, `state.get`, `state.dump`, `modules.list`, `modules.reload`, `profile.list`, `profile.activate`, `events.subscribe`, `events.replay`, `emit`.
 
 `events.subscribe` upgrades the connection to a streaming mode — the daemon pushes events line by line until the client disconnects.
 

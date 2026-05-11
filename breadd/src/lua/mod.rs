@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -10,16 +10,18 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent};
 use mlua::{Error as LuaError, Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval_at, sleep, Instant};
 use tracing::{error, info, warn};
 
-use crate::core::config::Config;
+use crate::core::config::{Config, ModulesConfig, NotificationsConfig};
 use crate::core::state_engine::StateHandle;
 use crate::core::subscriptions::SubscriptionId;
 use crate::core::types::{ModuleLoadState, RuntimeState};
+use bread_shared::now_unix_ms;
 
 pub enum LuaMessage {
     Event {
@@ -38,9 +40,17 @@ pub enum LuaMessage {
     Shutdown,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorEntry {
+    pub timestamp: u64,
+    pub module: Option<String>,
+    pub message: String,
+}
+
 #[derive(Clone)]
 pub struct RuntimeHandle {
     tx: mpsc::UnboundedSender<LuaMessage>,
+    recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
 }
 
 impl RuntimeHandle {
@@ -63,6 +73,13 @@ impl RuntimeHandle {
     pub fn shutdown(&self) {
         let _ = self.tx.send(LuaMessage::Shutdown);
     }
+
+    pub fn recent_errors(&self) -> Vec<ErrorEntry> {
+        self.recent_errors
+            .lock()
+            .map(|buf| buf.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 pub fn spawn_runtime(
@@ -71,7 +88,11 @@ pub fn spawn_runtime(
     emit_tx: mpsc::UnboundedSender<BreadEvent>,
 ) -> Result<RuntimeHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let handle = RuntimeHandle { tx };
+    let recent_errors = Arc::new(Mutex::new(VecDeque::with_capacity(50)));
+    let handle = RuntimeHandle {
+        tx,
+        recent_errors: recent_errors.clone(),
+    };
     let thread_tx = handle.tx.clone();
 
     std::thread::Builder::new()
@@ -83,7 +104,13 @@ pub fn spawn_runtime(
                 .expect("failed to create lua runtime thread");
 
             rt.block_on(async move {
-                let mut engine = match LuaEngine::new(config, state_handle, emit_tx, thread_tx.clone()) {
+                let mut engine = match LuaEngine::new(
+                    config,
+                    state_handle,
+                    emit_tx,
+                    thread_tx.clone(),
+                    recent_errors,
+                ) {
                     Ok(engine) => engine,
                     Err(err) => {
                         error!(error = %err, "failed to initialize lua engine");
@@ -160,6 +187,8 @@ struct ModuleDecl {
     version: Option<String>,
     after: Vec<String>,
     path: PathBuf,
+    source: Option<&'static str>,
+    builtin: bool,
 }
 
 struct ModuleInfo {
@@ -182,6 +211,9 @@ struct LuaEngine {
     lua_tx: mpsc::UnboundedSender<LuaMessage>,
     entry_point: PathBuf,
     module_path: PathBuf,
+    modules_config: ModulesConfig,
+    notifications_config: NotificationsConfig,
+    recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
 }
 
 impl LuaEngine {
@@ -190,6 +222,7 @@ impl LuaEngine {
         state_handle: StateHandle,
         emit_tx: mpsc::UnboundedSender<BreadEvent>,
         lua_tx: mpsc::UnboundedSender<LuaMessage>,
+        recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
     ) -> Result<Self> {
         Ok(Self {
             lua: Lua::new(),
@@ -207,6 +240,9 @@ impl LuaEngine {
             lua_tx,
             entry_point: config.lua_entry_point(),
             module_path: config.lua_module_path(),
+            modules_config: config.modules.clone(),
+            notifications_config: config.notifications.clone(),
+            recent_errors,
         })
     }
 
@@ -324,7 +360,9 @@ impl LuaEngine {
                         .map_err(|_| LuaError::external("missing filter function"))?;
                     Some(lua.create_registry_value(filter_fn)?)
                 } else {
-                    return Err(LuaError::external("missing filter options"));
+                    return Err(LuaError::external(
+                        "bread.filter requires an opts table with a 'filter' function: bread.filter(pattern, fn, { filter = fn })",
+                    ));
                 };
                 let module = current_module
                     .lock()
@@ -503,6 +541,61 @@ impl LuaEngine {
         })?;
         bread.set("exec", exec_fn)?;
 
+        let notify_path = self.notifications_config.notify_send_path.clone();
+        let default_urgency = self.notifications_config.default_urgency.clone();
+        let default_timeout = self.notifications_config.default_timeout_ms;
+        let emit_tx = self.emit_tx.clone();
+        let notify_fn = self
+            .lua
+            .create_function(move |_lua, (message, opts): (String, Option<Table>)| {
+            let title: String = opts
+                .as_ref()
+                .and_then(|o| o.get("title").ok())
+                .unwrap_or_else(|| "bread".to_string());
+            let urgency: String = opts
+                .as_ref()
+                .and_then(|o| o.get("urgency").ok())
+                .unwrap_or_else(|| default_urgency.clone());
+            let timeout: i64 = opts
+                .as_ref()
+                .and_then(|o| o.get("timeout").ok())
+                .unwrap_or(default_timeout);
+            let icon: Option<String> = opts.as_ref().and_then(|o| o.get("icon").ok());
+
+            let cmd_path = notify_path.clone();
+            let title_clone = title.clone();
+            let message_clone = message.clone();
+            let urgency_clone = urgency.clone();
+            task::spawn_blocking(move || {
+                let mut cmd = std::process::Command::new(cmd_path);
+                cmd.args([
+                    "--app-name",
+                    "bread",
+                    "--urgency",
+                    &urgency_clone,
+                    "--expire-time",
+                    &timeout.to_string(),
+                ]);
+                if let Some(icon) = icon {
+                    cmd.args(["--icon", &icon]);
+                }
+                let _ = cmd.args([&title_clone, &message_clone]).status();
+            });
+
+            let _ = emit_tx.send(BreadEvent::new(
+                "bread.notify.sent",
+                AdapterSource::System,
+                serde_json::json!({
+                    "title": title,
+                    "message": message,
+                    "urgency": urgency,
+                }),
+            ));
+
+            Ok(())
+        })?;
+        bread.set("notify", notify_fn)?;
+
         let timers = self.timers.clone();
         let next_timer_id = self.next_timer_id.clone();
         let lua_tx = self.lua_tx.clone();
@@ -556,7 +649,8 @@ impl LuaEngine {
                 );
             let lua_tx = lua_tx.clone();
             task::spawn(async move {
-                let mut ticker = interval(Duration::from_millis(interval_ms));
+                let start = Instant::now() + Duration::from_millis(interval_ms);
+                let mut ticker = interval_at(start, Duration::from_millis(interval_ms));
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
@@ -746,16 +840,28 @@ impl LuaEngine {
         globals.set("bread", bread)?;
         self.install_require_loader()?;
         self.install_wait_helper()?;
+        self.install_log_helpers()?;
+        self.install_debounce()?;
         Ok(())
     }
 
     fn load_init_and_modules(&self) -> Result<()> {
-        self.load_lua_file(&self.entry_point, "init")?;
+        self.load_lua_file(&self.entry_point, "init", false)?;
 
         let mut files = list_lua_files(&self.module_path)?;
         files.sort();
 
+        let disabled: HashSet<String> = self
+            .modules_config
+            .disable
+            .iter()
+            .cloned()
+            .collect();
+
         let mut decls = Vec::new();
+        if self.modules_config.builtin {
+            decls.extend(builtin_module_decls(&disabled));
+        }
         for path in files.into_iter().filter(|p| !is_lib_path(&self.module_path, p)) {
             match self.scan_module_decl(&path) {
                 Ok(decl) => decls.push(decl),
@@ -765,6 +871,7 @@ impl LuaEngine {
                         name,
                         ModuleLoadState::LoadError,
                         Some(err.to_string()),
+                        false,
                     );
                 }
             }
@@ -784,7 +891,7 @@ impl LuaEngine {
 
         for (name, err) in dep_errors {
             self.state_handle
-                .set_module_status(name, ModuleLoadState::LoadError, Some(err));
+                .set_module_status(name, ModuleLoadState::LoadError, Some(err), false);
         }
 
         let mut load_order = Vec::new();
@@ -792,14 +899,19 @@ impl LuaEngine {
             load_order.push(decl.name.clone());
             match self.load_module(&decl) {
                 Ok(()) => {
-                    self.state_handle
-                        .set_module_status(decl.name.clone(), ModuleLoadState::Loaded, None);
+                    self.state_handle.set_module_status(
+                        decl.name.clone(),
+                        ModuleLoadState::Loaded,
+                        None,
+                        decl.builtin,
+                    );
                 }
                 Err(err) => {
                     self.state_handle.set_module_status(
                         decl.name.clone(),
                         ModuleLoadState::LoadError,
                         Some(err.to_string()),
+                        decl.builtin,
                     );
                 }
             }
@@ -815,7 +927,11 @@ impl LuaEngine {
 
     fn load_module(&self, decl: &ModuleDecl) -> Result<()> {
         self.set_current_module(Some(decl.name.clone()));
-        let result = self.load_lua_file(&decl.path, &decl.name);
+        let result = if let Some(source) = decl.source.as_deref() {
+            self.load_lua_source(source, &decl.name)
+        } else {
+            self.load_lua_file(&decl.path, &decl.name, decl.builtin)
+        };
         self.set_current_module(None);
         result?;
 
@@ -827,13 +943,14 @@ impl LuaEngine {
         Ok(())
     }
 
-    fn load_lua_file(&self, path: &Path, module_name: &str) -> Result<()> {
+    fn load_lua_file(&self, path: &Path, module_name: &str, builtin: bool) -> Result<()> {
         if !path.exists() {
             warn!(path = %path.display(), "lua file does not exist; skipping");
             self.state_handle.set_module_status(
                 module_name.to_string(),
                 ModuleLoadState::NotFound,
                 None,
+                builtin,
             );
             return Ok(());
         }
@@ -841,6 +958,14 @@ impl LuaEngine {
         let src = fs::read_to_string(path)?;
         self.lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec()?;
         Ok(())
+    }
+
+    fn load_lua_source(&self, source: &str, module_name: &str) -> Result<()> {
+        self.lua
+            .load(source)
+            .set_name(module_name)
+            .exec()
+            .map_err(|e| anyhow!(e.to_string()))
     }
 
     fn handle_event(&self, id: SubscriptionId, event: BreadEvent) -> Result<()> {
@@ -935,8 +1060,13 @@ impl LuaEngine {
         if let Some(hook) = self.get_module_hook(name, "on_load") {
             if let Err(err) = hook.call::<_, ()>(()) {
                 error!(module = %name, error = %err, "module on_load failed");
-                self.state_handle
-                    .set_module_status(name.to_string(), ModuleLoadState::LoadError, Some(err.to_string()));
+                let builtin = self.module_is_builtin(name);
+                self.state_handle.set_module_status(
+                    name.to_string(),
+                    ModuleLoadState::LoadError,
+                    Some(err.to_string()),
+                    builtin,
+                );
             }
         }
     }
@@ -951,10 +1081,12 @@ impl LuaEngine {
             if let Some(hook) = self.get_module_hook(&name, "on_reload") {
                 if let Err(err) = hook.call::<_, ()>(()) {
                     error!(module = %name, error = %err, "module on_reload failed");
+                    let builtin = self.module_is_builtin(&name);
                     self.state_handle.set_module_status(
                         name.to_string(),
                         ModuleLoadState::Degraded,
                         Some(err.to_string()),
+                        builtin,
                     );
                 }
             }
@@ -971,10 +1103,12 @@ impl LuaEngine {
             if let Some(hook) = self.get_module_hook(&name, "on_unload") {
                 if let Err(err) = hook.call::<_, ()>(()) {
                     error!(module = %name, error = %err, "module on_unload failed");
+                    let builtin = self.module_is_builtin(&name);
                     self.state_handle.set_module_status(
                         name.to_string(),
                         ModuleLoadState::Degraded,
                         Some(err.to_string()),
+                        builtin,
                     );
                 }
             }
@@ -983,10 +1117,22 @@ impl LuaEngine {
 
     fn handle_callback_error(&self, module: Option<&str>, id: SubscriptionId, err: LuaError) {
         if let Some(module) = module {
+            let builtin = self.module_is_builtin(module);
+            if let Ok(mut buf) = self.recent_errors.lock() {
+                if buf.len() >= 50 {
+                    buf.pop_front();
+                }
+                buf.push_back(ErrorEntry {
+                    timestamp: now_unix_ms(),
+                    module: Some(module.to_string()),
+                    message: err.to_string(),
+                });
+            }
             self.state_handle.set_module_status(
                 module.to_string(),
                 ModuleLoadState::Degraded,
                 Some(err.to_string()),
+                builtin,
             );
             if let Some(hook) = self.get_module_hook(module, "on_error") {
                 match hook.call::<_, bool>(err.to_string()) {
@@ -1022,6 +1168,14 @@ impl LuaEngine {
             .unwrap_or(false)
     }
 
+    fn module_is_builtin(&self, name: &str) -> bool {
+        self.module_decls
+            .lock()
+            .ok()
+            .and_then(|map| map.get(name).map(|d| d.builtin))
+            .unwrap_or(false)
+    }
+
     fn set_current_module(&self, name: Option<String>) {
         if let Ok(mut guard) = self.current_module.lock() {
             *guard = name;
@@ -1034,6 +1188,90 @@ impl LuaEngine {
                 let _ = entry.cancel_tx.send(true);
             }
         }
+    }
+
+    fn install_log_helpers(&self) -> Result<()> {
+        // bread.log(msg)   → tracing::info
+        // bread.warn(msg)  → tracing::warn
+        // bread.error(msg) → tracing::error
+        //
+        // Each accepts any Lua value and coerces it to a string via tostring()
+        // so callers can do bread.log(some_table) without a crash.
+        self.lua.load(r#"
+            local _bread = bread
+
+            local function stringify(v)
+                if type(v) == "string" then
+                    return v
+                end
+                return tostring(v)
+            end
+
+            function _bread.log(msg)
+                _bread.__log_info(stringify(msg))
+            end
+
+            function _bread.warn(msg)
+                _bread.__log_warn(stringify(msg))
+            end
+
+            function _bread.error(msg)
+                _bread.__log_error(stringify(msg))
+            end
+        "#).exec()?;
+
+        // Register the raw Rust-backed log functions that the Lua wrappers call.
+        let globals = self.lua.globals();
+        let bread: mlua::Table = globals.get("bread")?;
+
+        let info_fn = self.lua.create_function(|_, msg: String| {
+            tracing::info!(target: "bread.lua", "{}", msg);
+            Ok(())
+        })?;
+        bread.set("__log_info", info_fn)?;
+
+        let warn_fn = self.lua.create_function(|_, msg: String| {
+            tracing::warn!(target: "bread.lua", "{}", msg);
+            Ok(())
+        })?;
+        bread.set("__log_warn", warn_fn)?;
+
+        let error_fn = self.lua.create_function(|_, msg: String| {
+            tracing::error!(target: "bread.lua", "{}", msg);
+            Ok(())
+        })?;
+        bread.set("__log_error", error_fn)?;
+
+        Ok(())
+    }
+
+    fn install_debounce(&self) -> Result<()> {
+        // bread.debounce(delay_ms, fn) → wrapped_fn
+        //
+        // Returns a new function. When that function is called, it resets a
+        // timer. The original function is only called once the timer expires
+        // without being reset. Useful for rapid hardware events (e.g. monitor
+        // topology changes that fire multiple events in quick succession).
+        //
+        // Because the Lua runtime is single-threaded, we implement this in
+        // pure Lua using bread.cancel / bread.after.
+        self.lua.load(r#"
+            function bread.debounce(delay_ms, fn)
+                local timer_id = nil
+                return function(...)
+                    local args = { ... }
+                    if timer_id then
+                        bread.cancel(timer_id)
+                        timer_id = nil
+                    end
+                    timer_id = bread.after(delay_ms, function()
+                        timer_id = nil
+                        fn(table.unpack(args))
+                    end)
+                end
+            end
+        "#).exec()?;
+        Ok(())
     }
 
     fn scan_module_decl(&self, path: &Path) -> Result<ModuleDecl> {
@@ -1052,6 +1290,8 @@ impl LuaEngine {
                 version,
                 after,
                 path: module_path.clone(),
+                source: None,
+                builtin: false,
             });
             Err(LuaError::RuntimeError(MODULE_DECL_ABORT.to_string()))
         })?;
@@ -1119,6 +1359,14 @@ impl LuaEngine {
         self.lua
             .load(
                 r#"
+                bread.spawn = function(fn)
+                    local co = coroutine.create(fn)
+                    local ok, err = coroutine.resume(co)
+                    if not ok then
+                        error(err)
+                    end
+                end
+
                 bread.wait = function(pattern, opts)
                     if type(pattern) ~= "string" then
                         error("bread.wait requires a pattern string")
@@ -1251,7 +1499,15 @@ fn state_value_to_lua<'lua>(
     state_arc: &Arc<RwLock<RuntimeState>>,
     path: &str,
 ) -> mlua::Result<Value<'lua>> {
-    let snapshot = state_arc.blocking_read();
+    // The Lua thread runs a current_thread runtime. blocking_read and block_in_place
+    // both require the multi-thread runtime and panic here. try_read succeeds
+    // immediately in the common case; the write lock is held for microseconds.
+    let snapshot = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+    };
     let mut value = serde_json::to_value(&*snapshot)
         .map_err(|e| LuaError::external(e.to_string()))?;
     if path.is_empty() {
@@ -1270,13 +1526,23 @@ fn state_value_to_lua<'lua>(
 }
 
 fn module_store_get(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: &str) -> Option<JsonValue> {
-    let guard = state_arc.blocking_read();
+    let guard = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+    };
     let entry = guard.modules.iter().find(|m| m.name == module)?;
     entry.store.get(key).cloned()
 }
 
 fn module_store_set(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: String, value: JsonValue) {
-    let mut guard = state_arc.blocking_write();
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+    };
     if let Some(entry) = guard.modules.iter_mut().find(|m| m.name == module) {
         entry.store.insert(key, value);
         return;
@@ -1288,8 +1554,305 @@ fn module_store_set(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: St
         name: module.to_string(),
         status: ModuleLoadState::Loaded,
         last_error: None,
+        builtin: false,
         store,
     });
+}
+
+const BUILTIN_MONITORS: &str = r#"
+local M = bread.module({ name = "bread.monitors", version = "1.0.0" })
+
+local workflows = {}
+local layouts = {}
+
+local function matches_when(event_name, when)
+    if when == "connected" then
+        return event_name == "bread.monitor.connected"
+    elseif when == "disconnected" then
+        return event_name == "bread.monitor.disconnected"
+    elseif when == "changed" then
+        return event_name == "bread.monitor.changed"
+    end
+    return false
+end
+
+local function matches_monitors(list, event)
+    if not list or #list == 0 then
+        return true
+    end
+    local name = event.data and event.data.name
+    if not name then
+        return false
+    end
+    for _, monitor in ipairs(list) do
+        if monitor == name then
+            return true
+        end
+    end
+    return false
+end
+
+local function run_workflow(wf, event)
+    if type(wf.run) == "function" then
+        wf.run(event)
+    elseif type(wf.run) == "string" then
+        bread.exec(wf.run)
+    end
+end
+
+function M.on(opts)
+    table.insert(workflows, opts)
+end
+
+function M.layout(name, fn)
+    layouts[name] = fn
+end
+
+function M.apply(name)
+    return function()
+        local fn = layouts[name]
+        if fn then
+            fn()
+        end
+    end
+end
+
+function M.on_load()
+    bread.on("bread.monitor.**", function(event)
+        for _, wf in ipairs(workflows) do
+            if matches_when(event.event, wf.when) and matches_monitors(wf.monitors, event) then
+                run_workflow(wf, event)
+            end
+        end
+    end)
+end
+
+return M
+"#;
+
+const BUILTIN_DEVICES: &str = r#"
+local M = bread.module({ name = "bread.devices", version = "1.0.0" })
+
+local rules = {}
+local user_patterns = {}  -- { { pattern = "...", class = "..." }, ... }
+
+local function matches_rule(rule, event)
+    local class = rule.class
+    local when = rule.when
+    local data = event.data or {}
+
+    if when == "connected" and event.event ~= "bread.device.connected" then
+        if not event.event:match("%.connected$") then
+            return false
+        end
+    elseif when == "disconnected" and event.event ~= "bread.device.disconnected" then
+        if not event.event:match("%.disconnected$") then
+            return false
+        end
+    end
+
+    if class and data.class ~= class then
+        return false
+    end
+
+    if rule.name and data.name and not tostring(data.name):match(rule.name) then
+        return false
+    end
+
+    return true
+end
+
+local function run_rule(rule, event)
+    if type(rule.run) == "function" then
+        rule.run(event)
+    elseif type(rule.run) == "string" then
+        bread.exec(rule.run)
+    end
+end
+
+-- Reclassify an event's data.class based on user-registered name patterns.
+-- Called before rule matching so that user-registered patterns take effect
+-- even for devices that the daemon classified as Unknown.
+local function apply_user_patterns(event)
+    if not event.data then return event end
+    local name = tostring(event.data.name or ""):lower()
+    local vendor = tostring(event.data.vendor or ""):lower()
+    local combined = name .. " " .. vendor
+    for _, p in ipairs(user_patterns) do
+        if combined:find(p.pattern, 1, true) then
+            -- Return a shallow copy with the class overridden so we don't
+            -- mutate the original event that other handlers may receive.
+            local patched = {}
+            for k, v in pairs(event) do patched[k] = v end
+            patched.data = {}
+            for k, v in pairs(event.data) do patched.data[k] = v end
+            patched.data.class = p.class
+            return patched
+        end
+    end
+    return event
+end
+
+function M.on(opts)
+    table.insert(rules, opts)
+end
+
+-- Register a user-defined device pattern so the daemon can correctly classify
+-- hardware that the automatic classifier doesn't recognise.
+--
+-- Usage:
+--   local devices = require("bread.devices")
+--   devices.register("CalDigit", "dock")
+--   devices.register("Keychron", "keyboard")
+--   devices.register("MX Master", "mouse")
+--
+-- The pattern is matched case-insensitively against the device name and vendor
+-- combined. The class must be one of: dock, keyboard, mouse, tablet, display,
+-- storage, audio, unknown.
+function M.register(pattern, class)
+    table.insert(user_patterns, { pattern = pattern:lower(), class = class })
+end
+
+function M.on_load()
+    bread.on("bread.device.**", function(event)
+        local patched = apply_user_patterns(event)
+        for _, rule in ipairs(rules) do
+            if matches_rule(rule, patched) then
+                run_rule(rule, patched)
+            end
+        end
+    end)
+end
+
+return M
+"#;
+
+const BUILTIN_WORKSPACES: &str = r#"
+local M = bread.module({ name = "bread.workspaces", version = "1.0.0", after = { "bread.monitors" } })
+
+local assignments = {}
+local rules = {}
+
+function M.assign(workspace, monitor)
+    table.insert(assignments, { workspace = workspace, monitor = monitor })
+end
+
+function M.pin(opts)
+    table.insert(rules, opts)
+end
+
+function M.apply_assignments()
+    local monitors = bread.state.monitors()
+    local active = {}
+    for _, m in ipairs(monitors) do
+        if m.connected then
+            active[m.name] = true
+        end
+    end
+
+    for _, a in ipairs(assignments) do
+        if active[a.monitor] then
+            bread.hyprland.dispatch("moveworkspacetomonitor", a.workspace .. " " .. a.monitor)
+        end
+    end
+end
+
+function M.on_load()
+    bread.on("bread.monitor.**", function()
+        M.apply_assignments()
+    end)
+
+    bread.on("bread.window.opened", function(event)
+        for _, rule in ipairs(rules) do
+            if event.data and event.data.class and event.data.class:match(rule.app) then
+                local address = event.data.address or ""
+                bread.hyprland.dispatch("movetoworkspacesilent", rule.workspace .. ",address:" .. address)
+            end
+        end
+    end)
+
+    bread.once("bread.system.startup", function()
+        M.apply_assignments()
+    end)
+end
+
+return M
+"#;
+
+const BUILTIN_BINDS: &str = r#"
+local M = bread.module({ name = "bread.binds", version = "1.0.0" })
+
+local active = {}
+
+local function bind_string(opts)
+    local mods = table.concat(opts.mods or {}, " ")
+    local args = opts.args or ""
+    if mods ~= "" then
+        return mods .. ", " .. opts.key .. ", " .. opts.dispatch .. ", " .. args
+    end
+    return opts.key .. ", " .. opts.dispatch .. ", " .. args
+end
+
+function M.add(opts)
+    local bind = bind_string(opts)
+    bread.hyprland.keyword("bind", bind)
+    active[opts.key] = opts
+    return opts.key
+end
+
+function M.remove(key)
+    local bind = active[key]
+    if not bind then
+        return
+    end
+    bread.hyprland.keyword("unbind", bind_string(bind))
+    active[key] = nil
+end
+
+function M.replace(key, opts)
+    M.remove(key)
+    return M.add(opts)
+end
+
+function M.on_unload()
+    for key, _ in pairs(active) do
+        M.remove(key)
+    end
+end
+
+return M
+"#;
+
+fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
+    let mut out = Vec::new();
+
+    let entries = vec![
+        ("bread.monitors", "1.0.0", Vec::new(), BUILTIN_MONITORS),
+        ("bread.devices", "1.0.0", Vec::new(), BUILTIN_DEVICES),
+        (
+            "bread.workspaces",
+            "1.0.0",
+            vec!["bread.monitors".to_string()],
+            BUILTIN_WORKSPACES,
+        ),
+        ("bread.binds", "1.0.0", Vec::new(), BUILTIN_BINDS),
+    ];
+
+    for (name, version, after, source) in entries {
+        if disabled.contains(name) {
+            continue;
+        }
+        out.push(ModuleDecl {
+            name: name.to_string(),
+            version: Some(version.to_string()),
+            after,
+            path: PathBuf::from(format!("<builtin:{name}>")),
+            source: Some(source),
+            builtin: true,
+        });
+    }
+
+    out
 }
 
 fn hyprland_request_socket() -> Result<PathBuf> {
@@ -1307,7 +1870,7 @@ fn hyprland_request(request: &str) -> Result<String> {
     use std::os::unix::net::UnixStream;
 
     let socket = hyprland_request_socket()?;
-    let mut stream = UnixStream::connect(socket)?;
+    let mut stream = UnixStream::connect(&socket)?;
     stream.write_all(request.as_bytes())?;
     let mut buffer = String::new();
     stream.read_to_string(&mut buffer)?;
