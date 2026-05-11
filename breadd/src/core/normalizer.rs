@@ -80,22 +80,102 @@ impl EventNormalizer {
 
     fn normalize_hyprland(&self, raw: &RawEvent) -> Vec<BreadEvent> {
         let kind = raw.payload.get("kind").and_then(Value::as_str).unwrap_or("unknown");
-        let mapped = match kind {
-            "workspace" | "workspacev2" => "bread.workspace.changed",
-            "monitoradded" => "bread.monitor.connected",
-            "monitorremoved" => "bread.monitor.disconnected",
-            "activewindow" | "activewindowv2" => "bread.window.focus.changed",
-            "openwindow" => "bread.window.opened",
-            "closewindow" => "bread.window.closed",
-            _ => "bread.hyprland.event",
-        };
+        let data = raw
+            .payload
+            .get("data")
+            .and_then(Value::as_str)
+            .unwrap_or("");
 
-        vec![BreadEvent {
-            event: mapped.to_string(),
-            timestamp: raw.timestamp,
-            source: AdapterSource::Hyprland,
-            data: raw.payload.clone(),
-        }]
+        match kind {
+            "workspace" | "workspacev2" => vec![BreadEvent {
+                event: "bread.workspace.changed".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: raw.payload.clone(),
+            }],
+            "createworkspace" => vec![BreadEvent {
+                event: "bread.workspace.created".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: json!({ "workspace": data }),
+            }],
+            "destroyworkspace" => vec![BreadEvent {
+                event: "bread.workspace.destroyed".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: json!({ "workspace": data }),
+            }],
+            "monitoradded" => vec![BreadEvent {
+                event: "bread.monitor.connected".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: raw.payload.clone(),
+            }],
+            "monitorremoved" => vec![BreadEvent {
+                event: "bread.monitor.disconnected".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: raw.payload.clone(),
+            }],
+            "activewindow" => vec![BreadEvent {
+                event: "bread.window.focus.changed".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: raw.payload.clone(),
+            }],
+            "activewindowv2" => {
+                let fields = split_hyprland_fields(data);
+                vec![BreadEvent {
+                    event: "bread.window.focused".to_string(),
+                    timestamp: raw.timestamp,
+                    source: AdapterSource::Hyprland,
+                    data: json!({
+                        "address": fields.get(0).unwrap_or(&"")
+                    }),
+                }]
+            }
+            "openwindow" => {
+                let fields = split_hyprland_fields(data);
+                vec![BreadEvent {
+                    event: "bread.window.opened".to_string(),
+                    timestamp: raw.timestamp,
+                    source: AdapterSource::Hyprland,
+                    data: json!({
+                        "address": fields.get(0).unwrap_or(&""),
+                        "workspace": fields.get(1).unwrap_or(&""),
+                        "class": fields.get(2).unwrap_or(&""),
+                        "title": fields.get(3).unwrap_or(&""),
+                    }),
+                }]
+            }
+            "closewindow" => {
+                let fields = split_hyprland_fields(data);
+                vec![BreadEvent {
+                    event: "bread.window.closed".to_string(),
+                    timestamp: raw.timestamp,
+                    source: AdapterSource::Hyprland,
+                    data: json!({ "address": fields.get(0).unwrap_or(&"") }),
+                }]
+            }
+            "movewindow" => {
+                let fields = split_hyprland_fields(data);
+                vec![BreadEvent {
+                    event: "bread.window.moved".to_string(),
+                    timestamp: raw.timestamp,
+                    source: AdapterSource::Hyprland,
+                    data: json!({
+                        "address": fields.get(0).unwrap_or(&""),
+                        "workspace": fields.get(1).unwrap_or(&""),
+                    }),
+                }]
+            }
+            _ => vec![BreadEvent {
+                event: "bread.hyprland.event".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                data: raw.payload.clone(),
+            }],
+        }
     }
 
     fn normalize_power(&self, raw: &RawEvent) -> Vec<BreadEvent> {
@@ -199,6 +279,13 @@ impl EventNormalizer {
 
         true
     }
+}
+
+fn split_hyprland_fields(data: &str) -> Vec<&str> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    data.split(">>").collect()
 }
 
 fn classify_device(payload: &Value) -> DeviceClass {
