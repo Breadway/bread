@@ -15,7 +15,7 @@
 
 ## Overview
 
-Bread is a reactive automation fabric for Linux desktops. The daemon (`breadd`) normalizes external signals into semantic events, maintains runtime state, and dispatches events to Lua modules that implement automation.
+Bread is a reactive automation fabric for Linux desktops. The daemon (`bread`) normalizes external signals into semantic events, maintains runtime state, and dispatches events to Lua modules that implement automation.
 
 - Daemon: long-running Rust process, source of truth for runtime state
 - Lua runtime: dedicated thread inside the daemon; automation logic lives here
@@ -27,7 +27,7 @@ If you are new to Bread, start with the quick walkthrough below, then jump to th
 
 ### 1) Create a minimal config
 
-- Daemon config: `~/.config/bread/breadd.toml`
+- Daemon config: `~/.config/bread/bread.toml`
 - Lua entry point: `~/.config/bread/init.lua`
 - Lua modules: `~/.config/bread/modules/`
 
@@ -465,7 +465,7 @@ Payload includes `online` and `interfaces`.
 
 ## Dictionary: IPC protocol
 
-The daemon exposes a Unix socket at `$XDG_RUNTIME_DIR/bread/breadd.sock`. Messages are newline-delimited JSON.
+The daemon exposes a Unix socket at `$XDG_RUNTIME_DIR/bread/bread.sock`. Messages are newline-delimited JSON.
 
 Request:
 
