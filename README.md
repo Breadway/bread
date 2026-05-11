@@ -70,7 +70,7 @@ Optional but preferred:
 ### From source
 
 ```bash
-git clone https://github.com/Breadway/bread
+git clone https://github.com/Breadway/bread.git
 cd bread
 cargo build --release
 ```
