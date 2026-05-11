@@ -1,0 +1,19 @@
+[Unit]
+Description=Bread Runtime Daemon
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/breadd
+Restart=on-failure
+RestartSec=2
+UMask=0077
+RuntimeDirectory=bread
+RuntimeDirectoryMode=0700
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
