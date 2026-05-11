@@ -123,6 +123,8 @@ pub struct ModuleStatus {
     pub status: ModuleLoadState,
     pub last_error: Option<String>,
     #[serde(default)]
+    pub builtin: bool,
+    #[serde(default)]
     pub store: HashMap<String, Value>,
 }
 

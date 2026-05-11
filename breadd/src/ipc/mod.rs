@@ -1,18 +1,22 @@
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process;
 use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, Result};
-use bread_shared::{AdapterSource, BreadEvent};
+use bread_shared::{now_unix_ms, AdapterSource, BreadEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::{error, info, warn};
 
+use crate::adapters::AdapterStatus;
 use crate::core::state_engine::StateHandle;
 use crate::lua::RuntimeHandle;
 
@@ -23,6 +27,9 @@ pub struct Server {
     event_tx: broadcast::Sender<BreadEvent>,
     lua_runtime: RuntimeHandle,
     emit_tx: mpsc::UnboundedSender<BreadEvent>,
+    adapter_status: Arc<RwLock<HashMap<String, AdapterStatus>>>,
+    subscription_count: Arc<AtomicU64>,
+    event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
     started_at: Instant,
     pid: u32,
 }
@@ -51,6 +58,9 @@ impl Server {
         event_tx: broadcast::Sender<BreadEvent>,
         lua_runtime: RuntimeHandle,
         emit_tx: mpsc::UnboundedSender<BreadEvent>,
+        adapter_status: Arc<RwLock<HashMap<String, AdapterStatus>>>,
+        subscription_count: Arc<AtomicU64>,
+        event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
     ) -> Self {
         Self {
             socket_path,
@@ -58,6 +68,9 @@ impl Server {
             event_tx,
             lua_runtime,
             emit_tx,
+            adapter_status,
+            subscription_count,
+            event_buffer,
             started_at: Instant::now(),
             pid: process::id(),
         }
@@ -166,12 +179,25 @@ impl Server {
                 let full = self.state_handle.state_dump().await;
                 Ok(full.get("modules").cloned().unwrap_or_else(|| json!([])))
             }
-            "modules.reload" => self
-                .lua_runtime
-                .reload()
-                .await
-                .map(|_| json!({ "reloaded": true }))
-                .map_err(|e| e.to_string()),
+            "modules.reload" => {
+                let started = Instant::now();
+                if let Err(err) = self.lua_runtime.reload().await {
+                    return Err((id, err.to_string()));
+                }
+                let duration_ms = started.elapsed().as_millis();
+                let modules = self
+                    .state_handle
+                    .state_dump()
+                    .await
+                    .get("modules")
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                Ok(json!({
+                    "ok": true,
+                    "duration_ms": duration_ms,
+                    "modules": modules,
+                }))
+            }
             "profile.list" => {
                 let full = self.state_handle.state_dump().await;
                 let profiles = full
@@ -224,12 +250,37 @@ impl Server {
             }
             "health" => {
                 let uptime_ms = self.started_at.elapsed().as_millis();
+                let state = self.state_handle.state_dump().await;
+                let modules = state.get("modules").cloned().unwrap_or_else(|| json!([]));
+                let adapters = self.adapter_status.read().await.clone();
+                let subscription_count = self.subscription_count.load(std::sync::atomic::Ordering::Relaxed);
+                let recent_errors = self.lua_runtime.recent_errors();
                 Ok(json!({
                     "ok": true,
                     "pid": self.pid,
                     "version": env!("CARGO_PKG_VERSION"),
                     "uptime_ms": uptime_ms,
+                    "socket": self.socket_path.to_string_lossy(),
+                    "adapters": adapters,
+                    "modules": modules,
+                    "subscriptions": subscription_count,
+                    "recent_errors": recent_errors,
                 }))
+            }
+            "events.replay" => {
+                let since_ms = req.params.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
+                let cutoff = now_unix_ms().saturating_sub(since_ms);
+                let replay: Vec<BreadEvent> = self
+                    .event_buffer
+                    .lock()
+                    .map(|buf| {
+                        buf.iter()
+                            .filter(|e| e.timestamp >= cutoff)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(serde_json::to_value(replay).unwrap_or_else(|_| json!([])))
             }
             _ => Err("unknown method".to_string()),
         };
@@ -264,9 +315,67 @@ impl Server {
 }
 
 fn matches_filter(event_name: &str, pattern: &str) -> bool {
+    // Delegate to the same glob logic used by the subscription table so that
+    // `bread events --filter "bread.device.**"` behaves identically to
+    // `bread.on("bread.device.**", ...)` in Lua.
     if pattern.ends_with(".*") {
         let prefix = &pattern[..pattern.len() - 1];
         return event_name.starts_with(prefix);
     }
-    event_name == pattern
+
+    if let Some(prefix) = pattern.strip_suffix(".**") {
+        if event_name == prefix || event_name.starts_with(&format!("{prefix}.")) {
+            return true;
+        }
+        return false;
+    }
+
+    matches_glob_filter(pattern.as_bytes(), event_name.as_bytes())
+}
+
+fn matches_glob_filter(pattern: &[u8], text: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+
+    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
+        let rest = &pattern[2..];
+        if rest.is_empty() {
+            return true;
+        }
+        for offset in 0..=text.len() {
+            if matches_glob_filter(rest, &text[offset..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    match pattern[0] {
+        b'*' => {
+            let mut offset = 0;
+            loop {
+                if matches_glob_filter(&pattern[1..], &text[offset..]) {
+                    return true;
+                }
+                if offset == text.len() || text[offset] == b'.' {
+                    break;
+                }
+                offset += 1;
+            }
+            false
+        }
+        b'?' => {
+            if text.is_empty() || text[0] == b'.' {
+                return false;
+            }
+            matches_glob_filter(&pattern[1..], &text[1..])
+        }
+        ch => {
+            if text.first().copied() != Some(ch) {
+                return false;
+            }
+            matches_glob_filter(&pattern[1..], &text[1..])
+        }
+    }
 }

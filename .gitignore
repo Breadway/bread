@@ -1,4 +1,6 @@
 target/
 Overview.md
 DAEMON.md
-.github/
+.claude
+CLAUDE.md
+.github

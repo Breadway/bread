@@ -1,8 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bread_shared::RawEvent;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, RwLock};
 use tracing::info;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::core::config::Config;
 use crate::core::supervisor::spawn_supervised;
@@ -13,6 +16,13 @@ pub mod power;
 pub mod udev;
 pub mod network_rtnetlink;
 pub mod power_upower;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdapterStatus {
+    Connected,
+    Disconnected,
+}
 
 #[async_trait]
 pub trait Adapter: Send + Sync {
@@ -30,6 +40,7 @@ pub struct Manager {
     raw_tx: mpsc::Sender<RawEvent>,
     config: Config,
     shutdown_rx: watch::Receiver<bool>,
+    status: Arc<RwLock<HashMap<String, AdapterStatus>>>,
 }
 
 impl Manager {
@@ -42,7 +53,12 @@ impl Manager {
             raw_tx,
             config,
             shutdown_rx,
+            status: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn status_handle(&self) -> Arc<RwLock<HashMap<String, AdapterStatus>>> {
+        self.status.clone()
     }
 
     pub async fn start_all(&self) -> Result<()> {
@@ -91,17 +107,27 @@ impl Manager {
         let tx = self.raw_tx.clone();
         let shutdown_rx = self.shutdown_rx.clone();
         let shutdown_for_task = shutdown_rx.clone();
+        let status = self.status.clone();
         spawn_supervised(name, shutdown_rx, move || {
             let adapter = adapter.clone();
             let tx = tx.clone();
             let mut shutdown_rx = shutdown_for_task.clone();
+            let status = status.clone();
             async move {
                 adapter.on_connect().await?;
+                {
+                    let mut guard = status.write().await;
+                    guard.insert(adapter.name().to_string(), AdapterStatus::Connected);
+                }
                 let result = tokio::select! {
                     result = adapter.run(tx) => result,
                     _ = shutdown_rx.changed() => Ok(()),
                 };
                 adapter.on_disconnect().await?;
+                {
+                    let mut guard = status.write().await;
+                    guard.insert(adapter.name().to_string(), AdapterStatus::Disconnected);
+                }
                 result
             }
         });
