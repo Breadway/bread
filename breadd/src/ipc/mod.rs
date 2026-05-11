@@ -313,9 +313,67 @@ impl Server {
 }
 
 fn matches_filter(event_name: &str, pattern: &str) -> bool {
+    // Delegate to the same glob logic used by the subscription table so that
+    // `bread events --filter "bread.device.**"` behaves identically to
+    // `bread.on("bread.device.**", ...)` in Lua.
     if pattern.ends_with(".*") {
         let prefix = &pattern[..pattern.len() - 1];
         return event_name.starts_with(prefix);
     }
-    event_name == pattern
+
+    if let Some(prefix) = pattern.strip_suffix(".**") {
+        if event_name == prefix || event_name.starts_with(&format!("{prefix}.")) {
+            return true;
+        }
+        return false;
+    }
+
+    matches_glob_filter(pattern.as_bytes(), event_name.as_bytes())
+}
+
+fn matches_glob_filter(pattern: &[u8], text: &[u8]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+
+    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
+        let rest = &pattern[2..];
+        if rest.is_empty() {
+            return true;
+        }
+        for offset in 0..=text.len() {
+            if matches_glob_filter(rest, &text[offset..]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    match pattern[0] {
+        b'*' => {
+            let mut offset = 0;
+            loop {
+                if matches_glob_filter(&pattern[1..], &text[offset..]) {
+                    return true;
+                }
+                if offset == text.len() || text[offset] == b'.' {
+                    break;
+                }
+                offset += 1;
+            }
+            false
+        }
+        b'?' => {
+            if text.is_empty() || text[0] == b'.' {
+                return false;
+            }
+            matches_glob_filter(&pattern[1..], &text[1..])
+        }
+        ch => {
+            if text.first().copied() != Some(ch) {
+                return false;
+            }
+            matches_glob_filter(&pattern[1..], &text[1..])
+        }
+    }
 }
