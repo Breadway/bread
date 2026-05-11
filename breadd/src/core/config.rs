@@ -12,7 +12,11 @@ pub struct Config {
     #[serde(default)]
     pub lua: LuaConfig,
     #[serde(default)]
+    pub modules: ModulesConfig,
+    #[serde(default)]
     pub adapters: AdaptersConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
     #[serde(default)]
     pub events: EventsConfig,
 }
@@ -31,6 +35,14 @@ pub struct LuaConfig {
     pub entry_point: String,
     #[serde(default = "default_lua_modules")]
     pub module_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ModulesConfig {
+    #[serde(default = "default_true")]
+    pub builtin: bool,
+    #[serde(default)]
+    pub disable: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,12 +85,24 @@ pub struct EventsConfig {
     pub dedup_window_ms: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default = "default_notify_timeout")]
+    pub default_timeout_ms: i64,
+    #[serde(default = "default_notify_urgency")]
+    pub default_urgency: String,
+    #[serde(default = "default_notify_path")]
+    pub notify_send_path: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             daemon: DaemonConfig::default(),
             lua: LuaConfig::default(),
+            modules: ModulesConfig::default(),
             adapters: AdaptersConfig::default(),
+            notifications: NotificationsConfig::default(),
             events: EventsConfig::default(),
         }
     }
@@ -98,6 +122,15 @@ impl Default for LuaConfig {
         Self {
             entry_point: default_lua_entry(),
             module_path: default_lua_modules(),
+        }
+    }
+}
+
+impl Default for ModulesConfig {
+    fn default() -> Self {
+        Self {
+            builtin: default_true(),
+            disable: Vec::new(),
         }
     }
 }
@@ -143,6 +176,16 @@ impl Default for EventsConfig {
     fn default() -> Self {
         Self {
             dedup_window_ms: default_dedup_window(),
+        }
+    }
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            default_timeout_ms: default_notify_timeout(),
+            default_urgency: default_notify_urgency(),
+            notify_send_path: default_notify_path(),
         }
     }
 }
@@ -216,6 +259,18 @@ fn default_poll_interval() -> u64 {
 
 fn default_dedup_window() -> u64 {
     100
+}
+
+fn default_notify_timeout() -> i64 {
+    3000
+}
+
+fn default_notify_urgency() -> String {
+    "normal".to_string()
+}
+
+fn default_notify_path() -> String {
+    "notify-send".to_string()
 }
 
 fn default_udev_subsystems() -> Vec<String> {

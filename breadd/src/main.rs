@@ -3,7 +3,9 @@ mod core;
 mod ipc;
 mod lua;
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::Result;
 use bread_shared::{AdapterSource, BreadEvent, RawEvent};
@@ -33,7 +35,8 @@ async fn main() -> Result<()> {
     let (event_stream_tx, _) = broadcast::channel(2048);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let state_handle = StateHandle::new(state.clone(), state_cmd_tx);
+    let subscription_count = Arc::new(AtomicU64::new(0));
+    let state_handle = StateHandle::new(state.clone(), state_cmd_tx, subscription_count.clone());
 
     let lua_runtime = lua::spawn_runtime(config.clone(), state_handle.clone(), normalized_tx.clone())?;
     let lua_tx = lua_runtime.sender();
@@ -44,6 +47,7 @@ async fn main() -> Result<()> {
         state.clone(),
         lua_tx,
         event_stream_tx.clone(),
+        subscription_count.clone(),
         shutdown_rx.clone(),
     ));
 
@@ -78,6 +82,28 @@ async fn main() -> Result<()> {
     let adapter_manager = adapters::Manager::new(raw_tx, config.clone(), shutdown_rx.clone());
     adapter_manager.start_all().await?;
 
+    let adapter_status = adapter_manager.status_handle();
+
+    let event_buffer = Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(1000)));
+    {
+        let mut rx = event_stream_tx.subscribe();
+        let event_buffer = event_buffer.clone();
+        tokio::spawn(async move {
+            loop {
+                let evt = match rx.recv().await {
+                    Ok(evt) => evt,
+                    Err(_) => break,
+                };
+                if let Ok(mut buf) = event_buffer.lock() {
+                    if buf.len() >= 1000 {
+                        buf.pop_front();
+                    }
+                    buf.push_back(evt);
+                }
+            }
+        });
+    }
+
     let _ = normalized_tx.send(BreadEvent::new(
         "bread.system.startup",
         AdapterSource::System,
@@ -90,6 +116,9 @@ async fn main() -> Result<()> {
         event_stream_tx,
         lua_runtime.clone(),
         normalized_tx,
+        adapter_status,
+        subscription_count,
+        event_buffer,
     );
 
     info!("breadd fully started");

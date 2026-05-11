@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use bread_shared::{AdapterSource, BreadEvent};
@@ -15,6 +16,7 @@ use crate::lua::LuaMessage;
 pub struct StateHandle {
     state: Arc<RwLock<RuntimeState>>,
     command_tx: mpsc::UnboundedSender<StateCommand>,
+    subscription_count: Arc<AtomicU64>,
 }
 
 pub enum StateCommand {
@@ -38,6 +40,7 @@ pub enum StateCommand {
         name: String,
         status: ModuleLoadState,
         last_error: Option<String>,
+        builtin: bool,
     },
     SetProfile {
         name: String,
@@ -45,8 +48,16 @@ pub enum StateCommand {
 }
 
 impl StateHandle {
-    pub fn new(state: Arc<RwLock<RuntimeState>>, command_tx: mpsc::UnboundedSender<StateCommand>) -> Self {
-        Self { state, command_tx }
+    pub fn new(
+        state: Arc<RwLock<RuntimeState>>,
+        command_tx: mpsc::UnboundedSender<StateCommand>,
+        subscription_count: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            state,
+            command_tx,
+            subscription_count,
+        }
     }
 
     pub fn state_arc(&self) -> Arc<RwLock<RuntimeState>> {
@@ -101,16 +112,27 @@ impl StateHandle {
         let _ = self.command_tx.send(StateCommand::ClearSubscriptions);
     }
 
-    pub fn set_module_status(&self, name: String, status: ModuleLoadState, last_error: Option<String>) {
+    pub fn set_module_status(
+        &self,
+        name: String,
+        status: ModuleLoadState,
+        last_error: Option<String>,
+        builtin: bool,
+    ) {
         let _ = self.command_tx.send(StateCommand::SetModuleStatus {
             name,
             status,
             last_error,
+            builtin,
         });
     }
 
     pub fn set_profile(&self, name: String) {
         let _ = self.command_tx.send(StateCommand::SetProfile { name });
+    }
+
+    pub fn subscription_count(&self) -> Arc<AtomicU64> {
+        self.subscription_count.clone()
     }
 }
 
@@ -120,6 +142,7 @@ pub async fn run_state_engine(
     state: Arc<RwLock<RuntimeState>>,
     lua_tx: mpsc::UnboundedSender<LuaMessage>,
     event_stream_tx: broadcast::Sender<BreadEvent>,
+    subscription_count: Arc<AtomicU64>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let mut subscriptions = SubscriptionTable::default();
@@ -136,7 +159,7 @@ pub async fn run_state_engine(
                 let Some(cmd) = maybe_cmd else {
                     break;
                 };
-                handle_command(cmd, &state, &mut subscriptions, &mut watches).await;
+                handle_command(cmd, &state, &mut subscriptions, &mut watches, &subscription_count).await;
             }
             maybe_event = event_rx.recv() => {
                 let Some(event) = maybe_event else {
@@ -158,7 +181,7 @@ pub async fn run_state_engine(
                     apply_event_to_state(&mut guard, &event);
                 }
 
-                dispatch_event(&event, &mut subscriptions, &lua_tx, &event_stream_tx);
+                dispatch_event(&event, &mut subscriptions, &lua_tx, &event_stream_tx, &subscription_count);
 
                 if let (Some(before), Some(after)) = (before_snapshot, after_snapshot) {
                     for (_id, path) in watches.iter() {
@@ -174,7 +197,7 @@ pub async fn run_state_engine(
                                     "old": old_val,
                                 }),
                             );
-                            dispatch_event(&synthetic, &mut subscriptions, &lua_tx, &event_stream_tx);
+                            dispatch_event(&synthetic, &mut subscriptions, &lua_tx, &event_stream_tx, &subscription_count);
                         }
                     }
                 }
@@ -190,13 +213,17 @@ async fn handle_command(
     state: &Arc<RwLock<RuntimeState>>,
     subscriptions: &mut SubscriptionTable,
     watches: &mut HashMap<SubscriptionId, String>,
+    subscription_count: &Arc<AtomicU64>,
 ) {
     match cmd {
         StateCommand::RegisterSubscription { id, pattern, once } => {
             subscriptions.add_with_id(id, pattern, once);
+            subscription_count.fetch_add(1, Ordering::Relaxed);
         }
         StateCommand::RemoveSubscription { id } => {
-            subscriptions.remove(id);
+            if subscriptions.remove(id) {
+                subscription_count.fetch_sub(1, Ordering::Relaxed);
+            }
         }
         StateCommand::RegisterWatch { id, path } => {
             watches.insert(id, path);
@@ -207,21 +234,25 @@ async fn handle_command(
         StateCommand::ClearSubscriptions => {
             subscriptions.clear();
             watches.clear();
+            subscription_count.store(0, Ordering::Relaxed);
         }
         StateCommand::SetModuleStatus {
             name,
             status,
             last_error,
+            builtin,
         } => {
             let mut guard = state.write().await;
             if let Some(existing) = guard.modules.iter_mut().find(|m| m.name == name) {
                 existing.status = status;
                 existing.last_error = last_error;
+                existing.builtin = builtin;
             } else {
                 guard.modules.push(crate::core::types::ModuleStatus {
                     name,
                     status,
                     last_error,
+                    builtin,
                     store: HashMap::new(),
                 });
             }
@@ -242,6 +273,7 @@ fn dispatch_event(
     subscriptions: &mut SubscriptionTable,
     lua_tx: &mpsc::UnboundedSender<LuaMessage>,
     event_stream_tx: &broadcast::Sender<BreadEvent>,
+    subscription_count: &Arc<AtomicU64>,
 ) {
     let _ = event_stream_tx.send(event.clone());
 
@@ -254,7 +286,9 @@ fn dispatch_event(
     }
 
     for sub in matches.into_iter().filter(|s| s.once) {
-        subscriptions.remove(sub.id);
+        if subscriptions.remove(sub.id) {
+            subscription_count.fetch_sub(1, Ordering::Relaxed);
+        }
         let _ = lua_tx.send(LuaMessage::SubscriptionCancelled { id: sub.id });
     }
 }
@@ -302,11 +336,12 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
                 .map(ToString::to_string);
             state.active_workspace = ws;
         }
-        "bread.window.focus.changed" => {
+        "bread.window.focus.changed" | "bread.window.focused" => {
             state.active_window = event
                 .data
                 .get("window")
                 .or_else(|| event.data.get("class"))
+            .or_else(|| event.data.get("address"))
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
         }
