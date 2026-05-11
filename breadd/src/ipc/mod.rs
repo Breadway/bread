@@ -270,14 +270,16 @@ impl Server {
             "events.replay" => {
                 let since_ms = req.params.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
                 let cutoff = now_unix_ms().saturating_sub(since_ms);
-                let mut replay = Vec::new();
-                if let Ok(buf) = self.event_buffer.lock() {
-                    for event in buf.iter() {
-                        if event.timestamp >= cutoff {
-                            replay.push(event);
-                        }
-                    }
-                }
+                let replay: Vec<BreadEvent> = self
+                    .event_buffer
+                    .lock()
+                    .map(|buf| {
+                        buf.iter()
+                            .filter(|e| e.timestamp >= cutoff)
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 Ok(serde_json::to_value(replay).unwrap_or_else(|_| json!([])))
             }
             _ => Err("unknown method".to_string()),

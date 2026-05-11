@@ -1499,7 +1499,15 @@ fn state_value_to_lua<'lua>(
     state_arc: &Arc<RwLock<RuntimeState>>,
     path: &str,
 ) -> mlua::Result<Value<'lua>> {
-    let snapshot = state_arc.blocking_read();
+    // The Lua thread runs a current_thread runtime. blocking_read and block_in_place
+    // both require the multi-thread runtime and panic here. try_read succeeds
+    // immediately in the common case; the write lock is held for microseconds.
+    let snapshot = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+    };
     let mut value = serde_json::to_value(&*snapshot)
         .map_err(|e| LuaError::external(e.to_string()))?;
     if path.is_empty() {
@@ -1518,13 +1526,23 @@ fn state_value_to_lua<'lua>(
 }
 
 fn module_store_get(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: &str) -> Option<JsonValue> {
-    let guard = state_arc.blocking_read();
+    let guard = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+    };
     let entry = guard.modules.iter().find(|m| m.name == module)?;
     entry.store.get(key).cloned()
 }
 
 fn module_store_set(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: String, value: JsonValue) {
-    let mut guard = state_arc.blocking_write();
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+    };
     if let Some(entry) = guard.modules.iter_mut().find(|m| m.name == module) {
         entry.store.insert(key, value);
         return;
@@ -1616,6 +1634,7 @@ const BUILTIN_DEVICES: &str = r#"
 local M = bread.module({ name = "bread.devices", version = "1.0.0" })
 
 local rules = {}
+local user_patterns = {}  -- { { pattern = "...", class = "..." }, ... }
 
 local function matches_rule(rule, event)
     local class = rule.class
@@ -1651,15 +1670,55 @@ local function run_rule(rule, event)
     end
 end
 
+-- Reclassify an event's data.class based on user-registered name patterns.
+-- Called before rule matching so that user-registered patterns take effect
+-- even for devices that the daemon classified as Unknown.
+local function apply_user_patterns(event)
+    if not event.data then return event end
+    local name = tostring(event.data.name or ""):lower()
+    local vendor = tostring(event.data.vendor or ""):lower()
+    local combined = name .. " " .. vendor
+    for _, p in ipairs(user_patterns) do
+        if combined:find(p.pattern, 1, true) then
+            -- Return a shallow copy with the class overridden so we don't
+            -- mutate the original event that other handlers may receive.
+            local patched = {}
+            for k, v in pairs(event) do patched[k] = v end
+            patched.data = {}
+            for k, v in pairs(event.data) do patched.data[k] = v end
+            patched.data.class = p.class
+            return patched
+        end
+    end
+    return event
+end
+
 function M.on(opts)
     table.insert(rules, opts)
 end
 
+-- Register a user-defined device pattern so the daemon can correctly classify
+-- hardware that the automatic classifier doesn't recognise.
+--
+-- Usage:
+--   local devices = require("bread.devices")
+--   devices.register("CalDigit", "dock")
+--   devices.register("Keychron", "keyboard")
+--   devices.register("MX Master", "mouse")
+--
+-- The pattern is matched case-insensitively against the device name and vendor
+-- combined. The class must be one of: dock, keyboard, mouse, tablet, display,
+-- storage, audio, unknown.
+function M.register(pattern, class)
+    table.insert(user_patterns, { pattern = pattern:lower(), class = class })
+end
+
 function M.on_load()
     bread.on("bread.device.**", function(event)
+        local patched = apply_user_patterns(event)
         for _, rule in ipairs(rules) do
-            if matches_rule(rule, event) then
-                run_rule(rule, event)
+            if matches_rule(rule, patched) then
+                run_rule(rule, patched)
             end
         end
     end)
@@ -1811,13 +1870,11 @@ fn hyprland_request(request: &str) -> Result<String> {
     use std::os::unix::net::UnixStream;
 
     let socket = hyprland_request_socket()?;
-    tokio::task::block_in_place(|| {
-        let mut stream = UnixStream::connect(&socket)?;
-        stream.write_all(request.as_bytes())?;
-        let mut buffer = String::new();
-        stream.read_to_string(&mut buffer)?;
-        Ok(buffer)
-    })
+    let mut stream = UnixStream::connect(&socket)?;
+    stream.write_all(request.as_bytes())?;
+    let mut buffer = String::new();
+    stream.read_to_string(&mut buffer)?;
+    Ok(buffer)
 }
 
 fn list_lua_files(root: &Path) -> Result<Vec<PathBuf>> {

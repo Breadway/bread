@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -341,18 +341,6 @@ async fn watch_reload(socket: &Path) -> Result<()> {
     })?;
     watcher.watch(&config_dir, RecursiveMode::Recursive)?;
 
-    use tokio::time::{sleep, Duration};
-
-async fn watch_reload(socket: &Path) -> Result<()> {
-    let config_dir = config_directory();
-    println!("watching {} for changes...", config_dir.display());
-
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
-        let _ = tx.send(res);
-    })?;
-    watcher.watch(&config_dir, RecursiveMode::Recursive)?;
-
     while let Some(msg) = rx.recv().await {
         if msg.is_err() {
             continue;
@@ -360,15 +348,12 @@ async fn watch_reload(socket: &Path) -> Result<()> {
 
         // Debounce: drain any follow-up events that arrive within 150ms.
         // A single file save typically generates 2-3 fs events in rapid succession.
-        sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
         while rx.try_recv().is_ok() {}
 
         let response = send_request(socket, "modules.reload", json!({})).await?;
         print_reload(&response);
     }
-
-    Ok(())
-}
 
     Ok(())
 }

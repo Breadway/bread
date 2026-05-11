@@ -3,6 +3,10 @@ name = "bread-cli"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "bread"
+path = "src/main.rs"
+
 [dependencies]
 bread-shared = { path = "../bread-shared" }
 serde.workspace = true

@@ -52,18 +52,23 @@ impl Adapter for UdevAdapter {
 
     async fn run(&self, tx: mpsc::Sender<RawEvent>) -> Result<()> {
         debug!("udev adapter started");
-        if let Ok(()) = run_udev_monitor(self.subsystems.clone(), tx.clone()).await {
-            return Ok(());
+        match run_udev_monitor(self.subsystems.clone(), tx.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                tracing::warn!(error = %err, "udev netlink monitor unavailable, falling back to sysfs polling (add user to 'plugdev' group for real-time events)");
+            }
         }
 
-        // Fallback for environments where monitor sockets are unavailable.
-        let mut known: HashMap<String, ScannedDevice> = scan_devices(&self.subsystems)?
+        // Fallback: poll sysfs every 2 seconds for environments where the
+        // netlink socket is unavailable (missing plugdev membership, containers, etc).
+        let mut known: HashMap<String, ScannedDevice> = scan_devices(&self.subsystems)
+            .unwrap_or_default()
             .into_iter()
             .map(|d| (d.id.clone(), d))
             .collect();
 
         loop {
-            let current = scan_devices(&self.subsystems)?;
+            let current = scan_devices(&self.subsystems).unwrap_or_default();
             let current_map: HashMap<String, ScannedDevice> = current
                 .into_iter()
                 .map(|d| (d.id.clone(), d))
@@ -71,13 +76,17 @@ impl Adapter for UdevAdapter {
 
             for (id, dev) in &current_map {
                 if !known.contains_key(id) {
-                    tx.send(raw_change_event("add", dev)).await?;
+                    if tx.send(raw_change_event("add", dev)).await.is_err() {
+                        return Ok(());
+                    }
                 }
             }
 
             for (id, dev) in &known {
                 if !current_map.contains_key(id) {
-                    tx.send(raw_change_event("remove", dev)).await?;
+                    if tx.send(raw_change_event("remove", dev)).await.is_err() {
+                        return Ok(());
+                    }
                 }
             }
 
@@ -130,6 +139,15 @@ async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -
                     "id": id,
                     "name": name,
                     "subsystem": subsystem,
+                    "id_input_keyboard": prop_bool(&event, "ID_INPUT_KEYBOARD"),
+                    "id_input_mouse": prop_bool(&event, "ID_INPUT_MOUSE"),
+                    "id_input_joystick": prop_bool(&event, "ID_INPUT_JOYSTICK"),
+                    "id_input_touchpad": prop_bool(&event, "ID_INPUT_TOUCHPAD"),
+                    "id_input_tablet": prop_bool(&event, "ID_INPUT_TABLET"),
+                    "id_usb_class": prop_str(&event, "ID_USB_CLASS"),
+                    "id_usb_interfaces": prop_str(&event, "ID_USB_INTERFACES"),
+                    "id_vendor": prop_str(&event, "ID_VENDOR"),
+                    "id_model": prop_str(&event, "ID_MODEL"),
                 }),
                 timestamp: now_unix_ms(),
             };
@@ -262,4 +280,18 @@ fn scan_devices(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
     }
 
     Ok(out)
+}
+
+fn prop_bool(event: &udev::Event, key: &str) -> bool {
+    event
+        .property_value(key)
+        .and_then(|v| v.to_str())
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+fn prop_str(event: &udev::Event, key: &str) -> Option<String> {
+    event
+        .property_value(key)
+        .map(|v| v.to_string_lossy().to_string())
 }

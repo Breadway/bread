@@ -5,7 +5,7 @@ Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.cargo/bin/breadd
+ExecStart=/usr/bin/breadd
 Restart=on-failure
 RestartSec=2
 UMask=0077
