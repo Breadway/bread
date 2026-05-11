@@ -6,6 +6,8 @@
 - [Getting started](#getting-started)
 - [Your first module](#your-first-module)
 - [Run, reload, and watch](#run-reload-and-watch)
+- [Modules: install and manage](#modules-install-and-manage)
+- [Sync: snapshot and restore](#sync-snapshot-and-restore)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
 - [Dictionary: Built-in modules](#dictionary-built-in-modules)
@@ -15,11 +17,11 @@
 
 ## Overview
 
-Bread is a reactive automation fabric for Linux desktops. The daemon (`bread`) normalizes external signals into semantic events, maintains runtime state, and dispatches events to Lua modules that implement automation.
+Bread is a reactive automation fabric for Linux desktops. The daemon (`breadd`) normalizes external signals into semantic events, maintains runtime state, and dispatches events to Lua modules that implement automation.
 
-- Daemon: long-running Rust process, source of truth for runtime state
-- Lua runtime: dedicated thread inside the daemon; automation logic lives here
-- CLI: talks to the daemon over a Unix socket
+- **Daemon** (`breadd`) — long-running Rust process; source of truth for runtime state
+- **Lua runtime** — dedicated thread inside the daemon; automation logic lives here
+- **CLI** (`bread`) — talks to the daemon over a Unix socket
 
 If you are new to Bread, start with the quick walkthrough below, then jump to the full dictionary when you need exact API details.
 
@@ -27,75 +29,189 @@ If you are new to Bread, start with the quick walkthrough below, then jump to th
 
 ### 1) Create a minimal config
 
-- Daemon config: `~/.config/bread/bread.toml`
+- Daemon config: `~/.config/bread/breadd.toml` (all values optional)
 - Lua entry point: `~/.config/bread/init.lua`
 - Lua modules: `~/.config/bread/modules/`
 
 ### 2) Minimal `init.lua`
 
 ```lua
-require("modules.devices")
-require("modules.workspaces")
-
-bread.on("bread.system.startup", function()
+bread.on("bread.system.startup", function(event)
     bread.profile.activate("default")
+    bread.log("bread started on " .. bread.machine.name())
 end)
 ```
 
-### 3) Add your first module
+### 3) Start the daemon
 
-Create a Lua file under your modules directory and load it from `init.lua`.
+```bash
+systemctl --user start breadd
+
+# Or directly:
+breadd
+```
+
+### 4) Check that it's running
+
+```bash
+bread ping
+bread doctor
+```
 
 ## Your first module
+
+Create a file at `~/.config/bread/modules/hello.lua`. It is discovered and loaded automatically after `init.lua`.
 
 ```lua
 local M = bread.module({ name = "hello", version = "0.1.0" })
 
 function M.on_load()
-    bread.log("hello from bread")
+    bread.log("hello from bread on " .. bread.machine.name())
 
     bread.on("bread.device.*", function(event)
-        bread.log(event.event)
+        bread.log("device event: " .. event.event)
     end)
 end
 
 return M
 ```
 
-Why this shape?
+Key rules:
 
-- Every module must call `bread.module` once.
-- `on_load` is a good place to register subscriptions.
+- Every module must call `bread.module` exactly once at the top level.
+- Register subscriptions inside `M.on_load` so they are cleaned up properly on hot reload.
 - Use `bread.log` early to verify handlers are firing.
 
 ## Run, reload, and watch
 
-- Start the daemon, then use `bread reload` after editing Lua.
-- `bread reload --watch` will keep reloading on changes.
-- See [Examples.md](Examples.md) for real-world ports.
+```bash
+# Hot-reload the Lua runtime after editing config
+bread reload
+
+# Watch for file changes and reload automatically
+bread reload --watch
+```
+
+If any module fails to load, `bread reload` prints the error with a full Lua stack trace. The daemon stays running — fix the file and reload again.
+
+## Modules: install and manage
+
+Modules are Lua packages installed to `~/.config/bread/modules/`. The CLI manages the install lifecycle.
+
+```bash
+# Install from GitHub (downloads and extracts the default branch tarball)
+bread modules install github:someuser/bread-wifi
+
+# Install from a local directory
+bread modules install ~/src/my-module
+
+# Install a specific ref
+bread modules install github:someuser/bread-wifi@v1.2.0
+
+# List installed modules and their daemon status
+bread modules list
+
+# Show full manifest for one module
+bread modules info bread-wifi
+
+# Re-install all GitHub-sourced modules (pick up upstream changes)
+bread modules update
+
+# Remove a module
+bread modules remove bread-wifi
+bread modules remove bread-wifi --yes   # skip confirmation
+```
+
+Each installed module has a `bread.module.toml` manifest:
+
+```toml
+name = "wifi"
+version = "1.0.0"
+description = "WiFi management for Bread"
+author = "someuser"
+source = "github:someuser/bread-wifi"
+installed_at = "2026-01-01T00:00:00Z"
+```
+
+## Sync: snapshot and restore
+
+Bread sync snapshots your Bread config, arbitrary dotfiles, and installed package lists into a Git repository. Pull it on another machine to restore state.
+
+```bash
+# First-time setup
+bread sync init --remote git@github.com:you/bread-config.git
+
+# Snapshot and push
+bread sync push
+
+# On another machine: pull and apply
+bread sync pull
+
+# Also reinstall packages from snapshot
+bread sync pull --install-packages
+
+# See what has changed
+bread sync status
+bread sync diff
+bread sync diff --remote
+
+# List known machines
+bread sync machines
+```
+
+Configure sync in `~/.config/bread/sync.toml`:
+
+```toml
+[remote]
+url = "git@github.com:you/bread-config.git"
+branch = "main"
+
+[machine]
+name = "hermes"
+tags = ["laptop", "battery"]
+
+[packages]
+enabled = true
+managers = ["pacman", "pip", "cargo"]
+
+[delegates]
+include = ["~/.config/nvim", "~/.config/waybar"]
+exclude = ["**/.git", "**/*.cache"]
+```
+
+The sync repo stores:
+
+```
+~/.local/share/bread/sync-repo/
+├── bread/          ← ~/.config/bread/ snapshot
+├── configs/        ← delegate paths (nvim, waybar, etc.)
+├── machines/       ← per-machine profiles with tags and last-sync time
+└── packages/       ← package snapshots (pacman.txt, pip.txt, etc.)
+```
 
 ## Debugging tips
 
-- Log event payloads with `bread.log(event.data.raw)` when matching devices.
-- Use `bread.events` in the CLI to see live normalized events.
-- Use `bread state` to see runtime state as JSON.
+- Run `bread events` to see live normalized events.
+- Run `bread state` to see full runtime state as JSON.
+- Run `bread doctor` to check adapter and module health.
+- Log event payloads with `bread.log(tostring(event.data))`.
+- Use `RUST_LOG=debug breadd` for verbose daemon output.
 
-## Lua module system
+---
 
-### Entry point and module scanning
+## Dictionary: Lua API
 
-- `init.lua` is executed first.
-- Modules are discovered by scanning `~/.config/bread/modules/` for `.lua` files.
-- Every module must call `bread.module` exactly once at top-level.
-- Modules are ordered by the `after` dependency list.
+Every API is exposed through the `bread` global table.
 
 ### Module declaration
 
+Every module must call `bread.module` exactly once at the top level.
+
 ```lua
 local M = bread.module({
-    name = "my.module",
+    name    = "my.module",
     version = "0.1.0",
-    after = { "bread.devices" },
+    after   = { "bread.devices" },   -- optional: load after this module
 })
 
 return M
@@ -103,65 +219,25 @@ return M
 
 If a module does not call `bread.module`, it fails to load and is marked as a load error.
 
-### Require loader
-
-`require("bread.<path>")` resolves to a Lua file under the module path. For example:
-
-```lua
-local utils = require("bread.lib.utils")
-```
-
-This loads `~/.config/bread/modules/lib/utils.lua` if it exists. Non-`bread.*` `require` calls fall back to standard Lua behavior.
-
-### Lifecycle hooks
-
-Modules may export any of the following hooks. All are optional.
-
-```lua
-function M.on_load()
-    -- register subscriptions, initialize module state
-end
-
-function M.on_reload()
-    -- called after a hot reload completes
-end
-
-function M.on_unload()
-    -- called before the Lua instance is dropped
-end
-
-function M.on_error(err)
-    -- called when a handler throws
-    -- return true to keep the subscription, false to cancel it
-    return true
-end
-```
-
-### Module storage
-
-Each module has a scoped key-value store that survives reloads:
-
-```lua
-M.store.set("last_profile", "docked")
-local value = M.store.get("last_profile")
-```
-
-The store lives in the daemon runtime state and is not shared across modules.
-
-## Dictionary: Lua API
-
-Every API is exposed through the `bread` global table.
-
 ### Events
 
 #### `bread.on(pattern, fn) -> id`
 Subscribe to matching events. Returns a numeric subscription ID.
 
+```lua
+local id = bread.on("bread.device.*", function(event)
+    -- event.event   → the full event name string
+    -- event.data    → table of event-specific fields
+    -- event.source  → adapter that produced it ("Udev", "Hyprland", etc.)
+    bread.log(event.event)
+end)
+```
+
 #### `bread.once(pattern, fn) -> id`
 Subscribe once. The handler is removed after the first match.
 
 #### `bread.filter(pattern, fn, opts) -> id`
-Subscribe with a predicate filter. `opts` must contain `filter`:
+Subscribe with a predicate. `opts` must contain a `filter` function:
 
 ```lua
 bread.filter("bread.device.*", function(event)
@@ -174,13 +250,13 @@ end, {
 ```
 
 #### `bread.off(id)`
-Unsubscribe an event or state watch by ID.
+Unsubscribe an event handler or state watch by ID.
 
 #### `bread.emit(event, data)`
-Emit a custom event into the system pipeline.
+Emit a custom event into the system pipeline. Useful for cross-module communication.
 
 #### `bread.wait(pattern, opts) -> event | nil`
-Coroutine-only helper that waits for a matching event.
+Coroutine-only helper that suspends until a matching event arrives.
 
 ```lua
 bread.spawn(function()
@@ -192,30 +268,37 @@ end)
 ```
 
 #### `bread.spawn(fn)`
-Spawn a coroutine and surface errors if the coroutine fails.
+Spawn a coroutine and surface errors if it fails. Required for using `bread.wait`.
 
 ### State
 
 #### `bread.state.get(path)`
-Read a state subtree by dotted path (e.g. `"network.online"`).
+Read a state subtree by dotted path.
 
-#### Convenience helpers
+```lua
+local monitors = bread.state.get("monitors")
+local online   = bread.state.get("network.online")
+```
 
-- `bread.state.monitors()`
-- `bread.state.active_workspace()`
-- `bread.state.active_window()`
-- `bread.state.devices()`
-- `bread.state.power()`
-- `bread.state.network()`
-- `bread.state.profile()`
+#### Typed shorthands
+
+```lua
+bread.state.monitors()
+bread.state.active_workspace()
+bread.state.active_window()
+bread.state.devices()
+bread.state.power()
+bread.state.network()
+bread.state.profile()
+```
 
 #### `bread.state.watch(path, fn) -> id`
-Watch a state path. The callback receives `(new, old)`.
+Watch a state path for changes. The callback receives `(new_value, old_value)`.
 
 ```lua
 bread.state.watch("power.ac_connected", function(new_val, old_val)
     if new_val then
-        bread.exec("notify-send 'AC connected'")
+        bread.notify("AC connected")
     end
 end)
 ```
@@ -223,65 +306,146 @@ end)
 ### Profiles
 
 #### `bread.profile.activate(name)`
-Update the active profile. The CLI also emits `bread.profile.activated` over IPC; the Lua API does not emit this event on its own.
+Activate a named profile. Emits `bread.profile.activated` over IPC.
 
 ### Execution
 
 #### `bread.exec(cmd)`
-Runs `cmd` in a `sh -lc` shell. Fire-and-forget (async).
+Run a shell command. Fire-and-forget (async, does not block Lua).
 
 ### Notifications
 
 #### `bread.notify(message, opts)`
-Sends a desktop notification via `notify-send`.
+Send a desktop notification via `notify-send`.
 
 Options:
 
-- `title` (string, default: `"bread"`)
-- `urgency` (string, default from config)
-- `timeout` (ms, default from config)
-- `icon` (string, optional)
+| Key | Type | Default |
+|-----|------|---------|
+| `title` | string | `"bread"` |
+| `urgency` | string | from config |
+| `timeout` | ms | from config |
+| `icon` | string | none |
 
 Calling `bread.notify` emits `bread.notify.sent` with `{ title, message, urgency }`.
 
 ### Timers
 
 #### `bread.after(delay_ms, fn) -> id`
-Run once after delay.
+Run once after a delay.
 
 #### `bread.every(interval_ms, fn) -> id`
-Run repeatedly on an interval.
+Run on a repeating interval.
 
 #### `bread.cancel(id)`
-Cancel a timer created by `after` or `every`.
+Cancel a timer created by `after` or `every`. Timers are also cancelled automatically on reload.
 
 ### Utilities
 
 #### `bread.debounce(delay_ms, fn) -> wrapped_fn`
-Returns a wrapper that only fires after quiet time.
+Returns a wrapper that fires only after `delay_ms` of quiet time.
+
+```lua
+local fn = bread.debounce(200, function(event)
+    reconfigure_monitors()
+end)
+bread.on("bread.monitor.**", fn)
+```
 
 #### `bread.log(msg)` / `bread.warn(msg)` / `bread.error(msg)`
-Log helpers that accept any Lua value.
+Logging helpers. Accept any Lua value (coerced via `tostring`).
+
+### Machine and filesystem
+
+#### `bread.machine.name() -> string`
+Returns the machine name from `sync.toml`. Falls back to the system hostname if sync is not initialized.
+
+#### `bread.machine.tags() -> string[]`
+Returns the tags array from `sync.toml`, or `{}` if sync is not initialized.
+
+#### `bread.machine.has_tag(tag) -> bool`
+Returns true if the machine has the given tag.
+
+#### `bread.fs.write(path, content)`
+Write a file. Creates parent directories as needed. `~` is expanded.
+
+#### `bread.fs.read(path) -> string | nil`
+Read a file. Returns `nil` if the file does not exist. `~` is expanded.
+
+#### `bread.fs.exists(path) -> bool`
+Returns true if the path exists. `~` is expanded.
+
+#### `bread.fs.expand(path) -> string`
+Expand `~` to the home directory.
 
 ### Hyprland
 
-The `bread.hyprland` namespace provides compositor bindings:
+The `bread.hyprland` namespace provides compositor bindings.
 
-- `bread.hyprland.dispatch(cmd, args)`
-- `bread.hyprland.keyword(key, value)`
-- `bread.hyprland.active_window()`
-- `bread.hyprland.monitors()`
-- `bread.hyprland.workspaces()`
-- `bread.hyprland.clients()`
-- `bread.hyprland.on_raw(kind, fn) -> id`
+```lua
+-- Dispatch a Hyprland command
+bread.hyprland.dispatch("workspace", "2")
+bread.hyprland.dispatch("exec", "kitty")
 
-`bread.hyprland.on_raw` filters raw Hyprland events by `kind` and delivers the full event payload (including the original raw string).
+-- Set a keyword
+bread.hyprland.keyword("monitor", "HDMI-A-1, 2560x1440, 0x0, 1")
+
+-- Query compositor state (returns deserialized Lua tables)
+local win        = bread.hyprland.active_window()
+local monitors   = bread.hyprland.monitors()
+local workspaces = bread.hyprland.workspaces()
+local clients    = bread.hyprland.clients()
+
+-- Subscribe to raw Hyprland events (bypasses normalization)
+bread.hyprland.on_raw("activewindow", function(raw)
+    -- raw payload includes: kind, raw (original string), data
+end)
+```
+
+### Module lifecycle hooks
+
+All hooks are optional.
+
+```lua
+function M.on_load()
+    -- Called after the module loads. Register subscriptions here.
+end
+
+function M.on_reload()
+    -- Called after a hot reload completes across all modules.
+end
+
+function M.on_unload()
+    -- Called before the Lua instance is dropped.
+end
+
+function M.on_error(err)
+    -- Called when a subscription handler in this module throws.
+    -- Return true to keep the subscription alive, false to cancel it.
+    return true
+end
+```
+
+### Module storage
+
+Survives hot reload; does not survive daemon restart.
+
+```lua
+M.store.set("last_profile", "docked")
+local value = M.store.get("last_profile")
+```
+
+Storage is scoped per module and is not shared across modules.
+
+---
 
 ## Dictionary: Built-in modules
 
-Built-ins are enabled by default. Disable them via `[modules].disable` in the config.
+Built-ins are loaded before user modules. Disable them via `[modules].disable` in the daemon config.
 
 ### `bread.monitors`
+
+High-level declarative monitor event handlers.
 
 ```lua
 local monitors = require("bread.monitors")
@@ -291,40 +455,50 @@ monitors.layout("dock", function()
 end)
 
 monitors.on({
-    when = "connected",
+    when     = "connected",
     monitors = { "HDMI-A-1" },
-    run = monitors.apply("dock"),
+    run      = monitors.apply("dock"),
 })
 ```
 
-- `monitors.on({ when, monitors, run })`
-- `monitors.layout(name, fn)`
-- `monitors.apply(name) -> fn`
+| Function | Description |
+|----------|-------------|
+| `M.on(opts)` | Register a monitor workflow. `opts`: `when`, `monitors` (optional list), `run` (function or shell string) |
+| `M.layout(name, fn)` | Register a named layout function |
+| `M.apply(name) -> fn` | Returns a function that calls the named layout |
 
-`when` is one of `connected`, `disconnected`, `changed`. `run` may be a function or a shell command string.
+`when` is one of `connected`, `disconnected`, `changed`.
 
 ### `bread.devices`
+
+Device connection rules with class-based matching.
 
 ```lua
 local devices = require("bread.devices")
 
+-- Register a name pattern → class mapping
+devices.register("CalDigit", "dock")
 devices.register("Keychron", "keyboard")
 
 devices.on({
-    when = "connected",
+    when  = "connected",
     class = "keyboard",
-    run = function(event)
+    run   = function(event)
         bread.exec("xset r rate 200 40")
     end,
 })
 ```
 
-- `devices.on({ when, class, name, run })`
-- `devices.register(pattern, class)`
+| Function | Description |
+|----------|-------------|
+| `M.on(opts)` | Register a device rule. `opts`: `when`, `class` (optional), `name` (optional pattern), `run` |
+| `M.register(pattern, class)` | Map a device name pattern to a class string |
 
-`class` may be `dock`, `keyboard`, `mouse`, `tablet`, `display`, `storage`, `audio`, `unknown`.
+`class` values: `dock`, `keyboard`, `mouse`, `tablet`, `display`, `storage`, `audio`, `unknown`.
 
 ### `bread.workspaces`
+
+Workspace-to-monitor assignment and app pinning.
 
 ```lua
 local workspaces = require("bread.workspaces")
@@ -333,26 +507,34 @@ workspaces.assign("1", "HDMI-A-1")
 workspaces.pin({ app = "Firefox", workspace = "2" })
 ```
 
-- `workspaces.assign(workspace, monitor)`
-- `workspaces.pin({ app, workspace })`
-- `workspaces.apply_assignments()`
+| Function | Description |
+|----------|-------------|
+| `M.assign(workspace, monitor)` | Assign a workspace to a monitor |
+| `M.pin(opts)` | Pin an app class to a workspace. `opts`: `app`, `workspace` |
+| `M.apply_assignments()` | Apply all registered assignments via Hyprland dispatch |
 
 ### `bread.binds`
+
+Runtime keybind management via Hyprland.
 
 ```lua
 local binds = require("bread.binds")
 
 binds.add({
-    mods = { "SUPER" },
-    key = "Return",
+    mods     = { "SUPER" },
+    key      = "Return",
     dispatch = "exec",
-    args = "kitty",
+    args     = "kitty",
 })
 ```
 
-- `binds.add({ mods, key, dispatch, args })`
-- `binds.remove(key)`
-- `binds.replace(key, opts)`
+| Function | Description |
+|----------|-------------|
+| `M.add(opts)` | Add a keybind. `opts`: `mods`, `key`, `dispatch`, `args` |
+| `M.remove(key)` | Remove a keybind by key |
+| `M.replace(key, opts)` | Remove and re-add a keybind |
+
+---
 
 ## Dictionary: Event reference
 
@@ -369,103 +551,136 @@ Events are delivered as a `BreadEvent`:
 
 ### Pattern matching
 
-Patterns match event names with glob-style syntax:
-
-- Exact match: `bread.device.dock.connected`
-- `*` matches within a single segment (does not cross `.`)
-- `**` matches across segments (recursive)
-- `?` matches a single character within a segment
-
-Examples:
-
-```lua
-bread.on("bread.device.*", handler)
-bread.on("bread.device.**", handler)
-bread.on("bread.monitor.?", handler)
-```
+| Pattern | Matches |
+|---------|---------|
+| `bread.device.dock.connected` | Exact match only |
+| `bread.device.*` | One segment wildcard (does not cross `.`) |
+| `bread.device.**` | Any depth under `bread.device` |
+| `bread.monitor.?` | Single character within one segment |
 
 ### Normalized events
 
 #### System
 
-- `bread.system.startup` (data: `{}`)
+| Event | Data |
+|-------|------|
+| `bread.system.startup` | `{}` |
 
 #### Devices (udev)
 
-- `bread.device.connected`
-- `bread.device.disconnected`
-- `bread.device.changed`
-- `bread.device.<class>.connected`
-- `bread.device.<class>.disconnected`
-- `bread.device.<class>.changed`
+| Event | Data |
+|-------|------|
+| `bread.device.connected` | `{ id, class, name, subsystem, vendor_id?, product_id? }` |
+| `bread.device.disconnected` | `{ id, class, name, subsystem, vendor_id?, product_id? }` |
+| `bread.device.<class>.connected` | same |
+| `bread.device.<class>.disconnected` | same |
 
-Payload notes:
-
-- Device events include `id` and `class`; the generic event also includes `raw`.
-- `<class>` is one of: `dock`, `keyboard`, `mouse`, `tablet`, `display`, `storage`, `audio`, `unknown`.
+`class`: `dock`, `keyboard`, `mouse`, `tablet`, `display`, `storage`, `audio`, `unknown`.
 
 #### Hyprland
 
-- `bread.workspace.changed` (raw payload)
-- `bread.workspace.created` (`{ "workspace": "..." }`)
-- `bread.workspace.destroyed` (`{ "workspace": "..." }`)
-- `bread.monitor.connected` (raw payload)
-- `bread.monitor.disconnected` (raw payload)
-- `bread.window.focus.changed` (raw payload)
-- `bread.window.focused` (`{ "address": "..." }`)
-- `bread.window.opened` (`{ "address", "workspace", "class", "title" }`)
-- `bread.window.closed` (`{ "address": "..." }`)
-- `bread.window.moved` (`{ "address", "workspace" }`)
-- `bread.hyprland.event` (raw payload for unhandled kinds)
-
-Raw Hyprland payloads contain `kind`, `raw`, and `data` fields.
+| Event | Data |
+|-------|------|
+| `bread.workspace.changed` | raw payload |
+| `bread.workspace.created` | `{ workspace }` |
+| `bread.workspace.destroyed` | `{ workspace }` |
+| `bread.monitor.connected` | raw payload |
+| `bread.monitor.disconnected` | raw payload |
+| `bread.window.focus.changed` | raw payload |
+| `bread.window.focused` | `{ address }` |
+| `bread.window.opened` | `{ address, workspace, class, title }` |
+| `bread.window.closed` | `{ address }` |
+| `bread.window.moved` | `{ address, workspace }` |
+| `bread.hyprland.event` | `{ kind, raw, data }` (unhandled kinds) |
 
 #### Power
 
-- `bread.power.ac.connected`
-- `bread.power.ac.disconnected`
-- `bread.power.battery.low`
-- `bread.power.battery.very_low`
-- `bread.power.battery.critical`
-- `bread.power.battery.full`
-- `bread.power.changed` (fallback)
-
-Payload includes `ac_connected` and `battery_percent`.
+| Event | Data |
+|-------|------|
+| `bread.power.ac.connected` | `{ ac_connected, battery_percent }` |
+| `bread.power.ac.disconnected` | `{ ac_connected, battery_percent }` |
+| `bread.power.battery.low` | `{ battery_percent }` |
+| `bread.power.battery.very_low` | `{ battery_percent }` |
+| `bread.power.battery.critical` | `{ battery_percent }` |
+| `bread.power.battery.full` | `{ battery_percent }` |
+| `bread.power.changed` | `{ ac_connected, battery_percent }` |
 
 #### Network
 
-- `bread.network.connected`
-- `bread.network.disconnected`
+| Event | Data |
+|-------|------|
+| `bread.network.connected` | `{ online, interfaces }` |
+| `bread.network.disconnected` | `{ online, interfaces }` |
 
-Payload includes `online` and `interfaces`.
+#### System events
 
-#### Other system events
+| Event | Data |
+|-------|------|
+| `bread.profile.activated` | `{ name }` |
+| `bread.notify.sent` | `{ title, message, urgency }` |
+| `bread.state.changed.<path>` | emitted by state watches |
 
-- `bread.profile.activated` (emitted by IPC profile activation)
-- `bread.notify.sent` (emitted by `bread.notify`)
-- `bread.state.changed.<path>` (emitted when a state watch fires)
+---
 
 ## Dictionary: Runtime state schema
 
-`bread.state.get("")` returns the full `RuntimeState`:
+`bread state` and `bread.state.get("")` return the full `RuntimeState`:
 
 ```json
 {
-  "monitors": [ { "name": "HDMI-A-1", "connected": true } ],
-  "workspaces": [ { "id": "1", "monitor": "HDMI-A-1" } ],
+  "monitors": [
+    { "name": "HDMI-A-1", "connected": true, "resolution": null, "position": null }
+  ],
+  "workspaces": [
+    { "id": "1", "monitor": "HDMI-A-1" }
+  ],
   "active_workspace": "1",
-  "active_window": "Firefox",
-  "devices": { "connected": [] },
-  "network": { "interfaces": {}, "online": false },
-  "power": { "ac_connected": false, "battery_percent": null, "battery_low": false },
-  "profile": { "active": "default", "history": [], "profiles": {} },
-  "modules": [ { "name": "bread.devices", "status": "loaded", "last_error": null, "builtin": true, "store": {} } ]
+  "active_window": "0x...",
+  "devices": {
+    "connected": [
+      {
+        "id": "/sys/...",
+        "name": "CalDigit TS4",
+        "class": "dock",
+        "subsystem": "usb",
+        "vendor_id": "0x35f5",
+        "product_id": "0x0104"
+      }
+    ]
+  },
+  "network": {
+    "interfaces": { "eth0": { "up": true } },
+    "online": true
+  },
+  "power": {
+    "ac_connected": true,
+    "battery_percent": 87,
+    "battery_low": false
+  },
+  "profile": {
+    "active": "default",
+    "history": [],
+    "profiles": {}
+  },
+  "modules": [
+    {
+      "name": "bread.monitors",
+      "status": "loaded",
+      "last_error": null,
+      "builtin": true,
+      "store": {}
+    }
+  ]
 }
 ```
 
+`status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`.
+
+---
+
 ## Dictionary: IPC protocol
 
-The daemon exposes a Unix socket at `$XDG_RUNTIME_DIR/bread/bread.sock`. Messages are newline-delimited JSON.
+The daemon exposes a Unix socket at `$XDG_RUNTIME_DIR/bread/breadd.sock`. Messages are newline-delimited JSON.
 
 Request:
 
@@ -481,16 +696,17 @@ Response:
 
 Available methods:
 
-- `ping`
-- `health`
-- `state.get`
-- `state.dump`
-- `modules.list`
-- `modules.reload`
-- `profile.list`
-- `profile.activate`
-- `events.subscribe`
-- `events.replay`
-- `emit`
-
-`events.subscribe` upgrades the socket to streaming mode and sends events as they occur.
+| Method | Params | Description |
+|--------|--------|-------------|
+| `ping` | — | Connectivity check |
+| `health` | — | Version, uptime, PID, adapter status |
+| `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
+| `state.dump` | — | Return the full `RuntimeState` as JSON |
+| `modules.list` | — | List all loaded modules and their status |
+| `modules.reload` | — | Hot-reload the Lua runtime |
+| `profile.list` | — | List defined profiles |
+| `profile.activate` | `name` | Switch active profile |
+| `events.subscribe` | — | Upgrade to streaming mode; pushes events line by line |
+| `events.replay` | `since_ms` | Replay buffered events from the last N ms |
+| `emit` | `event`, `data` | Inject a synthetic event into the pipeline |
+| `sync.status` | — | Return sync init state: `{ initialized, machine?, remote? }` |
