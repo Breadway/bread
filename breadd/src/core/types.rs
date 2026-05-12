@@ -55,7 +55,7 @@ pub struct DeviceTopology {
 pub struct Device {
     pub id: String,
     pub name: String,
-    pub class: DeviceClass,
+    pub device: String,
     pub subsystem: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor_id: Option<String>,
@@ -63,17 +63,30 @@ pub struct Device {
     pub product_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceClass {
-    Dock,
-    Keyboard,
-    Mouse,
-    Tablet,
-    Display,
-    Storage,
-    Audio,
-    Unknown,
+/// One set of match conditions. All provided fields must match.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MatchCondition {
+    pub vendor_id: Option<String>,
+    pub product_id: Option<String>,
+    pub name: Option<String>,
+    pub vendor: Option<String>,
+    pub name_contains: Option<String>,
+    pub id_input_keyboard: Option<bool>,
+    pub id_input_mouse: Option<bool>,
+    pub id_input_tablet: Option<bool>,
+    /// True triggers the compound USB hub + secondary-interface check.
+    pub usb_hub: Option<bool>,
+    pub id_usb_class: Option<String>,
+    pub subsystem: Option<String>,
+}
+
+/// A device rule from `devices.lua`. The device name is assigned if ANY
+/// condition in `conditions` matches (OR semantics across conditions,
+/// AND semantics within a condition).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRule {
+    pub device: String,
+    pub conditions: Vec<MatchCondition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
