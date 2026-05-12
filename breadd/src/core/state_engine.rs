@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::warn;
 
 use crate::core::subscriptions::{SubscriptionId, SubscriptionTable};
-use crate::core::types::{Device, DeviceClass, InterfaceState, ModuleLoadState, RuntimeState};
+use crate::core::types::{Device, DeviceRule, InterfaceState, MatchCondition, ModuleLoadState, RuntimeState};
 use crate::lua::LuaMessage;
 
 #[derive(Clone)]
@@ -46,6 +46,7 @@ pub enum StateCommand {
     SetProfile {
         name: String,
     },
+    SetDeviceRules(Vec<DeviceRule>),
 }
 
 impl StateHandle {
@@ -136,6 +137,10 @@ impl StateHandle {
         let _ = self.command_tx.send(StateCommand::SetProfile { name });
     }
 
+    pub fn set_device_rules(&self, rules: Vec<DeviceRule>) {
+        let _ = self.command_tx.send(StateCommand::SetDeviceRules(rules));
+    }
+
     pub fn subscription_count(&self) -> Arc<AtomicU64> {
         self.subscription_count.clone()
     }
@@ -152,6 +157,7 @@ pub async fn run_state_engine(
 ) {
     let mut subscriptions = SubscriptionTable::default();
     let mut watches: HashMap<SubscriptionId, String> = HashMap::new();
+    let mut device_rules: Vec<DeviceRule> = Vec::new();
 
     loop {
         tokio::select! {
@@ -164,11 +170,49 @@ pub async fn run_state_engine(
                 let Some(cmd) = maybe_cmd else {
                     break;
                 };
-                handle_command(cmd, &state, &mut subscriptions, &mut watches, &subscription_count).await;
+                if let StateCommand::SetDeviceRules(rules) = cmd {
+                    device_rules = rules;
+                } else {
+                    handle_command(cmd, &state, &mut subscriptions, &mut watches, &subscription_count).await;
+                }
             }
             maybe_event = event_rx.recv() => {
-                let Some(event) = maybe_event else {
+                let Some(mut event) = maybe_event else {
                     break;
+                };
+
+                // Resolve device name from user rules and patch the event data before
+                // any subscriber sees it, then emit the named companion event.
+                let device_event = if event.event == "bread.device.connected"
+                    || event.event == "bread.device.disconnected"
+                {
+                    let is_disconnect = event.event == "bread.device.disconnected";
+                    let id = event.data.get("id").and_then(Value::as_str).unwrap_or("unknown").to_string();
+
+                    // On disconnect, udev strips vendor/product identifiers from the event.
+                    // Look up the device by id in the current state (it's still present
+                    // because apply_event_to_state hasn't run yet) and reuse the stored name.
+                    let device = if is_disconnect {
+                        state.read().await
+                            .devices.connected.iter()
+                            .find(|d| d.id == id)
+                            .map(|d| d.device.clone())
+                            .unwrap_or_else(|| resolve_device(&device_rules, &event.data))
+                    } else {
+                        resolve_device(&device_rules, &event.data)
+                    };
+
+                    if let Some(data) = event.data.as_object_mut() {
+                        data.insert("device".to_string(), Value::String(device.clone()));
+                    }
+                    let verb = if is_disconnect { "disconnected" } else { "connected" };
+                    Some(BreadEvent::new(
+                        format!("bread.device.{}.{}", device, verb),
+                        AdapterSource::Udev,
+                        json!({ "id": id, "device": device }),
+                    ))
+                } else {
+                    None
                 };
 
                 let (before_snapshot, after_snapshot) = if watches.is_empty() {
@@ -187,6 +231,13 @@ pub async fn run_state_engine(
                 }
 
                 dispatch_event(&event, &mut subscriptions, &lua_tx, &event_stream_tx, &subscription_count);
+
+                if let Some(dev_ev) = device_event {
+                    let mut guard = state.write().await;
+                    apply_event_to_state(&mut guard, &dev_ev);
+                    drop(guard);
+                    dispatch_event(&dev_ev, &mut subscriptions, &lua_tx, &event_stream_tx, &subscription_count);
+                }
 
                 if let (Some(before), Some(after)) = (before_snapshot, after_snapshot) {
                     for (_id, path) in watches.iter() {
@@ -272,6 +323,9 @@ async fn handle_command(
                 guard.profile.history.push(previous);
                 guard.profile.active = name;
             }
+        }
+        StateCommand::SetDeviceRules(_) => {
+            // Handled directly in run_state_engine before this function is called.
         }
     }
 }
@@ -399,6 +453,95 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
     }
 }
 
+fn resolve_device(rules: &[DeviceRule], data: &Value) -> String {
+    for rule in rules {
+        if !rule.conditions.is_empty() && rule.conditions.iter().all(|c| condition_matches(c, data)) {
+            return rule.device.clone();
+        }
+    }
+    "unknown".to_string()
+}
+
+fn condition_matches(cond: &MatchCondition, data: &Value) -> bool {
+    if let Some(ref expected) = cond.vendor_id {
+        let actual = data.get("vendor_id").and_then(Value::as_str).unwrap_or("");
+        if actual.to_lowercase() != expected.to_lowercase() {
+            return false;
+        }
+    }
+    if let Some(ref expected) = cond.product_id {
+        let actual = data.get("product_id").and_then(Value::as_str).unwrap_or("");
+        if actual.to_lowercase() != expected.to_lowercase() {
+            return false;
+        }
+    }
+    if let Some(ref expected) = cond.name {
+        let actual = data.get("name").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        if actual != expected.to_lowercase() {
+            return false;
+        }
+    }
+    if let Some(ref expected) = cond.vendor {
+        let actual = data.get("vendor").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        if actual != expected.to_lowercase() {
+            return false;
+        }
+    }
+    if let Some(ref contains) = cond.name_contains {
+        let name = data.get("name").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let vendor = data.get("vendor").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let combined = format!("{name} {vendor}");
+        if !combined.contains(contains.to_lowercase().as_str()) {
+            return false;
+        }
+    }
+    if let Some(expected) = cond.id_input_keyboard {
+        if data.get("id_input_keyboard").and_then(Value::as_bool).unwrap_or(false) != expected {
+            return false;
+        }
+    }
+    if let Some(expected) = cond.id_input_mouse {
+        if data.get("id_input_mouse").and_then(Value::as_bool).unwrap_or(false) != expected {
+            return false;
+        }
+    }
+    if let Some(expected) = cond.id_input_tablet {
+        if data.get("id_input_tablet").and_then(Value::as_bool).unwrap_or(false) != expected {
+            return false;
+        }
+    }
+    if cond.usb_hub == Some(true) {
+        let ifaces = data
+            .get("id_usb_interfaces")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let has_hub = ifaces.contains(":0900") || ifaces.contains(":0902");
+        let has_secondary = ifaces.contains(":0e")
+            || ifaces.contains(":0200")
+            || ifaces.contains(":0100")
+            || ifaces.contains(":0801");
+        if !(has_hub && has_secondary) {
+            return false;
+        }
+    }
+    if let Some(ref expected) = cond.id_usb_class {
+        let actual = data.get("id_usb_class").and_then(Value::as_str).unwrap_or("");
+        if actual.to_lowercase() != expected.to_lowercase()
+            && actual.to_lowercase() != format!("0x{}", expected.to_lowercase())
+        {
+            return false;
+        }
+    }
+    if let Some(ref expected) = cond.subsystem {
+        let actual = data.get("subsystem").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        if actual != expected.to_lowercase() {
+            return false;
+        }
+    }
+    true
+}
+
 fn apply_device_change(state: &mut RuntimeState, data: &Value, connected: bool) {
     let id = data
         .get("id")
@@ -411,10 +554,11 @@ fn apply_device_change(state: &mut RuntimeState, data: &Value, connected: bool) 
             return;
         }
 
-        let class = data
-            .get("class")
-            .and_then(|v| serde_json::from_value::<DeviceClass>(v.clone()).ok())
-            .unwrap_or(DeviceClass::Unknown);
+        let device = data
+            .get("device")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
 
         state.devices.connected.push(Device {
             id,
@@ -423,7 +567,7 @@ fn apply_device_change(state: &mut RuntimeState, data: &Value, connected: bool) 
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_string(),
-            class,
+            device,
             subsystem: data
                 .get("subsystem")
                 .and_then(Value::as_str)

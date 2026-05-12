@@ -471,30 +471,110 @@ monitors.on({
 
 ### `bread.devices`
 
-Device connection rules with class-based matching.
+Device connection rules with name-based matching. This module handles hardware hotplug events from USB devices, monitors, and other peripherals.
+
+Device names are defined in `~/.config/bread/devices.lua` — the daemon resolves the name before dispatching events, so modules can match on stable user-defined names rather than raw hardware identifiers.
 
 ```lua
 local devices = require("bread.devices")
 
--- Register a name pattern → class mapping
-devices.register("CalDigit", "dock")
-devices.register("Keychron", "keyboard")
+devices.on({
+    when   = "connected",
+    device = "keyboard",
+    run    = function(event)
+        bread.exec("xset r rate 200 40")
+    end,
+})
 
 devices.on({
-    when  = "connected",
-    class = "keyboard",
-    run   = function(event)
+    when   = "connected",
+    device = "dock",
+    run    = "~/.config/bread/scripts/dock-connected.sh"
+})
+
+devices.on({
+    when = "disconnected",
+    name = "CalDigit",  -- pattern-matched against event.data.name
+    run  = function(event)
+        bread.log("Dock disconnected: " .. event.data.name)
+    end,
+})
+```
+
+#### Functions
+
+| Function | Description |
+|----------|-------------|
+| `M.on(opts)` | Register a device rule. See options below. |
+
+#### Device rule options
+
+```lua
+devices.on({
+    when   = "connected",              -- required: "connected" or "disconnected"
+    device = "keyboard",              -- optional: device name from devices.lua
+    name   = "Keychron",             -- optional: substring matched against device name
+    run    = function(event) ... end  -- required: function or shell string
+})
+```
+
+- `when` (required): One of `connected` or `disconnected`.
+- `device` (optional): Device name as defined in `devices.lua`. If specified, the rule only fires for devices with that name.
+- `name` (optional): Pattern that must be found in `event.data.name` (case-insensitive substring). Can be combined with `device` (both must match).
+- `run` (required): Function or shell string to run when the rule matches.
+
+The callback receives the full device event:
+```lua
+{
+  event = "bread.device.dock.connected",
+  data = {
+    id = "/sys/...",
+    device = "dock",       -- name resolved from devices.lua
+    name = "CalDigit TS4", -- raw device name from udev
+    subsystem = "usb",
+    vendor_id = "0x35f5",
+    product_id = "0x0104",
+    raw = { ... }          -- full udev properties
+  }
+}
+```
+
+#### Example: Keyboard configuration on connect
+
+```lua
+devices.on({
+    when   = "connected",
+    device = "keyboard",
+    run    = function(event)
+        bread.log("Keyboard connected: " .. event.data.name)
         bread.exec("xset r rate 200 40")
     end,
 })
 ```
 
-| Function | Description |
-|----------|-------------|
-| `M.on(opts)` | Register a device rule. `opts`: `when`, `class` (optional), `name` (optional pattern), `run` |
-| `M.register(pattern, class)` | Map a device name pattern to a class string |
+#### Example: Dock-specific setup
 
-`class` values: `dock`, `keyboard`, `mouse`, `tablet`, `display`, `storage`, `audio`, `unknown`.
+```lua
+-- devices.lua defines: { device = "dock", vendor_id = "35f5" }
+
+devices.on({
+    when   = "connected",
+    device = "dock",
+    run    = function(event)
+        bread.log("Dock connected")
+        bread.exec("~/.config/bread/scripts/dock-connected.sh")
+    end,
+})
+
+devices.on({
+    when   = "disconnected",
+    device = "dock",
+    run    = function(event)
+        bread.log("Dock disconnected")
+        bread.exec("~/.config/bread/scripts/dock-disconnected.sh")
+    end,
+})
+```
 
 ### `bread.workspaces`
 
@@ -570,12 +650,12 @@ Events are delivered as a `BreadEvent`:
 
 | Event | Data |
 |-------|------|
-| `bread.device.connected` | `{ id, class, name, subsystem, vendor_id?, product_id? }` |
-| `bread.device.disconnected` | `{ id, class, name, subsystem, vendor_id?, product_id? }` |
-| `bread.device.<class>.connected` | same |
-| `bread.device.<class>.disconnected` | same |
+| `bread.device.connected` | `{ id, device, name, vendor, vendor_id, product_id, subsystem, raw }` |
+| `bread.device.disconnected` | same |
+| `bread.device.<device>.connected` | `{ id, device }` |
+| `bread.device.<device>.disconnected` | `{ id, device }` |
 
-`class`: `dock`, `keyboard`, `mouse`, `tablet`, `display`, `storage`, `audio`, `unknown`.
+`device` is the name resolved from `~/.config/bread/devices.lua`. Devices that match no rule use `"unknown"`. The generic `bread.device.connected` event carries the full payload including `raw` udev properties; the named companion event carries only `id` and `device`.
 
 #### Hyprland
 
@@ -641,7 +721,7 @@ Events are delivered as a `BreadEvent`:
       {
         "id": "/sys/...",
         "name": "CalDigit TS4",
-        "class": "dock",
+        "device": "dock",
         "subsystem": "usb",
         "vendor_id": "0x35f5",
         "product_id": "0x0104"

@@ -180,7 +180,7 @@ bread reload --watch                  # Watch config dir and reload on changes
 # State and events
 bread state                           # Dump full runtime state as JSON
 bread events                          # Stream live normalized events
-bread events --filter bread.device.*  # Stream filtered events
+bread events bread.device.*           # Stream filtered events
 bread events --since 60               # Replay events from the last 60 seconds
 bread emit <event>                    # Manually fire an event (for testing)
 
@@ -319,9 +319,8 @@ Events follow the namespace convention `bread.<subsystem>.<noun>.<verb>`.
 | `bread.system.startup` | Daemon fully initialized |
 | `bread.device.connected` | Any device attached |
 | `bread.device.disconnected` | Any device removed |
-| `bread.device.dock.connected` | Dock attached |
-| `bread.device.dock.disconnected` | Dock removed |
-| `bread.device.keyboard.connected` | Keyboard attached |
+| `bread.device.<device>.connected` | Named device attached (name from `devices.lua`) |
+| `bread.device.<device>.disconnected` | Named device removed |
 | `bread.monitor.connected` | Display connected |
 | `bread.monitor.disconnected` | Display disconnected |
 | `bread.workspace.changed` | Active workspace changed |
@@ -380,7 +379,7 @@ end)
 
 -- Subscribe with a filter predicate
 bread.filter("bread.device.connected", function(event)
-    return event.data.class == "keyboard"
+    return event.data.device == "keyboard"
 end, function(event)
     bread.exec("xset r rate 200 40")
 end)

@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 use crate::core::config::{Config, ModulesConfig, NotificationsConfig};
 use crate::core::state_engine::StateHandle;
 use crate::core::subscriptions::SubscriptionId;
-use crate::core::types::{ModuleLoadState, RuntimeState};
+use crate::core::types::{DeviceRule, MatchCondition, ModuleLoadState, RuntimeState};
 use bread_shared::now_unix_ms;
 
 pub enum LuaMessage {
@@ -275,6 +275,8 @@ impl LuaEngine {
             .clear();
 
         self.install_api()?;
+        self.load_device_rules()?;
+        self.load_profiles()?;
         self.load_init_and_modules()?;
         self.run_on_reload();
         info!("lua runtime reloaded");
@@ -515,8 +517,14 @@ impl LuaEngine {
 
         let profile_tbl = self.lua.create_table()?;
         let state_handle = self.state_handle.clone();
+        let emit_tx = self.emit_tx.clone();
         let activate_fn = self.lua.create_function(move |_lua, name: String| {
             state_handle.set_profile(name.clone());
+            let _ = emit_tx.send(BreadEvent::new(
+                "bread.profile.activated",
+                AdapterSource::System,
+                serde_json::json!({ "name": name }),
+            ));
             Ok(())
         })?;
         profile_tbl.set("activate", activate_fn)?;
@@ -700,6 +708,13 @@ impl LuaEngine {
         })?;
         hyprland_tbl.set("keyword", keyword_fn)?;
 
+        let eval_fn = self.lua.create_function(move |_lua, expr: String| {
+            let resp = hyprland_request(&format!("eval {expr}"))
+                .map_err(|e| LuaError::external(e.to_string()))?;
+            Ok(resp)
+        })?;
+        hyprland_tbl.set("eval", eval_fn)?;
+
         let active_window_fn = self.lua.create_function(move |lua, ()| {
             let resp = hyprland_request("j/activewindow")
                 .map_err(|e| LuaError::external(e.to_string()))?;
@@ -835,6 +850,11 @@ impl LuaEngine {
                     ModuleInfo { table_key: key },
                 );
 
+            // Register in package.loaded so require("bread.devices") etc. works
+            let package: Table = lua.globals().get("package")?;
+            let loaded: Table = package.get("loaded")?;
+            loaded.set(decl.name.clone(), module_tbl.clone())?;
+
             Ok(module_tbl)
         })?;
         bread.set("module", module_fn)?;
@@ -905,6 +925,98 @@ impl LuaEngine {
         self.install_log_helpers()?;
         self.install_debounce()?;
         Ok(())
+    }
+
+    fn load_device_rules(&self) -> Result<()> {
+        let devices_path = self
+            .entry_point
+            .parent()
+            .map(|p| p.join("devices.lua"))
+            .unwrap_or_else(|| std::path::PathBuf::from("devices.lua"));
+
+        if !devices_path.exists() {
+            return Ok(());
+        }
+
+        let source = fs::read_to_string(&devices_path)
+            .map_err(|e| anyhow!("failed to read devices.lua: {e}"))?;
+
+        let rules_value: mlua::Value = self
+            .lua
+            .load(&source)
+            .set_name("devices.lua")
+            .eval()
+            .map_err(|e| anyhow!("devices.lua error: {e}"))?;
+
+        let mlua::Value::Table(tbl) = rules_value else {
+            return Err(anyhow!("devices.lua must return a table of rules"));
+        };
+
+        let mut rules: Vec<DeviceRule> = Vec::new();
+        for pair in tbl.sequence_values::<mlua::Table>() {
+            let entry = pair.map_err(|e| anyhow!("devices.lua rule error: {e}"))?;
+            let device: String = entry.get("device").unwrap_or_default();
+            if device.is_empty() {
+                continue;
+            }
+
+            // If the rule has a `match` key, each entry in it is a separate condition (OR logic).
+            // Otherwise the rule table itself is the single condition.
+            let conditions: Vec<MatchCondition> =
+                if let Ok(mlua::Value::Table(match_tbl)) = entry.get::<_, mlua::Value>("match") {
+                    match_tbl
+                        .sequence_values::<mlua::Table>()
+                        .filter_map(|r| r.ok())
+                        .map(|t| parse_match_condition(&t))
+                        .collect()
+                } else {
+                    vec![parse_match_condition(&entry)]
+                };
+
+            if !conditions.is_empty() {
+                rules.push(DeviceRule { device, conditions });
+            }
+        }
+
+        self.state_handle.set_device_rules(rules);
+        Ok(())
+    }
+
+    fn load_profiles(&self) -> Result<()> {
+        let profiles_path = self
+            .entry_point
+            .parent()
+            .map(|p| p.join("profiles.lua"))
+            .unwrap_or_else(|| PathBuf::from("profiles.lua"));
+
+        if !profiles_path.exists() {
+            return Ok(());
+        }
+
+        let path_str = profiles_path.to_string_lossy().to_string();
+        self.lua.globals().set("__profiles_path", path_str)?;
+        self.lua
+            .load(
+                r#"
+                local ok, result = pcall(loadfile, __profiles_path)
+                __profiles_path = nil
+                if ok and type(result) == "function" then
+                    ok, result = pcall(result)
+                end
+                if ok and type(result) == "table" then
+                    bread.on("bread.profile.activated", function(event)
+                        local name = event.data and event.data.name
+                        local fn = name and result[name]
+                        if type(fn) == "function" then
+                            fn(event)
+                        end
+                    end)
+                end
+                "#,
+            )
+            .set_name("profiles.lua")
+            .exec()
+            .map_err(|e| anyhow!("profiles.lua error: {e}"))
     }
 
     fn load_init_and_modules(&self) -> Result<()> {
@@ -1796,24 +1908,18 @@ const BUILTIN_DEVICES: &str = r#"
 local M = bread.module({ name = "bread.devices", version = "1.0.0" })
 
 local rules = {}
-local user_patterns = {}  -- { { pattern = "...", class = "..." }, ... }
 
 local function matches_rule(rule, event)
-    local class = rule.class
     local when = rule.when
     local data = event.data or {}
 
-    if when == "connected" and event.event ~= "bread.device.connected" then
-        if not event.event:match("%.connected$") then
-            return false
-        end
-    elseif when == "disconnected" and event.event ~= "bread.device.disconnected" then
-        if not event.event:match("%.disconnected$") then
-            return false
-        end
+    if when == "connected" and not event.event:match("%.connected$") then
+        return false
+    elseif when == "disconnected" and not event.event:match("%.disconnected$") then
+        return false
     end
 
-    if class and data.class ~= class then
+    if rule.device and data.device ~= rule.device then
         return false
     end
 
@@ -1832,55 +1938,15 @@ local function run_rule(rule, event)
     end
 end
 
--- Reclassify an event's data.class based on user-registered name patterns.
--- Called before rule matching so that user-registered patterns take effect
--- even for devices that the daemon classified as Unknown.
-local function apply_user_patterns(event)
-    if not event.data then return event end
-    local name = tostring(event.data.name or ""):lower()
-    local vendor = tostring(event.data.vendor or ""):lower()
-    local combined = name .. " " .. vendor
-    for _, p in ipairs(user_patterns) do
-        if combined:find(p.pattern, 1, true) then
-            -- Return a shallow copy with the class overridden so we don't
-            -- mutate the original event that other handlers may receive.
-            local patched = {}
-            for k, v in pairs(event) do patched[k] = v end
-            patched.data = {}
-            for k, v in pairs(event.data) do patched.data[k] = v end
-            patched.data.class = p.class
-            return patched
-        end
-    end
-    return event
-end
-
 function M.on(opts)
     table.insert(rules, opts)
 end
 
--- Register a user-defined device pattern so the daemon can correctly classify
--- hardware that the automatic classifier doesn't recognise.
---
--- Usage:
---   local devices = require("bread.devices")
---   devices.register("CalDigit", "dock")
---   devices.register("Keychron", "keyboard")
---   devices.register("MX Master", "mouse")
---
--- The pattern is matched case-insensitively against the device name and vendor
--- combined. The class must be one of: dock, keyboard, mouse, tablet, display,
--- storage, audio, unknown.
-function M.register(pattern, class)
-    table.insert(user_patterns, { pattern = pattern:lower(), class = class })
-end
-
 function M.on_load()
     bread.on("bread.device.**", function(event)
-        local patched = apply_user_patterns(event)
         for _, rule in ipairs(rules) do
-            if matches_rule(rule, patched) then
-                run_rule(rule, patched)
+            if matches_rule(rule, event) then
+                run_rule(rule, event)
             end
         end
     end)
@@ -2018,13 +2084,28 @@ fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
 }
 
 fn hyprland_request_socket() -> Result<PathBuf> {
-    let instance = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
-        .map_err(|_| anyhow!("HYPRLAND_INSTANCE_SIGNATURE is not set"))?;
     let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-    Ok(PathBuf::from(runtime)
-        .join("hypr")
-        .join(instance)
-        .join(".socket.sock"))
+
+    if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        return Ok(PathBuf::from(runtime)
+            .join("hypr")
+            .join(instance)
+            .join(".socket.sock"));
+    }
+
+    let hypr_dir = PathBuf::from(&runtime).join("hypr");
+    let mut sockets: Vec<PathBuf> = std::fs::read_dir(&hypr_dir)
+        .map_err(|_| anyhow!("no Hyprland instance found ({})", hypr_dir.display()))?
+        .flatten()
+        .map(|e| e.path().join(".socket.sock"))
+        .filter(|p| p.exists())
+        .collect();
+
+    match sockets.len() {
+        0 => Err(anyhow!("no Hyprland instance found in {}", hypr_dir.display())),
+        1 => Ok(sockets.remove(0)),
+        _ => Ok(sockets.remove(0)),
+    }
 }
 
 fn hyprland_request(request: &str) -> Result<String> {
@@ -2037,6 +2118,22 @@ fn hyprland_request(request: &str) -> Result<String> {
     let mut buffer = String::new();
     stream.read_to_string(&mut buffer)?;
     Ok(buffer)
+}
+
+fn parse_match_condition(tbl: &mlua::Table) -> MatchCondition {
+    MatchCondition {
+        vendor_id: tbl.get("vendor_id").ok(),
+        product_id: tbl.get("product_id").ok(),
+        name: tbl.get("name").ok(),
+        vendor: tbl.get("vendor").ok(),
+        name_contains: tbl.get("name_contains").ok(),
+        id_input_keyboard: tbl.get("id_input_keyboard").ok(),
+        id_input_mouse: tbl.get("id_input_mouse").ok(),
+        id_input_tablet: tbl.get("id_input_tablet").ok(),
+        usb_hub: tbl.get("usb_hub").ok(),
+        id_usb_class: tbl.get("id_usb_class").ok(),
+        subsystem: tbl.get("subsystem").ok(),
+    }
 }
 
 fn list_lua_files(root: &Path) -> Result<Vec<PathBuf>> {
