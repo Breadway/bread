@@ -4,14 +4,16 @@ use std::sync::RwLock;
 use bread_shared::{AdapterSource, BreadEvent, RawEvent};
 use serde_json::{json, Value};
 
-use crate::core::types::DeviceClass;
-
 /// How many multiples of `dedup_window_ms` an entry must be idle before eviction.
 const EVICT_MULTIPLIER: u64 = 60;
 
 pub struct EventNormalizer {
     dedup_window_ms: u64,
     recent: RwLock<HashMap<String, u64>>,
+    /// Tracks the first time a physical device (keyed by verb+vendor_id+product_id)
+    /// fired within the current window, so subsequent child-node events from the
+    /// same plug-in are suppressed at the normalizer level.
+    seen_devices: RwLock<HashMap<String, u64>>,
 }
 
 impl EventNormalizer {
@@ -19,6 +21,7 @@ impl EventNormalizer {
         Self {
             dedup_window_ms,
             recent: RwLock::new(HashMap::new()),
+            seen_devices: RwLock::new(HashMap::new()),
         }
     }
 
@@ -42,40 +45,75 @@ impl EventNormalizer {
 
     fn normalize_udev(&self, raw: &RawEvent) -> Vec<BreadEvent> {
         let action = raw.payload.get("action").and_then(Value::as_str).unwrap_or("change");
-        let id = raw.payload.get("id").and_then(Value::as_str).unwrap_or("unknown");
-        let class = classify_device(&raw.payload);
-        let class_str = serde_json::to_string(&class)
-            .unwrap_or_else(|_| "\"unknown\"".to_string())
-            .replace('"', "");
 
+        // "bind" is the kernel attaching a driver to an interface — not a meaningful
+        // device state change for automation purposes.
+        if action == "bind" {
+            return vec![];
+        }
+
+        let name = raw.payload.get("name").and_then(Value::as_str).unwrap_or("unknown");
+        let vendor = raw.payload.get("id_vendor").and_then(Value::as_str).unwrap_or_default();
+        let vendor_id = raw.payload.get("vendor_id").and_then(Value::as_str).unwrap_or_default();
+        let product_id = raw.payload.get("product_id").and_then(Value::as_str).unwrap_or_default();
+        let subsystem = raw.payload.get("subsystem").and_then(Value::as_str).unwrap_or_default();
+
+        // Drop anonymous child USB interfaces (e.g. 3-5:1.0, 3-5:1.1) that carry
+        // no identity information — they are USB protocol artefacts, not devices.
+        if name == "unknown" && vendor.is_empty() && vendor_id.is_empty() {
+            return vec![];
+        }
+
+        // For connected/disconnected, suppress duplicate events from child nodes of
+        // the same physical device (e.g. input66, mouse0, event17 all from one plug-in).
+        // Key by verb+vendor_id+product_id so a second distinct device of the same
+        // model plugged in after the window still fires correctly.
         let verb = match action {
             "add" => "connected",
             "remove" => "disconnected",
             _ => "changed",
         };
 
-        let mut events = vec![BreadEvent {
+        if (verb == "connected" || verb == "disconnected") && !vendor_id.is_empty() && !product_id.is_empty() {
+            let device_key = format!("{}:{}:{}", verb, vendor_id, product_id);
+            let now = raw.timestamp;
+            let already_seen = {
+                let seen = self.seen_devices.read().unwrap_or_else(|p| p.into_inner());
+                seen.get(&device_key)
+                    .map(|&last| now.saturating_sub(last) < self.dedup_window_ms)
+                    .unwrap_or(false)
+            };
+            if already_seen {
+                return vec![];
+            }
+            let mut seen = self.seen_devices.write().unwrap_or_else(|p| p.into_inner());
+            seen.insert(device_key, now);
+            // Evict stale entries
+            let evict_before = now.saturating_sub(self.dedup_window_ms.saturating_mul(EVICT_MULTIPLIER));
+            if evict_before > 0 {
+                seen.retain(|_, &mut last| last >= evict_before);
+            }
+        }
+
+        let id = raw.payload.get("id").and_then(Value::as_str).unwrap_or("unknown");
+
+        // Device name is always "unknown" here; the state engine applies user-defined
+        // classification rules from devices.lua before dispatching to subscribers.
+        vec![BreadEvent {
             event: format!("bread.device.{}", verb),
             timestamp: raw.timestamp,
             source: AdapterSource::Udev,
             data: json!({
                 "id": id,
-                "class": class,
+                "device": "unknown",
+                "name": name,
+                "vendor": vendor,
+                "vendor_id": vendor_id,
+                "product_id": product_id,
+                "subsystem": subsystem,
                 "raw": raw.payload,
             }),
-        }];
-
-        events.push(BreadEvent {
-            event: format!("bread.device.{}.{}", class_str, verb),
-            timestamp: raw.timestamp,
-            source: AdapterSource::Udev,
-            data: json!({
-                "id": id,
-                "class": class,
-            }),
-        });
-
-        events
+        }]
     }
 
     fn normalize_hyprland(&self, raw: &RawEvent) -> Vec<BreadEvent> {
@@ -109,13 +147,13 @@ impl EventNormalizer {
                 event: "bread.monitor.connected".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
-                data: raw.payload.clone(),
+                data: json!({ "name": data }),
             }],
             "monitorremoved" => vec![BreadEvent {
                 event: "bread.monitor.disconnected".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
-                data: raw.payload.clone(),
+                data: json!({ "name": data }),
             }],
             "activewindow" => vec![BreadEvent {
                 event: "bread.window.focus.changed".to_string(),
@@ -288,107 +326,3 @@ fn split_hyprland_fields(data: &str) -> Vec<&str> {
     data.split(">>").collect()
 }
 
-fn classify_device(payload: &Value) -> DeviceClass {
-    let subsystem = payload
-        .get("subsystem")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_lowercase();
-
-    // --- Property-based classification (reliable, hardware-agnostic) ---
-
-    // udev sets ID_INPUT_KEYBOARD=1 for anything that presents as a keyboard HID device.
-    if payload.get("id_input_keyboard").and_then(Value::as_bool).unwrap_or(false) {
-        return DeviceClass::Keyboard;
-    }
-
-    // ID_INPUT_MOUSE=1 covers mice and trackballs.
-    if payload.get("id_input_mouse").and_then(Value::as_bool).unwrap_or(false) {
-        return DeviceClass::Mouse;
-    }
-
-    // ID_INPUT_TABLET=1 covers drawing tablets (Wacom etc).
-    if payload.get("id_input_tablet").and_then(Value::as_bool).unwrap_or(false) {
-        return DeviceClass::Tablet;
-    }
-
-    // USB class 0x09 = Hub. Docks expose a hub interface; they also typically
-    // expose video (0x0e), audio (0x01), and ethernet (CDC 0x02) interfaces.
-    // We check for hub + at least one of those secondary interfaces.
-    if let Some(ifaces) = payload.get("id_usb_interfaces").and_then(Value::as_str) {
-        let ifaces_lc = ifaces.to_lowercase();
-        let has_hub = ifaces_lc.contains(":0900") || ifaces_lc.contains(":0902");
-        let has_secondary = ifaces_lc.contains(":0e")   // video
-            || ifaces_lc.contains(":0200") // CDC ethernet
-            || ifaces_lc.contains(":0100") // audio
-            || ifaces_lc.contains(":0801"); // mass storage
-        if has_hub && has_secondary {
-            return DeviceClass::Dock;
-        }
-    }
-
-    // USB class 0x01 = Audio.
-    if let Some(cls) = payload.get("id_usb_class").and_then(Value::as_str) {
-        if cls == "01" || cls.to_lowercase() == "0x01" {
-            return DeviceClass::Audio;
-        }
-        // USB class 0x08 = Mass Storage.
-        if cls == "08" || cls.to_lowercase() == "0x08" {
-            return DeviceClass::Storage;
-        }
-    }
-
-    // DRM subsystem = display connector.
-    if subsystem == "drm" {
-        return DeviceClass::Display;
-    }
-
-    // Block devices = storage.
-    if subsystem == "block" {
-        return DeviceClass::Storage;
-    }
-
-    // Sound subsystem = audio.
-    if subsystem == "sound" {
-        return DeviceClass::Audio;
-    }
-
-    // --- Name-based fallback (catches user-registered patterns and obvious names) ---
-    // This runs last so the property-based rules above always win.
-
-    let name = payload
-        .get("name")
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("id_model").and_then(Value::as_str))
-        .unwrap_or_default()
-        .to_lowercase();
-
-    let vendor = payload
-        .get("id_vendor")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_lowercase();
-
-    let combined = format!("{name} {vendor}");
-
-    if combined.contains("dock") || combined.contains("hub") || combined.contains("thunderbolt") {
-        return DeviceClass::Dock;
-    }
-    if combined.contains("keyboard") || combined.contains("kbd") {
-        return DeviceClass::Keyboard;
-    }
-    if combined.contains("mouse") || combined.contains("trackball") || combined.contains("trackpoint") {
-        return DeviceClass::Mouse;
-    }
-    if combined.contains("tablet") || combined.contains("wacom") || combined.contains("stylus") {
-        return DeviceClass::Tablet;
-    }
-    if combined.contains("audio") || combined.contains("headset") || combined.contains("speaker") || combined.contains("dac") {
-        return DeviceClass::Audio;
-    }
-    if combined.contains("storage") || combined.contains("drive") || combined.contains("flash") || combined.contains("disk") {
-        return DeviceClass::Storage;
-    }
-
-    DeviceClass::Unknown
-}
