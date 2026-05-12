@@ -42,8 +42,8 @@ enum Commands {
     },
     /// Stream live normalized events
     Events {
-        #[arg(long)]
-        filter: Option<String>,
+        /// Optional glob pattern to filter events (e.g. bread.device.*, bread.**)
+        pattern: Option<String>,
         /// Output raw JSON
         #[arg(long)]
         json: bool,
@@ -169,12 +169,12 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Events {
-            filter,
+            pattern,
             json,
             fields,
             since,
         } => {
-            stream_events(&socket, filter, json, fields, since).await?;
+            stream_events(&socket, pattern, json, fields, since).await?;
         }
         Commands::Modules { subcommand } => {
             handle_modules_cmd(subcommand, &socket).await?;
@@ -769,8 +769,7 @@ fn run_package_installs(packages_dir: &Path, managers: &[String]) -> Result<()> 
             }
             "pip" => {
                 let mut cmd = std::process::Command::new("pip");
-                cmd.args(["install", "--user", "-r"])
-                    .arg(file.to_str().unwrap_or(""));
+                cmd.args(["install", "--user", "-r"]).arg(&file);
                 let _ = cmd.status();
             }
             "npm" => {

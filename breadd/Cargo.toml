@@ -14,7 +14,7 @@ tracing-subscriber.workspace = true
 mlua = { version = "0.9", features = ["lua54", "vendored", "async", "serialize"] }
 async-trait = "0.1"
 toml = "0.8"
-udev = "0.9"
+udev = { version = "0.9", features = ["send"] }
 rtnetlink = "0.9"
 zbus = { version = "3.13", features = ["tokio"] }
 hex = "0.4"
