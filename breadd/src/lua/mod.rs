@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent};
-use libc;
 use mlua::{Error as LuaError, Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -291,62 +290,66 @@ impl LuaEngine {
         let next_sub_id = self.next_sub_id.clone();
         let state_handle = self.state_handle.clone();
         let current_module = self.current_module.clone();
-        let on_fn = self.lua.create_function(move |lua, (pattern, callback): (String, Function)| {
-            let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
-            let key = lua.create_registry_value(callback)?;
-            let module = current_module
-                .lock()
-                .map_err(|_| LuaError::external("module context lock poisoned"))?
-                .clone();
-            handlers
-                .lock()
-                .map_err(|_| LuaError::external("handler lock poisoned"))?
-                .insert(
-                    id,
-                    HandlerEntry {
-                        callback: key,
-                        filter: None,
-                        module,
-                        raw_kind: None,
-                        kind: HandlerKind::Event,
-                    },
-                );
-            state_handle
-                .register_subscription(id, pattern, false)
-                .map_err(LuaError::external)?;
-            Ok(id.0)
-        })?;
+        let on_fn =
+            self.lua
+                .create_function(move |lua, (pattern, callback): (String, Function)| {
+                    let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+                    let key = lua.create_registry_value(callback)?;
+                    let module = current_module
+                        .lock()
+                        .map_err(|_| LuaError::external("module context lock poisoned"))?
+                        .clone();
+                    handlers
+                        .lock()
+                        .map_err(|_| LuaError::external("handler lock poisoned"))?
+                        .insert(
+                            id,
+                            HandlerEntry {
+                                callback: key,
+                                filter: None,
+                                module,
+                                raw_kind: None,
+                                kind: HandlerKind::Event,
+                            },
+                        );
+                    state_handle
+                        .register_subscription(id, pattern, false)
+                        .map_err(LuaError::external)?;
+                    Ok(id.0)
+                })?;
         bread.set("on", on_fn)?;
 
         let handlers = self.handlers.clone();
         let next_sub_id = self.next_sub_id.clone();
         let state_handle = self.state_handle.clone();
         let current_module = self.current_module.clone();
-        let once_fn = self.lua.create_function(move |lua, (pattern, callback): (String, Function)| {
-            let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
-            let key = lua.create_registry_value(callback)?;
-            let module = current_module
-                .lock()
-                .map_err(|_| LuaError::external("module context lock poisoned"))?
-                .clone();
-            handlers
-                .lock()
-                .map_err(|_| LuaError::external("handler lock poisoned"))?
-                .insert(
-                    id,
-                    HandlerEntry {
-                        callback: key,
-                        filter: None,
-                        module,
-                        raw_kind: None,
-                        kind: HandlerKind::Event,
-                    },
-                );
-            state_handle
-                .register_subscription(id, pattern, true)
-                .map_err(LuaError::external)?;
-            Ok(id.0)
-        })?;
+        let once_fn =
+            self.lua
+                .create_function(move |lua, (pattern, callback): (String, Function)| {
+                    let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+                    let key = lua.create_registry_value(callback)?;
+                    let module = current_module
+                        .lock()
+                        .map_err(|_| LuaError::external("module context lock poisoned"))?
+                        .clone();
+                    handlers
+                        .lock()
+                        .map_err(|_| LuaError::external("handler lock poisoned"))?
+                        .insert(
+                            id,
+                            HandlerEntry {
+                                callback: key,
+                                filter: None,
+                                module,
+                                raw_kind: None,
+                                kind: HandlerKind::Event,
+                            },
+                        );
+                    state_handle
+                        .register_subscription(id, pattern, true)
+                        .map_err(LuaError::external)?;
+                    Ok(id.0)
+                })?;
         bread.set("once", once_fn)?;
 
         let handlers = self.handlers.clone();
@@ -411,25 +414,27 @@ impl LuaEngine {
         bread.set("off", off_fn)?;
 
         let emit_tx = self.emit_tx.clone();
-        let emit_fn = self.lua.create_function(move |lua, (event_name, payload): (String, Value)| {
-            let data = match payload {
-                Value::Nil => serde_json::json!({}),
-                other => lua
-                    .from_value::<serde_json::Value>(other)
-                    .unwrap_or_else(|_| serde_json::json!({})),
-            };
-            emit_tx
-                .send(BreadEvent::new(event_name, AdapterSource::System, data))
-                .map_err(|_| LuaError::external("event channel closed"))?;
-            Ok(())
-        })?;
+        let emit_fn =
+            self.lua
+                .create_function(move |lua, (event_name, payload): (String, Value)| {
+                    let data = match payload {
+                        Value::Nil => serde_json::json!({}),
+                        other => lua
+                            .from_value::<serde_json::Value>(other)
+                            .unwrap_or_else(|_| serde_json::json!({})),
+                    };
+                    emit_tx
+                        .send(BreadEvent::new(event_name, AdapterSource::System, data))
+                        .map_err(|_| LuaError::external("event channel closed"))?;
+                    Ok(())
+                })?;
         bread.set("emit", emit_fn)?;
 
         let state_arc = self.state_handle.state_arc();
         let state_tbl = self.lua.create_table()?;
-        let get_fn = self.lua.create_function(move |lua, path: String| {
-            state_value_to_lua(lua, &state_arc, &path)
-        })?;
+        let get_fn = self
+            .lua
+            .create_function(move |lua, path: String| state_value_to_lua(lua, &state_arc, &path))?;
         state_tbl.set("get", get_fn)?;
 
         let state_arc = self.state_handle.state_arc();
@@ -439,9 +444,9 @@ impl LuaEngine {
         state_tbl.set("monitors", monitors_fn)?;
 
         let state_arc = self.state_handle.state_arc();
-        let active_ws_fn = self
-            .lua
-            .create_function(move |lua, ()| state_value_to_lua(lua, &state_arc, "active_workspace"))?;
+        let active_ws_fn = self.lua.create_function(move |lua, ()| {
+            state_value_to_lua(lua, &state_arc, "active_workspace")
+        })?;
         state_tbl.set("active_workspace", active_ws_fn)?;
 
         let state_arc = self.state_handle.state_arc();
@@ -479,38 +484,40 @@ impl LuaEngine {
         let next_sub_id = self.next_sub_id.clone();
         let state_handle = self.state_handle.clone();
         let current_module = self.current_module.clone();
-        let watch_fn = self.lua.create_function(move |lua, (path, callback): (String, Function)| {
-            let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
-            let key = lua.create_registry_value(callback)?;
-            let module = current_module
-                .lock()
-                .map_err(|_| LuaError::external("module context lock poisoned"))?
-                .clone();
-            handlers
-                .lock()
-                .map_err(|_| LuaError::external("handler lock poisoned"))?
-                .insert(
-                    id,
-                    HandlerEntry {
-                        callback: key,
-                        filter: None,
-                        module,
-                        raw_kind: None,
-                        kind: HandlerKind::StateWatch,
-                    },
-                );
-            watch_ids
-                .lock()
-                .map_err(|_| LuaError::external("watch id lock poisoned"))?
-                .insert(id);
-            state_handle
-                .register_watch(id, path.clone())
-                .map_err(LuaError::external)?;
-            state_handle
-                .register_subscription(id, format!("bread.state.changed.{path}"), false)
-                .map_err(LuaError::external)?;
-            Ok(id.0)
-        })?;
+        let watch_fn =
+            self.lua
+                .create_function(move |lua, (path, callback): (String, Function)| {
+                    let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+                    let key = lua.create_registry_value(callback)?;
+                    let module = current_module
+                        .lock()
+                        .map_err(|_| LuaError::external("module context lock poisoned"))?
+                        .clone();
+                    handlers
+                        .lock()
+                        .map_err(|_| LuaError::external("handler lock poisoned"))?
+                        .insert(
+                            id,
+                            HandlerEntry {
+                                callback: key,
+                                filter: None,
+                                module,
+                                raw_kind: None,
+                                kind: HandlerKind::StateWatch,
+                            },
+                        );
+                    watch_ids
+                        .lock()
+                        .map_err(|_| LuaError::external("watch id lock poisoned"))?
+                        .insert(id);
+                    state_handle
+                        .register_watch(id, path.clone())
+                        .map_err(LuaError::external)?;
+                    state_handle
+                        .register_subscription(id, format!("bread.state.changed.{path}"), false)
+                        .map_err(LuaError::external)?;
+                    Ok(id.0)
+                })?;
         state_tbl.set("watch", watch_fn)?;
 
         bread.set("state", state_tbl)?;
@@ -555,130 +562,134 @@ impl LuaEngine {
         let default_urgency = self.notifications_config.default_urgency.clone();
         let default_timeout = self.notifications_config.default_timeout_ms;
         let emit_tx = self.emit_tx.clone();
-        let notify_fn = self
-            .lua
-            .create_function(move |_lua, (message, opts): (String, Option<Table>)| {
-            let title: String = opts
-                .as_ref()
-                .and_then(|o| o.get("title").ok())
-                .unwrap_or_else(|| "bread".to_string());
-            let urgency: String = opts
-                .as_ref()
-                .and_then(|o| o.get("urgency").ok())
-                .unwrap_or_else(|| default_urgency.clone());
-            let timeout: i64 = opts
-                .as_ref()
-                .and_then(|o| o.get("timeout").ok())
-                .unwrap_or(default_timeout);
-            let icon: Option<String> = opts.as_ref().and_then(|o| o.get("icon").ok());
+        let notify_fn =
+            self.lua
+                .create_function(move |_lua, (message, opts): (String, Option<Table>)| {
+                    let title: String = opts
+                        .as_ref()
+                        .and_then(|o| o.get("title").ok())
+                        .unwrap_or_else(|| "bread".to_string());
+                    let urgency: String = opts
+                        .as_ref()
+                        .and_then(|o| o.get("urgency").ok())
+                        .unwrap_or_else(|| default_urgency.clone());
+                    let timeout: i64 = opts
+                        .as_ref()
+                        .and_then(|o| o.get("timeout").ok())
+                        .unwrap_or(default_timeout);
+                    let icon: Option<String> = opts.as_ref().and_then(|o| o.get("icon").ok());
 
-            let cmd_path = notify_path.clone();
-            let title_clone = title.clone();
-            let message_clone = message.clone();
-            let urgency_clone = urgency.clone();
-            task::spawn_blocking(move || {
-                let mut cmd = std::process::Command::new(cmd_path);
-                cmd.args([
-                    "--app-name",
-                    "bread",
-                    "--urgency",
-                    &urgency_clone,
-                    "--expire-time",
-                    &timeout.to_string(),
-                ]);
-                if let Some(icon) = icon {
-                    cmd.args(["--icon", &icon]);
-                }
-                let _ = cmd.args([&title_clone, &message_clone]).status();
-            });
+                    let cmd_path = notify_path.clone();
+                    let title_clone = title.clone();
+                    let message_clone = message.clone();
+                    let urgency_clone = urgency.clone();
+                    task::spawn_blocking(move || {
+                        let mut cmd = std::process::Command::new(cmd_path);
+                        cmd.args([
+                            "--app-name",
+                            "bread",
+                            "--urgency",
+                            &urgency_clone,
+                            "--expire-time",
+                            &timeout.to_string(),
+                        ]);
+                        if let Some(icon) = icon {
+                            cmd.args(["--icon", &icon]);
+                        }
+                        let _ = cmd.args([&title_clone, &message_clone]).status();
+                    });
 
-            let _ = emit_tx.send(BreadEvent::new(
-                "bread.notify.sent",
-                AdapterSource::System,
-                serde_json::json!({
-                    "title": title,
-                    "message": message,
-                    "urgency": urgency,
-                }),
-            ));
+                    let _ = emit_tx.send(BreadEvent::new(
+                        "bread.notify.sent",
+                        AdapterSource::System,
+                        serde_json::json!({
+                            "title": title,
+                            "message": message,
+                            "urgency": urgency,
+                        }),
+                    ));
 
-            Ok(())
-        })?;
+                    Ok(())
+                })?;
         bread.set("notify", notify_fn)?;
 
         let timers = self.timers.clone();
         let next_timer_id = self.next_timer_id.clone();
         let lua_tx = self.lua_tx.clone();
-        let after_fn = self.lua.create_function(move |lua, (delay_ms, callback): (u64, Function)| {
-            let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
-            let key = lua.create_registry_value(callback)?;
-            let (cancel_tx, mut cancel_rx) = watch::channel(false);
-            timers
-                .lock()
-                .map_err(|_| LuaError::external("timer lock poisoned"))?
-                .insert(
-                    id,
-                    TimerEntry {
-                        callback: key,
-                        repeating: false,
-                        cancel_tx,
-                    },
-                );
-            let lua_tx = lua_tx.clone();
-            task::spawn(async move {
-                tokio::select! {
-                    _ = sleep(Duration::from_millis(delay_ms)) => {
-                        if !*cancel_rx.borrow() {
-                            let _ = lua_tx.send(LuaMessage::TimerFired { id });
+        let after_fn =
+            self.lua
+                .create_function(move |lua, (delay_ms, callback): (u64, Function)| {
+                    let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
+                    let key = lua.create_registry_value(callback)?;
+                    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+                    timers
+                        .lock()
+                        .map_err(|_| LuaError::external("timer lock poisoned"))?
+                        .insert(
+                            id,
+                            TimerEntry {
+                                callback: key,
+                                repeating: false,
+                                cancel_tx,
+                            },
+                        );
+                    let lua_tx = lua_tx.clone();
+                    task::spawn(async move {
+                        tokio::select! {
+                            _ = sleep(Duration::from_millis(delay_ms)) => {
+                                if !*cancel_rx.borrow() {
+                                    let _ = lua_tx.send(LuaMessage::TimerFired { id });
+                                }
+                            }
+                            _ = cancel_rx.changed() => {}
                         }
-                    }
-                    _ = cancel_rx.changed() => {}
-                }
-            });
-            Ok(id.0)
-        })?;
+                    });
+                    Ok(id.0)
+                })?;
         bread.set("after", after_fn)?;
 
         let timers = self.timers.clone();
         let next_timer_id = self.next_timer_id.clone();
         let lua_tx = self.lua_tx.clone();
-        let every_fn = self.lua.create_function(move |lua, (interval_ms, callback): (u64, Function)| {
-            let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
-            let key = lua.create_registry_value(callback)?;
-            let (cancel_tx, mut cancel_rx) = watch::channel(false);
-            timers
-                .lock()
-                .map_err(|_| LuaError::external("timer lock poisoned"))?
-                .insert(
-                    id,
-                    TimerEntry {
-                        callback: key,
-                        repeating: true,
-                        cancel_tx,
-                    },
-                );
-            let lua_tx = lua_tx.clone();
-            task::spawn(async move {
-                let start = Instant::now() + Duration::from_millis(interval_ms);
-                let mut ticker = interval_at(start, Duration::from_millis(interval_ms));
-                loop {
-                    tokio::select! {
-                        _ = ticker.tick() => {
-                            if *cancel_rx.borrow() {
-                                break;
+        let every_fn =
+            self.lua
+                .create_function(move |lua, (interval_ms, callback): (u64, Function)| {
+                    let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
+                    let key = lua.create_registry_value(callback)?;
+                    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+                    timers
+                        .lock()
+                        .map_err(|_| LuaError::external("timer lock poisoned"))?
+                        .insert(
+                            id,
+                            TimerEntry {
+                                callback: key,
+                                repeating: true,
+                                cancel_tx,
+                            },
+                        );
+                    let lua_tx = lua_tx.clone();
+                    task::spawn(async move {
+                        let start = Instant::now() + Duration::from_millis(interval_ms);
+                        let mut ticker = interval_at(start, Duration::from_millis(interval_ms));
+                        loop {
+                            tokio::select! {
+                                _ = ticker.tick() => {
+                                    if *cancel_rx.borrow() {
+                                        break;
+                                    }
+                                    let _ = lua_tx.send(LuaMessage::TimerFired { id });
+                                }
+                                _ = cancel_rx.changed() => {
+                                    if *cancel_rx.borrow() {
+                                        break;
+                                    }
+                                }
                             }
-                            let _ = lua_tx.send(LuaMessage::TimerFired { id });
                         }
-                        _ = cancel_rx.changed() => {
-                            if *cancel_rx.borrow() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            });
-            Ok(id.0)
-        })?;
+                    });
+                    Ok(id.0)
+                })?;
         bread.set("every", every_fn)?;
 
         let timers = self.timers.clone();
@@ -694,18 +705,22 @@ impl LuaEngine {
         bread.set("cancel", cancel_fn)?;
 
         let hyprland_tbl = self.lua.create_table()?;
-        let dispatch_fn = self.lua.create_function(move |_lua, (cmd, args): (String, String)| {
-            let resp = hyprland_request(&format!("dispatch {cmd} {args}"))
-                .map_err(|e| LuaError::external(e.to_string()))?;
-            Ok(resp)
-        })?;
+        let dispatch_fn =
+            self.lua
+                .create_function(move |_lua, (cmd, args): (String, String)| {
+                    let resp = hyprland_request(&format!("dispatch {cmd} {args}"))
+                        .map_err(|e| LuaError::external(e.to_string()))?;
+                    Ok(resp)
+                })?;
         hyprland_tbl.set("dispatch", dispatch_fn)?;
 
-        let keyword_fn = self.lua.create_function(move |_lua, (key, value): (String, String)| {
-            let resp = hyprland_request(&format!("keyword {key} {value}"))
-                .map_err(|e| LuaError::external(e.to_string()))?;
-            Ok(resp)
-        })?;
+        let keyword_fn =
+            self.lua
+                .create_function(move |_lua, (key, value): (String, String)| {
+                    let resp = hyprland_request(&format!("keyword {key} {value}"))
+                        .map_err(|e| LuaError::external(e.to_string()))?;
+                    Ok(resp)
+                })?;
         hyprland_tbl.set("keyword", keyword_fn)?;
 
         let eval_fn = self.lua.create_function(move |_lua, expr: String| {
@@ -718,38 +733,38 @@ impl LuaEngine {
         let active_window_fn = self.lua.create_function(move |lua, ()| {
             let resp = hyprland_request("j/activewindow")
                 .map_err(|e| LuaError::external(e.to_string()))?;
-            let json: JsonValue = serde_json::from_str(&resp)
-                .map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue =
+                serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             lua.to_value(&json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("active_window", active_window_fn)?;
 
         let monitors_fn = self.lua.create_function(move |lua, ()| {
-            let resp = hyprland_request("j/monitors")
-                .map_err(|e| LuaError::external(e.to_string()))?;
-            let json: JsonValue = serde_json::from_str(&resp)
-                .map_err(|e| LuaError::external(e.to_string()))?;
+            let resp =
+                hyprland_request("j/monitors").map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue =
+                serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             lua.to_value(&json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("monitors", monitors_fn)?;
 
         let workspaces_fn = self.lua.create_function(move |lua, ()| {
-            let resp = hyprland_request("j/workspaces")
-                .map_err(|e| LuaError::external(e.to_string()))?;
-            let json: JsonValue = serde_json::from_str(&resp)
-                .map_err(|e| LuaError::external(e.to_string()))?;
+            let resp =
+                hyprland_request("j/workspaces").map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue =
+                serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             lua.to_value(&json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("workspaces", workspaces_fn)?;
 
         let clients_fn = self.lua.create_function(move |lua, ()| {
-            let resp = hyprland_request("j/clients")
-                .map_err(|e| LuaError::external(e.to_string()))?;
-            let json: JsonValue = serde_json::from_str(&resp)
-                .map_err(|e| LuaError::external(e.to_string()))?;
+            let resp =
+                hyprland_request("j/clients").map_err(|e| LuaError::external(e.to_string()))?;
+            let json: JsonValue =
+                serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             lua.to_value(&json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
@@ -759,33 +774,33 @@ impl LuaEngine {
         let next_sub_id = self.next_sub_id.clone();
         let state_handle = self.state_handle.clone();
         let current_module = self.current_module.clone();
-        let on_raw_fn = self
-            .lua
-            .create_function(move |lua, (event, callback): (String, Function)| {
-                let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
-                let key = lua.create_registry_value(callback)?;
-                let module = current_module
-                    .lock()
-                    .map_err(|_| LuaError::external("module context lock poisoned"))?
-                    .clone();
-                handlers
-                    .lock()
-                    .map_err(|_| LuaError::external("handler lock poisoned"))?
-                    .insert(
-                        id,
-                        HandlerEntry {
-                            callback: key,
-                            filter: None,
-                            module,
-                            raw_kind: Some(event),
-                            kind: HandlerKind::Event,
-                        },
-                    );
-                state_handle
-                    .register_subscription(id, "bread.hyprland.event".to_string(), false)
-                    .map_err(LuaError::external)?;
-                Ok(id.0)
-            })?;
+        let on_raw_fn =
+            self.lua
+                .create_function(move |lua, (event, callback): (String, Function)| {
+                    let id = SubscriptionId(next_sub_id.fetch_add(1, Ordering::Relaxed));
+                    let key = lua.create_registry_value(callback)?;
+                    let module = current_module
+                        .lock()
+                        .map_err(|_| LuaError::external("module context lock poisoned"))?
+                        .clone();
+                    handlers
+                        .lock()
+                        .map_err(|_| LuaError::external("handler lock poisoned"))?
+                        .insert(
+                            id,
+                            HandlerEntry {
+                                callback: key,
+                                filter: None,
+                                module,
+                                raw_kind: Some(event),
+                                kind: HandlerKind::Event,
+                            },
+                        );
+                    state_handle
+                        .register_subscription(id, "bread.hyprland.event".to_string(), false)
+                        .map_err(LuaError::external)?;
+                    Ok(id.0)
+                })?;
         hyprland_tbl.set("on_raw", on_raw_fn)?;
         bread.set("hyprland", hyprland_tbl)?;
 
@@ -800,7 +815,9 @@ impl LuaEngine {
                 .map_err(|_| LuaError::external("module context lock poisoned"))?
                 .clone();
             if expected.as_deref() != Some(&name) {
-                return Err(LuaError::external("module name does not match current load"));
+                return Err(LuaError::external(
+                    "module name does not match current load",
+                ));
             }
 
             let decl = module_decls
@@ -834,7 +851,7 @@ impl LuaEngine {
             let set_fn = lua.create_function(move |lua, (key, value): (String, Value)| {
                 let json = lua
                     .from_value::<JsonValue>(value)
-                    .unwrap_or_else(|_| JsonValue::Null);
+                    .unwrap_or(JsonValue::Null);
                 module_store_set(&state_arc_set, &module_name, key, json);
                 Ok(())
             })?;
@@ -845,10 +862,7 @@ impl LuaEngine {
             modules
                 .lock()
                 .map_err(|_| LuaError::external("module registry lock poisoned"))?
-                .insert(
-                    decl.name.clone(),
-                    ModuleInfo { table_key: key },
-                );
+                .insert(decl.name.clone(), ModuleInfo { table_key: key });
 
             // Register in package.loaded so require("bread.devices") etc. works
             let package: Table = lua.globals().get("package")?;
@@ -862,9 +876,9 @@ impl LuaEngine {
         // bread.machine — machine name and tags from sync.toml
         let machine_tbl = self.lua.create_table()?;
 
-        let name_fn = self.lua.create_function(|_lua, ()| {
-            Ok(lua_machine_name())
-        })?;
+        let name_fn = self
+            .lua
+            .create_function(|_lua, ()| Ok(lua_machine_name()))?;
         machine_tbl.set("name", name_fn)?;
 
         let tags_fn = self.lua.create_function(|lua, ()| {
@@ -877,9 +891,9 @@ impl LuaEngine {
         })?;
         machine_tbl.set("tags", tags_fn)?;
 
-        let has_tag_fn = self.lua.create_function(|_lua, tag: String| {
-            Ok(lua_machine_tags().contains(&tag))
-        })?;
+        let has_tag_fn = self
+            .lua
+            .create_function(|_lua, tag: String| Ok(lua_machine_tags().contains(&tag)))?;
         machine_tbl.set("has_tag", has_tag_fn)?;
 
         bread.set("machine", machine_tbl)?;
@@ -887,15 +901,16 @@ impl LuaEngine {
         // bread.fs — file system helpers
         let fs_tbl = self.lua.create_table()?;
 
-        let write_fn = self.lua.create_function(|_lua, (path, content): (String, String)| {
-            let expanded = lua_expand_path(&path);
-            if let Some(parent) = expanded.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| LuaError::external(e.to_string()))?;
-            }
-            std::fs::write(&expanded, content)
-                .map_err(|e| LuaError::external(e.to_string()))
-        })?;
+        let write_fn = self
+            .lua
+            .create_function(|_lua, (path, content): (String, String)| {
+                let expanded = lua_expand_path(&path);
+                if let Some(parent) = expanded.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| LuaError::external(e.to_string()))?;
+                }
+                std::fs::write(&expanded, content).map_err(|e| LuaError::external(e.to_string()))
+            })?;
         fs_tbl.set("write", write_fn)?;
 
         let read_fn = self.lua.create_function(|_lua, path: String| {
@@ -907,9 +922,9 @@ impl LuaEngine {
         })?;
         fs_tbl.set("read", read_fn)?;
 
-        let exists_fn = self.lua.create_function(|_lua, path: String| {
-            Ok(lua_expand_path(&path).exists())
-        })?;
+        let exists_fn = self
+            .lua
+            .create_function(|_lua, path: String| Ok(lua_expand_path(&path).exists()))?;
         fs_tbl.set("exists", exists_fn)?;
 
         let expand_fn = self.lua.create_function(|_lua, path: String| {
@@ -1025,18 +1040,16 @@ impl LuaEngine {
         let mut files = list_lua_files(&self.module_path)?;
         files.sort();
 
-        let disabled: HashSet<String> = self
-            .modules_config
-            .disable
-            .iter()
-            .cloned()
-            .collect();
+        let disabled: HashSet<String> = self.modules_config.disable.iter().cloned().collect();
 
         let mut decls = Vec::new();
         if self.modules_config.builtin {
             decls.extend(builtin_module_decls(&disabled));
         }
-        for path in files.into_iter().filter(|p| !is_lib_path(&self.module_path, p)) {
+        for path in files
+            .into_iter()
+            .filter(|p| !is_lib_path(&self.module_path, p))
+        {
             match self.scan_module_decl(&path) {
                 Ok(decl) => decls.push(decl),
                 Err(err) => {
@@ -1130,7 +1143,10 @@ impl LuaEngine {
         }
 
         let src = fs::read_to_string(path)?;
-        self.lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec()?;
+        self.lua
+            .load(&src)
+            .set_name(path.to_string_lossy().as_ref())
+            .exec()?;
         Ok(())
     }
 
@@ -1371,7 +1387,9 @@ impl LuaEngine {
         //
         // Each accepts any Lua value and coerces it to a string via tostring()
         // so callers can do bread.log(some_table) without a crash.
-        self.lua.load(r#"
+        self.lua
+            .load(
+                r#"
             local _bread = bread
 
             local function stringify(v)
@@ -1392,7 +1410,9 @@ impl LuaEngine {
             function _bread.error(msg)
                 _bread.__log_error(stringify(msg))
             end
-        "#).exec()?;
+        "#,
+            )
+            .exec()?;
 
         // Register the raw Rust-backed log functions that the Lua wrappers call.
         let globals = self.lua.globals();
@@ -1429,7 +1449,9 @@ impl LuaEngine {
         //
         // Because the Lua runtime is single-threaded, we implement this in
         // pure Lua using bread.cancel / bread.after.
-        self.lua.load(r#"
+        self.lua
+            .load(
+                r#"
             function bread.debounce(delay_ms, fn)
                 local timer_id = nil
                 return function(...)
@@ -1444,7 +1466,9 @@ impl LuaEngine {
                     end)
                 end
             end
-        "#).exec()?;
+        "#,
+            )
+            .exec()?;
         Ok(())
     }
 
@@ -1476,7 +1500,8 @@ impl LuaEngine {
         let bread = lua.create_table()?;
         bread.set("module", module_fn)?;
         lua.globals().set("bread", bread)?;
-        lua.load(r#"
+        lua.load(
+            r#"
             local _noop = function(...) end
             local _noop_tbl_mt = { __index = function() return _noop end, __call = _noop }
             local _noop_tbl = setmetatable({}, _noop_tbl_mt)
@@ -1486,10 +1511,15 @@ impl LuaEngine {
                     return _noop_tbl
                 end
             })
-        "#).exec()?;
+        "#,
+        )
+        .exec()?;
 
         let src = fs::read_to_string(path)?;
-        let result = lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec();
+        let result = lua
+            .load(&src)
+            .set_name(path.to_string_lossy().as_ref())
+            .exec();
         // bread.module() throws MODULE_DECL_ABORT to abort scanning early.
         // mlua may wrap the error in CallbackError, so match on string content.
         if let Err(err) = result {
@@ -1515,8 +1545,7 @@ impl LuaEngine {
                 return Ok(Value::Nil);
             }
 
-            let src = fs::read_to_string(&path)
-                .map_err(|e| LuaError::external(e.to_string()))?;
+            let src = fs::read_to_string(&path).map_err(|e| LuaError::external(e.to_string()))?;
             let func = lua
                 .load(&src)
                 .set_name(path.to_string_lossy().as_ref())
@@ -1529,8 +1558,9 @@ impl LuaEngine {
         let bread: Table = globals.get("bread")?;
         bread.set("__require_loader", loader)?;
 
-        self.lua.load(
-            r#"
+        self.lua
+            .load(
+                r#"
             local searchers = package.searchers or package.loaders
             if searchers then
                 table.insert(searchers, 1, function(name)
@@ -1538,8 +1568,8 @@ impl LuaEngine {
                 end)
             end
             "#,
-        )
-        .exec()?;
+            )
+            .exec()?;
 
         Ok(())
     }
@@ -1664,10 +1694,7 @@ fn order_module_decls(decls: Vec<ModuleDecl>) -> (Vec<ModuleDecl>, Vec<(String, 
 
 fn module_name_from_path(module_root: &Path, path: &Path) -> String {
     let rel = path.strip_prefix(module_root).unwrap_or(path);
-    let mut name = rel
-        .with_extension("")
-        .to_string_lossy()
-        .replace('/', ".");
+    let mut name = rel.with_extension("").to_string_lossy().replace('/', ".");
     if name.starts_with('.') {
         name.remove(0);
     }
@@ -1697,8 +1724,8 @@ fn state_value_to_lua<'lua>(
         }
         std::hint::spin_loop();
     };
-    let mut value = serde_json::to_value(&*snapshot)
-        .map_err(|e| LuaError::external(e.to_string()))?;
+    let mut value =
+        serde_json::to_value(&*snapshot).map_err(|e| LuaError::external(e.to_string()))?;
     if path.is_empty() {
         return lua
             .to_value(&value)
@@ -1714,7 +1741,11 @@ fn state_value_to_lua<'lua>(
         .map_err(|e| LuaError::external(e.to_string()))
 }
 
-fn module_store_get(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: &str) -> Option<JsonValue> {
+fn module_store_get(
+    state_arc: &Arc<RwLock<RuntimeState>>,
+    module: &str,
+    key: &str,
+) -> Option<JsonValue> {
     let guard = loop {
         if let Ok(g) = state_arc.try_read() {
             break g;
@@ -1725,7 +1756,12 @@ fn module_store_get(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: &s
     entry.store.get(key).cloned()
 }
 
-fn module_store_set(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, key: String, value: JsonValue) {
+fn module_store_set(
+    state_arc: &Arc<RwLock<RuntimeState>>,
+    module: &str,
+    key: String,
+    value: JsonValue,
+) {
     let mut guard = loop {
         if let Ok(g) = state_arc.try_write() {
             break g;
@@ -1824,9 +1860,7 @@ fn lua_machine_tags() -> Vec<String> {
 fn read_sync_toml() -> anyhow::Result<toml::Value> {
     let config_dir = std::env::var("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|_| {
-            std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config"))
-        })
+        .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
         .unwrap_or_else(|_| std::path::PathBuf::from(".config"));
     let path = config_dir.join("bread").join("sync.toml");
     let raw = std::fs::read_to_string(path)?;
@@ -2102,7 +2136,10 @@ fn hyprland_request_socket() -> Result<PathBuf> {
         .collect();
 
     match sockets.len() {
-        0 => Err(anyhow!("no Hyprland instance found in {}", hypr_dir.display())),
+        0 => Err(anyhow!(
+            "no Hyprland instance found in {}",
+            hypr_dir.display()
+        )),
         1 => Ok(sockets.remove(0)),
         _ => Ok(sockets.remove(0)),
     }

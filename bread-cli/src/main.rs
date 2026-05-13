@@ -3,8 +3,7 @@ mod modules_mgmt;
 use anyhow::{Context, Result};
 use bread_sync::{
     config::{bread_config_dir, SyncConfig},
-    delegates, machine, packages,
-    SyncRepo,
+    delegates, machine, packages, SyncRepo,
 };
 use clap::{Parser, Subcommand};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -18,7 +17,11 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Bread CLI - the reactive desktop automation fabric")]
+#[command(
+    author,
+    version,
+    about = "Bread CLI - the reactive desktop automation fabric"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -234,8 +237,7 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
 
     match cmd {
         ModulesCommand::Install { source } => {
-            let manifest =
-                install_module(&source, &mods_dir).await?;
+            let manifest = install_module(&source, &mods_dir).await?;
             println!("installed {} v{}", manifest.name, manifest.version);
             try_daemon_reload(socket).await;
         }
@@ -283,7 +285,10 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
                     .get(&m.name)
                     .map(String::as_str)
                     .unwrap_or("unknown");
-                println!("  {:20} {:10} {:10} {}", m.name, m.version, status, m.source);
+                println!(
+                    "  {:20} {:10} {:10} {}",
+                    m.name, m.version, status, m.source
+                );
             }
         }
 
@@ -298,12 +303,14 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
             for manifest in targets {
                 if manifest.source.starts_with("github:") {
                     let old_ver = manifest.version.clone();
-                    let new_manifest =
-                        install_module(&manifest.source, &mods_dir).await?;
+                    let new_manifest = install_module(&manifest.source, &mods_dir).await?;
                     if new_manifest.version == old_ver {
                         println!("{} already up to date", manifest.name);
                     } else {
-                        println!("updated {} v{} → v{}", manifest.name, old_ver, new_manifest.version);
+                        println!(
+                            "updated {} v{} → v{}",
+                            manifest.name, old_ver, new_manifest.version
+                        );
                         updated_any = true;
                     }
                 } else {
@@ -352,9 +359,11 @@ async fn install_module(
         modules_mgmt::InstallSource::LocalPath(path) => {
             modules_mgmt::install_from_local(&path, source, mods_dir)
         }
-        modules_mgmt::InstallSource::GitHub { user, repo, git_ref } => {
-            install_from_github(&user, &repo, git_ref.as_deref(), source, mods_dir).await
-        }
+        modules_mgmt::InstallSource::GitHub {
+            user,
+            repo,
+            git_ref,
+        } => install_from_github(&user, &repo, git_ref.as_deref(), source, mods_dir).await,
     }
 }
 
@@ -388,8 +397,7 @@ async fn install_from_github(
         }
     };
 
-    let tarball_url =
-        format!("https://api.github.com/repos/{user}/{repo}/tarball/{ref_to_use}");
+    let tarball_url = format!("https://api.github.com/repos/{user}/{repo}/tarball/{ref_to_use}");
     let bytes = client
         .get(&tarball_url)
         .send()
@@ -400,8 +408,7 @@ async fn install_from_github(
         .context("failed to read module archive")?;
 
     let tmp = tempfile::tempdir()?;
-    let mut archive =
-        tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]));
     archive.unpack(tmp.path())?;
 
     // GitHub extracts to a single subdirectory (e.g. "user-repo-sha/")
@@ -552,7 +559,10 @@ async fn cmd_sync_push(cfg_dir: &Path, message: Option<String>) -> Result<()> {
         for manager in &config.packages.managers {
             let dest_file = packages_dir.join(format!("{manager}.txt"));
             if let Err(e) = packages::snapshot(manager, &dest_file) {
-                eprintln!("bread: warning: package snapshot for {} failed: {}", manager, e);
+                eprintln!(
+                    "bread: warning: package snapshot for {} failed: {}",
+                    manager, e
+                );
             }
         }
     }
@@ -631,9 +641,11 @@ async fn cmd_sync_pull(cfg_dir: &Path, install_packages: bool, socket: &Path) ->
             run_package_installs(&packages_dir, &config.packages.managers)?;
         } else {
             // Check if packages differ
-            let has_package_files = config.packages.managers.iter().any(|m| {
-                packages_dir.join(format!("{m}.txt")).exists()
-            });
+            let has_package_files = config
+                .packages
+                .managers
+                .iter()
+                .any(|m| packages_dir.join(format!("{m}.txt")).exists());
             if has_package_files {
                 println!(
                     "note: run 'bread sync pull --install-packages' to install missing packages"
@@ -848,9 +860,12 @@ async fn stream_events(
     since: Option<u64>,
 ) -> Result<()> {
     if let Some(seconds) = since {
-        let replay =
-            send_request(socket, "events.replay", json!({ "since_ms": seconds * 1000 }))
-                .await?;
+        let replay = send_request(
+            socket,
+            "events.replay",
+            json!({ "since_ms": seconds * 1000 }),
+        )
+        .await?;
         if let Some(list) = replay.as_array() {
             for item in list {
                 if raw_json {
@@ -1039,10 +1054,7 @@ fn render_doctor(health: &Value) {
         .get("version")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    let uptime_ms = health
-        .get("uptime_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let uptime_ms = health.get("uptime_ms").and_then(Value::as_u64).unwrap_or(0);
     let socket = health.get("socket").and_then(Value::as_str).unwrap_or("?");
     println!(
         "  daemon     {} (pid {})",

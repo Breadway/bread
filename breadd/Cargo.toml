@@ -1,10 +1,11 @@
 [package]
 name = "breadd"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
 bread-shared = { path = "../bread-shared" }
+bread-sync = { path = "../bread-sync" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -17,7 +18,6 @@ toml = "0.8"
 udev = { version = "0.9", features = ["send"] }
 rtnetlink = "0.9"
 zbus = { version = "3.13", features = ["tokio"] }
-hex = "0.4"
 futures-util = "0.3"
 netlink-packet-route = "0.11"
 netlink-packet-core = "0.4"

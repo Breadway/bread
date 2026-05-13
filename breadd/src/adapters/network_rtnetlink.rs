@@ -70,7 +70,14 @@ impl Adapter for RtnetlinkAdapter {
                             "netns_id": netns_id,
                             "netns_fd": netns_fd
                         });
-                        let _ = tx.send(RawEvent { source: AdapterSource::Network, kind: kind.to_string(), payload, timestamp: bread_shared::now_unix_ms() }).await;
+                        let _ = tx
+                            .send(RawEvent {
+                                source: AdapterSource::Network,
+                                kind: kind.to_string(),
+                                payload,
+                                timestamp: bread_shared::now_unix_ms(),
+                            })
+                            .await;
                     }
                 }
                 netlink_packet_core::NetlinkPayload::InnerMessage(RtnlMessage::NewRoute(route)) => {
@@ -86,17 +93,32 @@ impl Adapter for RtnetlinkAdapter {
                             "gateway": gateway_ip,
                             "table": route.header.table
                         });
-                        let _ = tx.send(RawEvent { source: AdapterSource::Network, kind: "route.default.changed".to_string(), payload, timestamp: bread_shared::now_unix_ms() }).await;
+                        let _ = tx
+                            .send(RawEvent {
+                                source: AdapterSource::Network,
+                                kind: "route.default.changed".to_string(),
+                                payload,
+                                timestamp: bread_shared::now_unix_ms(),
+                            })
+                            .await;
                     }
                 }
-                netlink_packet_core::NetlinkPayload::InnerMessage(RtnlMessage::NewAddress(addr)) => {
+                netlink_packet_core::NetlinkPayload::InnerMessage(RtnlMessage::NewAddress(
+                    addr,
+                )) => {
                     let address = addr.nlas.iter().find_map(|nla| match nla {
-                        netlink_packet_route::address::nlas::Nla::Address(bytes) => Some(bytes.clone()),
-                        netlink_packet_route::address::nlas::Nla::Local(bytes) => Some(bytes.clone()),
+                        netlink_packet_route::address::nlas::Nla::Address(bytes) => {
+                            Some(bytes.clone())
+                        }
+                        netlink_packet_route::address::nlas::Nla::Local(bytes) => {
+                            Some(bytes.clone())
+                        }
                         _ => None,
                     });
                     let label = addr.nlas.iter().find_map(|nla| match nla {
-                        netlink_packet_route::address::nlas::Nla::Label(label) => Some(label.clone()),
+                        netlink_packet_route::address::nlas::Nla::Label(label) => {
+                            Some(label.clone())
+                        }
                         _ => None,
                     });
                     let ip = address.as_deref().and_then(ip_from_bytes);
@@ -107,16 +129,31 @@ impl Adapter for RtnetlinkAdapter {
                         "address": ip,
                         "label": label
                     });
-                    let _ = tx.send(RawEvent { source: AdapterSource::Network, kind: "address.added".to_string(), payload, timestamp: bread_shared::now_unix_ms() }).await;
+                    let _ = tx
+                        .send(RawEvent {
+                            source: AdapterSource::Network,
+                            kind: "address.added".to_string(),
+                            payload,
+                            timestamp: bread_shared::now_unix_ms(),
+                        })
+                        .await;
                 }
-                netlink_packet_core::NetlinkPayload::InnerMessage(RtnlMessage::DelAddress(addr)) => {
+                netlink_packet_core::NetlinkPayload::InnerMessage(RtnlMessage::DelAddress(
+                    addr,
+                )) => {
                     let address = addr.nlas.iter().find_map(|nla| match nla {
-                        netlink_packet_route::address::nlas::Nla::Address(bytes) => Some(bytes.clone()),
-                        netlink_packet_route::address::nlas::Nla::Local(bytes) => Some(bytes.clone()),
+                        netlink_packet_route::address::nlas::Nla::Address(bytes) => {
+                            Some(bytes.clone())
+                        }
+                        netlink_packet_route::address::nlas::Nla::Local(bytes) => {
+                            Some(bytes.clone())
+                        }
                         _ => None,
                     });
                     let label = addr.nlas.iter().find_map(|nla| match nla {
-                        netlink_packet_route::address::nlas::Nla::Label(label) => Some(label.clone()),
+                        netlink_packet_route::address::nlas::Nla::Label(label) => {
+                            Some(label.clone())
+                        }
                         _ => None,
                     });
                     let ip = address.as_deref().and_then(ip_from_bytes);
@@ -127,7 +164,14 @@ impl Adapter for RtnetlinkAdapter {
                         "address": ip,
                         "label": label
                     });
-                    let _ = tx.send(RawEvent { source: AdapterSource::Network, kind: "address.removed".to_string(), payload, timestamp: bread_shared::now_unix_ms() }).await;
+                    let _ = tx
+                        .send(RawEvent {
+                            source: AdapterSource::Network,
+                            kind: "address.removed".to_string(),
+                            payload,
+                            timestamp: bread_shared::now_unix_ms(),
+                        })
+                        .await;
                 }
                 _ => {
                     debug!("unhandled netlink message");

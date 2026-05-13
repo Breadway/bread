@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeState {
     pub monitors: Vec<Monitor>,
     pub workspaces: Vec<Workspace>,
@@ -14,22 +14,6 @@ pub struct RuntimeState {
     pub power: PowerState,
     pub profile: ProfileState,
     pub modules: Vec<ModuleStatus>,
-}
-
-impl Default for RuntimeState {
-    fn default() -> Self {
-        Self {
-            monitors: Vec::new(),
-            workspaces: Vec::new(),
-            active_workspace: None,
-            active_window: None,
-            devices: DeviceTopology::default(),
-            network: NetworkState::default(),
-            power: PowerState::default(),
-            profile: ProfileState::default(),
-            modules: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,21 +84,11 @@ pub struct InterfaceState {
     pub up: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PowerState {
     pub ac_connected: bool,
     pub battery_percent: Option<u8>,
     pub battery_low: bool,
-}
-
-impl Default for PowerState {
-    fn default() -> Self {
-        Self {
-            ac_connected: false,
-            battery_percent: None,
-            battery_low: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
