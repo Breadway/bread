@@ -80,13 +80,13 @@ git clone https://github.com/Breadway/bread.git
 cd bread
 ```
 
-Run the install script — it builds, installs to `/usr/bin`, sets up the systemd user service, and starts the daemon:
+Run the install script — it builds, symlinks `breadd` and `bread` into `~/.local/bin` (override with `BIN_DIR=…`), installs the systemd user service, and starts the daemon:
 
 ```bash
 bash scripts/install.sh
 ```
 
-Or step by step:
+Or step by step (system-wide install):
 
 ```bash
 cargo build --release
@@ -377,12 +377,14 @@ bread.once("bread.system.startup", function(event)
     bread.profile.activate("default")
 end)
 
--- Subscribe with a filter predicate
+-- Subscribe with a filter predicate. The predicate goes in an opts table.
 bread.filter("bread.device.connected", function(event)
-    return event.data.device == "keyboard"
-end, function(event)
     bread.exec("xset r rate 200 40")
-end)
+end, {
+    filter = function(event)
+        return event.data.device == "keyboard"
+    end,
+})
 
 -- Emit a custom event (for cross-module communication)
 bread.emit("mymodule.something", { key = "value" })

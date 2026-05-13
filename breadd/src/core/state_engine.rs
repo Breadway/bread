@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use bread_shared::{AdapterSource, BreadEvent};
@@ -9,14 +9,15 @@ use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::warn;
 
 use crate::core::subscriptions::{SubscriptionId, SubscriptionTable};
-use crate::core::types::{Device, DeviceRule, InterfaceState, MatchCondition, ModuleLoadState, RuntimeState};
+use crate::core::types::{
+    Device, DeviceRule, InterfaceState, MatchCondition, ModuleLoadState, RuntimeState,
+};
 use crate::lua::LuaMessage;
 
 #[derive(Clone)]
 pub struct StateHandle {
     state: Arc<RwLock<RuntimeState>>,
     command_tx: mpsc::UnboundedSender<StateCommand>,
-    subscription_count: Arc<AtomicU64>,
 }
 
 pub enum StateCommand {
@@ -53,13 +54,8 @@ impl StateHandle {
     pub fn new(
         state: Arc<RwLock<RuntimeState>>,
         command_tx: mpsc::UnboundedSender<StateCommand>,
-        subscription_count: Arc<AtomicU64>,
     ) -> Self {
-        Self {
-            state,
-            command_tx,
-            subscription_count,
-        }
+        Self { state, command_tx }
     }
 
     pub fn state_arc(&self) -> Arc<RwLock<RuntimeState>> {
@@ -86,18 +82,21 @@ impl StateHandle {
         serde_json::to_value(&*state).unwrap_or_else(|_| serde_json::json!({}))
     }
 
-    pub fn register_subscription(&self, id: SubscriptionId, pattern: String, once: bool) -> Result<()> {
+    pub fn register_subscription(
+        &self,
+        id: SubscriptionId,
+        pattern: String,
+        once: bool,
+    ) -> Result<()> {
         self.command_tx
-            .send(StateCommand::RegisterSubscription {
-                id,
-                pattern,
-                once,
-            })
+            .send(StateCommand::RegisterSubscription { id, pattern, once })
             .map_err(|_| anyhow::anyhow!("state engine command channel closed"))
     }
 
     pub fn remove_subscription(&self, id: SubscriptionId) {
-        let _ = self.command_tx.send(StateCommand::RemoveSubscription { id });
+        let _ = self
+            .command_tx
+            .send(StateCommand::RemoveSubscription { id });
     }
 
     pub fn register_watch(&self, id: SubscriptionId, path: String) -> Result<()> {
@@ -139,10 +138,6 @@ impl StateHandle {
 
     pub fn set_device_rules(&self, rules: Vec<DeviceRule>) {
         let _ = self.command_tx.send(StateCommand::SetDeviceRules(rules));
-    }
-
-    pub fn subscription_count(&self) -> Arc<AtomicU64> {
-        self.subscription_count.clone()
     }
 }
 
@@ -376,8 +371,16 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
                     state.monitors.push(crate::core::types::Monitor {
                         name: name.to_string(),
                         connected: true,
-                        resolution: event.data.get("resolution").and_then(Value::as_str).map(ToString::to_string),
-                        position: event.data.get("position").and_then(Value::as_str).map(ToString::to_string),
+                        resolution: event
+                            .data
+                            .get("resolution")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                        position: event
+                            .data
+                            .get("position")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
                     });
                 }
             }
@@ -403,7 +406,7 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
                 .data
                 .get("window")
                 .or_else(|| event.data.get("class"))
-            .or_else(|| event.data.get("address"))
+                .or_else(|| event.data.get("address"))
                 .and_then(Value::as_str)
                 .map(ToString::to_string);
         }
@@ -421,7 +424,10 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
                 state.network.interfaces.clear();
                 for (name, meta) in ifaces {
                     let up = meta.get("up").and_then(Value::as_bool).unwrap_or(false);
-                    state.network.interfaces.insert(name.clone(), InterfaceState { up });
+                    state
+                        .network
+                        .interfaces
+                        .insert(name.clone(), InterfaceState { up });
                 }
             }
         }
@@ -455,7 +461,8 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
 
 fn resolve_device(rules: &[DeviceRule], data: &Value) -> String {
     for rule in rules {
-        if !rule.conditions.is_empty() && rule.conditions.iter().all(|c| condition_matches(c, data)) {
+        if !rule.conditions.is_empty() && rule.conditions.iter().all(|c| condition_matches(c, data))
+        {
             return rule.device.clone();
         }
     }
@@ -476,37 +483,68 @@ fn condition_matches(cond: &MatchCondition, data: &Value) -> bool {
         }
     }
     if let Some(ref expected) = cond.name {
-        let actual = data.get("name").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let actual = data
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
         if actual != expected.to_lowercase() {
             return false;
         }
     }
     if let Some(ref expected) = cond.vendor {
-        let actual = data.get("vendor").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let actual = data
+            .get("vendor")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
         if actual != expected.to_lowercase() {
             return false;
         }
     }
     if let Some(ref contains) = cond.name_contains {
-        let name = data.get("name").and_then(Value::as_str).unwrap_or("").to_lowercase();
-        let vendor = data.get("vendor").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let name = data
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let vendor = data
+            .get("vendor")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
         let combined = format!("{name} {vendor}");
         if !combined.contains(contains.to_lowercase().as_str()) {
             return false;
         }
     }
     if let Some(expected) = cond.id_input_keyboard {
-        if data.get("id_input_keyboard").and_then(Value::as_bool).unwrap_or(false) != expected {
+        if data
+            .get("id_input_keyboard")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            != expected
+        {
             return false;
         }
     }
     if let Some(expected) = cond.id_input_mouse {
-        if data.get("id_input_mouse").and_then(Value::as_bool).unwrap_or(false) != expected {
+        if data
+            .get("id_input_mouse")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            != expected
+        {
             return false;
         }
     }
     if let Some(expected) = cond.id_input_tablet {
-        if data.get("id_input_tablet").and_then(Value::as_bool).unwrap_or(false) != expected {
+        if data
+            .get("id_input_tablet")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            != expected
+        {
             return false;
         }
     }
@@ -526,7 +564,10 @@ fn condition_matches(cond: &MatchCondition, data: &Value) -> bool {
         }
     }
     if let Some(ref expected) = cond.id_usb_class {
-        let actual = data.get("id_usb_class").and_then(Value::as_str).unwrap_or("");
+        let actual = data
+            .get("id_usb_class")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if actual.to_lowercase() != expected.to_lowercase()
             && actual.to_lowercase() != format!("0x{}", expected.to_lowercase())
         {
@@ -534,7 +575,11 @@ fn condition_matches(cond: &MatchCondition, data: &Value) -> bool {
         }
     }
     if let Some(ref expected) = cond.subsystem {
-        let actual = data.get("subsystem").and_then(Value::as_str).unwrap_or("").to_lowercase();
+        let actual = data
+            .get("subsystem")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
         if actual != expected.to_lowercase() {
             return false;
         }
@@ -584,5 +629,409 @@ fn apply_device_change(state: &mut RuntimeState, data: &Value, connected: bool) 
         });
     } else {
         state.devices.connected.retain(|d| d.id != id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(name: &str, data: Value) -> BreadEvent {
+        BreadEvent {
+            event: name.to_string(),
+            timestamp: 0,
+            source: AdapterSource::System,
+            data,
+        }
+    }
+
+    // ─── value_at_path ────────────────────────────────────────────────────
+
+    #[test]
+    fn value_at_path_returns_root_for_empty_path() {
+        let v = json!({"a": 1});
+        assert_eq!(value_at_path(&v, ""), Some(json!({"a": 1})));
+    }
+
+    #[test]
+    fn value_at_path_navigates_nested_keys() {
+        let v = json!({"a": {"b": {"c": 42}}});
+        assert_eq!(value_at_path(&v, "a.b.c"), Some(json!(42)));
+    }
+
+    #[test]
+    fn value_at_path_returns_none_on_missing_key() {
+        let v = json!({"a": 1});
+        assert!(value_at_path(&v, "missing").is_none());
+        assert!(value_at_path(&v, "a.b.c").is_none());
+    }
+
+    // ─── apply_event_to_state: monitors ───────────────────────────────────
+
+    #[test]
+    fn monitor_connect_adds_new_monitor() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.monitor.connected",
+                json!({"name": "DP-1", "resolution": "1920x1080", "position": "0x0"}),
+            ),
+        );
+        assert_eq!(state.monitors.len(), 1);
+        assert_eq!(state.monitors[0].name, "DP-1");
+        assert!(state.monitors[0].connected);
+        assert_eq!(state.monitors[0].resolution.as_deref(), Some("1920x1080"));
+        assert_eq!(state.monitors[0].position.as_deref(), Some("0x0"));
+    }
+
+    #[test]
+    fn monitor_reconnect_does_not_duplicate() {
+        let mut state = RuntimeState::default();
+        let mk = || ev("bread.monitor.connected", json!({"name": "DP-1"}));
+        apply_event_to_state(&mut state, &mk());
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.monitor.disconnected", json!({"name": "DP-1"})),
+        );
+        apply_event_to_state(&mut state, &mk());
+        assert_eq!(state.monitors.len(), 1);
+        assert!(state.monitors[0].connected);
+    }
+
+    #[test]
+    fn monitor_disconnect_keeps_record_but_flips_connected_flag() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.monitor.connected", json!({"name": "DP-1"})),
+        );
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.monitor.disconnected", json!({"name": "DP-1"})),
+        );
+        assert_eq!(state.monitors.len(), 1);
+        assert!(!state.monitors[0].connected);
+    }
+
+    // ─── apply_event_to_state: workspace + window ─────────────────────────
+
+    #[test]
+    fn workspace_changed_updates_active_workspace() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.workspace.changed", json!({"workspace": "3"})),
+        );
+        assert_eq!(state.active_workspace.as_deref(), Some("3"));
+        // Falls back to `id` when `workspace` is absent.
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.workspace.changed", json!({"id": "5"})),
+        );
+        assert_eq!(state.active_workspace.as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn window_focus_change_updates_active_window() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.window.focus.changed", json!({"window": "firefox"})),
+        );
+        assert_eq!(state.active_window.as_deref(), Some("firefox"));
+        // Falls back to `class`, then `address`.
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.window.focused", json!({"address": "0xdeadbeef"})),
+        );
+        assert_eq!(state.active_window.as_deref(), Some("0xdeadbeef"));
+    }
+
+    // ─── apply_device_change ──────────────────────────────────────────────
+
+    #[test]
+    fn device_connect_adds_device_with_all_fields() {
+        let mut state = RuntimeState::default();
+        apply_device_change(
+            &mut state,
+            &json!({
+                "id": "1-1.4",
+                "name": "Logitech Mouse",
+                "device": "mouse",
+                "subsystem": "usb",
+                "vendor_id": "046d",
+                "product_id": "c52b",
+            }),
+            true,
+        );
+        assert_eq!(state.devices.connected.len(), 1);
+        let d = &state.devices.connected[0];
+        assert_eq!(d.id, "1-1.4");
+        assert_eq!(d.name, "Logitech Mouse");
+        assert_eq!(d.device, "mouse");
+        assert_eq!(d.subsystem, "usb");
+        assert_eq!(d.vendor_id.as_deref(), Some("046d"));
+        assert_eq!(d.product_id.as_deref(), Some("c52b"));
+    }
+
+    #[test]
+    fn device_connect_is_idempotent_for_same_id() {
+        let mut state = RuntimeState::default();
+        let data = json!({"id": "x", "device": "dock", "name": "Dock"});
+        apply_device_change(&mut state, &data, true);
+        apply_device_change(&mut state, &data, true);
+        assert_eq!(state.devices.connected.len(), 1);
+    }
+
+    #[test]
+    fn device_disconnect_removes_matching_id() {
+        let mut state = RuntimeState::default();
+        apply_device_change(&mut state, &json!({"id": "a", "device": "x"}), true);
+        apply_device_change(&mut state, &json!({"id": "b", "device": "y"}), true);
+        assert_eq!(state.devices.connected.len(), 2);
+
+        apply_device_change(&mut state, &json!({"id": "a"}), false);
+        assert_eq!(state.devices.connected.len(), 1);
+        assert_eq!(state.devices.connected[0].id, "b");
+    }
+
+    #[test]
+    fn device_disconnect_of_unknown_id_is_noop() {
+        let mut state = RuntimeState::default();
+        apply_device_change(&mut state, &json!({"id": "a", "device": "x"}), true);
+        apply_device_change(&mut state, &json!({"id": "ghost"}), false);
+        assert_eq!(state.devices.connected.len(), 1);
+    }
+
+    // ─── apply_event_to_state: power ──────────────────────────────────────
+
+    #[test]
+    fn power_event_updates_ac_and_battery_low_flag() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.power.battery.low",
+                json!({"ac_connected": false, "battery_percent": 18}),
+            ),
+        );
+        assert!(!state.power.ac_connected);
+        assert_eq!(state.power.battery_percent, Some(18));
+        assert!(state.power.battery_low);
+
+        // 25% is no longer "low"
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.power.changed", json!({"battery_percent": 25})),
+        );
+        assert!(!state.power.battery_low);
+    }
+
+    #[test]
+    fn power_clamps_battery_percent_to_100() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.power.changed", json!({"battery_percent": 250u64})),
+        );
+        assert_eq!(state.power.battery_percent, Some(100));
+    }
+
+    // ─── apply_event_to_state: network ────────────────────────────────────
+
+    #[test]
+    fn network_event_updates_online_flag_and_interfaces() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.network.connected",
+                json!({
+                    "online": true,
+                    "interfaces": {
+                        "wlan0": {"up": true},
+                        "eth0": {"up": false},
+                    }
+                }),
+            ),
+        );
+        assert!(state.network.online);
+        assert_eq!(state.network.interfaces.len(), 2);
+        assert!(state.network.interfaces["wlan0"].up);
+        assert!(!state.network.interfaces["eth0"].up);
+    }
+
+    // ─── apply_event_to_state: profile ────────────────────────────────────
+
+    #[test]
+    fn profile_activated_pushes_previous_to_history() {
+        let mut state = RuntimeState::default();
+        // Initial active is "default".
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.profile.activated", json!({"name": "battery"})),
+        );
+        assert_eq!(state.profile.active, "battery");
+        assert_eq!(state.profile.history, vec!["default"]);
+
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.profile.activated", json!({"name": "ac"})),
+        );
+        assert_eq!(state.profile.active, "ac");
+        assert_eq!(state.profile.history, vec!["default", "battery"]);
+    }
+
+    #[test]
+    fn profile_activated_to_same_name_is_noop() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.profile.activated", json!({"name": "default"})),
+        );
+        assert_eq!(state.profile.active, "default");
+        assert!(state.profile.history.is_empty());
+    }
+
+    #[test]
+    fn unknown_event_does_not_mutate_state() {
+        let mut state = RuntimeState::default();
+        let before = serde_json::to_value(&state).unwrap();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.unknown.event", json!({"foo": "bar"})),
+        );
+        let after = serde_json::to_value(&state).unwrap();
+        assert_eq!(before, after);
+    }
+
+    // ─── condition_matches ────────────────────────────────────────────────
+
+    #[test]
+    fn condition_vendor_id_matches_case_insensitively() {
+        let cond = MatchCondition {
+            vendor_id: Some("046D".to_string()),
+            ..Default::default()
+        };
+        assert!(condition_matches(&cond, &json!({"vendor_id": "046d"})));
+        assert!(!condition_matches(&cond, &json!({"vendor_id": "1234"})));
+    }
+
+    #[test]
+    fn condition_name_contains_searches_name_and_vendor() {
+        let cond = MatchCondition {
+            name_contains: Some("logi".to_string()),
+            ..Default::default()
+        };
+        assert!(condition_matches(&cond, &json!({"name": "Logitech MX"})));
+        assert!(condition_matches(&cond, &json!({"vendor": "Logitech Inc"})));
+        assert!(!condition_matches(&cond, &json!({"name": "Apple"})));
+    }
+
+    #[test]
+    fn condition_input_flags_match_booleans() {
+        let cond = MatchCondition {
+            id_input_keyboard: Some(true),
+            ..Default::default()
+        };
+        assert!(condition_matches(
+            &cond,
+            &json!({"id_input_keyboard": true})
+        ));
+        assert!(!condition_matches(
+            &cond,
+            &json!({"id_input_keyboard": false})
+        ));
+        // Missing field defaults to false.
+        assert!(!condition_matches(&cond, &json!({})));
+    }
+
+    #[test]
+    fn condition_usb_hub_requires_hub_and_secondary_class() {
+        let cond = MatchCondition {
+            usb_hub: Some(true),
+            ..Default::default()
+        };
+        assert!(condition_matches(
+            &cond,
+            &json!({"id_usb_interfaces": ":0900:0e00:"})
+        ));
+        // Hub alone is not enough.
+        assert!(!condition_matches(
+            &cond,
+            &json!({"id_usb_interfaces": ":0900:"})
+        ));
+        // Secondary alone is not enough.
+        assert!(!condition_matches(
+            &cond,
+            &json!({"id_usb_interfaces": ":0e00:"})
+        ));
+    }
+
+    #[test]
+    fn condition_id_usb_class_accepts_with_or_without_0x_prefix() {
+        let cond = MatchCondition {
+            id_usb_class: Some("0e".to_string()),
+            ..Default::default()
+        };
+        assert!(condition_matches(&cond, &json!({"id_usb_class": "0e"})));
+        assert!(condition_matches(&cond, &json!({"id_usb_class": "0x0e"})));
+        assert!(!condition_matches(&cond, &json!({"id_usb_class": "ff"})));
+    }
+
+    #[test]
+    fn condition_empty_matches_anything() {
+        let cond = MatchCondition::default();
+        assert!(condition_matches(&cond, &json!({})));
+        assert!(condition_matches(&cond, &json!({"vendor_id": "anything"})));
+    }
+
+    // ─── resolve_device ───────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_device_returns_first_matching_rule() {
+        let rules = vec![
+            DeviceRule {
+                device: "mouse".to_string(),
+                conditions: vec![MatchCondition {
+                    vendor_id: Some("046d".to_string()),
+                    ..Default::default()
+                }],
+            },
+            DeviceRule {
+                device: "dock".to_string(),
+                conditions: vec![MatchCondition {
+                    vendor_id: Some("17ef".to_string()),
+                    ..Default::default()
+                }],
+            },
+        ];
+        assert_eq!(
+            resolve_device(&rules, &json!({"vendor_id": "046d"})),
+            "mouse"
+        );
+        assert_eq!(
+            resolve_device(&rules, &json!({"vendor_id": "17ef"})),
+            "dock"
+        );
+        assert_eq!(
+            resolve_device(&rules, &json!({"vendor_id": "0000"})),
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn resolve_device_skips_rules_with_no_conditions() {
+        let rules = vec![DeviceRule {
+            device: "wildcard".to_string(),
+            conditions: vec![],
+        }];
+        assert_eq!(resolve_device(&rules, &json!({})), "unknown");
+    }
+
+    #[test]
+    fn resolve_device_with_empty_ruleset_returns_unknown() {
+        assert_eq!(resolve_device(&[], &json!({"vendor_id": "x"})), "unknown");
     }
 }

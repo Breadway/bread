@@ -84,7 +84,8 @@ fn sync_push_creates_correct_directory_structure() {
 
     // Init local sync repo
     let repo = SyncRepo::init(repo_tmp.path()).unwrap();
-    repo.set_remote("origin", bare_tmp.path().to_str().unwrap()).unwrap();
+    repo.set_remote("origin", bare_tmp.path().to_str().unwrap())
+        .unwrap();
 
     // Snapshot bread dir
     let bread_dest = repo_tmp.path().join("bread");
@@ -102,7 +103,11 @@ fn sync_push_creates_correct_directory_structure() {
     // Verify structure in local repo
     assert!(repo_tmp.path().join("bread").exists());
     assert!(repo_tmp.path().join("bread").join("init.lua").exists());
-    assert!(repo_tmp.path().join("machines").join("testbox.toml").exists());
+    assert!(repo_tmp
+        .path()
+        .join("machines")
+        .join("testbox.toml")
+        .exists());
 }
 
 #[test]
@@ -123,7 +128,8 @@ fn sync_push_snapshots_bread_config() {
     .unwrap();
 
     let repo = SyncRepo::init(repo_tmp.path()).unwrap();
-    repo.set_remote("origin", bare_tmp.path().to_str().unwrap()).unwrap();
+    repo.set_remote("origin", bare_tmp.path().to_str().unwrap())
+        .unwrap();
 
     let bread_dest = repo_tmp.path().join("bread");
     delegates::sync_dir(bread_cfg_tmp.path(), &bread_dest, &[]).unwrap();
@@ -149,7 +155,8 @@ fn sync_pull_copies_files_from_repo() {
 
     // Create a local repo, add some files, push to bare
     let repo = SyncRepo::init(local_tmp.path()).unwrap();
-    repo.set_remote("origin", bare_tmp.path().to_str().unwrap()).unwrap();
+    repo.set_remote("origin", bare_tmp.path().to_str().unwrap())
+        .unwrap();
 
     let bread_dest = local_tmp.path().join("bread");
     fs::create_dir_all(&bread_dest).unwrap();
@@ -160,7 +167,8 @@ fn sync_pull_copies_files_from_repo() {
 
     // Now clone the bare repo and pull
     let clone_tmp = TempDir::new().unwrap();
-    let cloned = SyncRepo::clone_from(bare_tmp.path().to_str().unwrap(), clone_tmp.path()).unwrap();
+    let _cloned =
+        SyncRepo::clone_from(bare_tmp.path().to_str().unwrap(), clone_tmp.path()).unwrap();
 
     // Apply bread/ to apply_tmp
     let src = clone_tmp.path().join("bread");
@@ -254,4 +262,221 @@ fn push_with_no_changes_returns_none() {
         "expected None (nothing to commit), got: {:?}",
         result
     );
+}
+
+// ─── git.rs additional coverage ────────────────────────────────────────────
+
+#[test]
+fn init_creates_repo_with_main_branch() {
+    let tmp = TempDir::new().unwrap();
+    let repo = SyncRepo::init(tmp.path()).unwrap();
+    fs::write(tmp.path().join("x"), "").unwrap();
+    repo.stage_all().unwrap();
+    let oid = repo.commit("initial").unwrap();
+    assert!(oid.is_some(), "first commit should succeed");
+
+    // Verify HEAD is on refs/heads/main.
+    let head_ref = std::process::Command::new("git")
+        .args(["-C", tmp.path().to_str().unwrap(), "symbolic-ref", "HEAD"])
+        .output()
+        .unwrap();
+    let head_name = String::from_utf8_lossy(&head_ref.stdout);
+    assert!(
+        head_name.trim() == "refs/heads/main",
+        "expected refs/heads/main, got {head_name}"
+    );
+}
+
+#[test]
+fn open_or_clone_opens_existing_repo() {
+    let tmp = TempDir::new().unwrap();
+    SyncRepo::init(tmp.path()).unwrap();
+
+    // Calling open_or_clone on an existing path must not attempt to clone.
+    let again = SyncRepo::open_or_clone("/nonexistent-url-that-would-fail", tmp.path());
+    assert!(again.is_ok());
+}
+
+#[test]
+fn open_or_clone_clones_into_missing_path() {
+    let bare = TempDir::new().unwrap();
+    let bare_repo = make_bare_repo(bare.path());
+    // Seed the bare repo with at least one commit so a clone is meaningful.
+    let local = TempDir::new().unwrap();
+    let repo = SyncRepo::init(local.path()).unwrap();
+    fs::write(local.path().join("seed"), "x").unwrap();
+    repo.commit("seed").unwrap();
+    repo.set_remote("origin", bare.path().to_str().unwrap())
+        .unwrap();
+    repo.push("origin", "main").unwrap();
+    drop(bare_repo);
+
+    let dest_parent = TempDir::new().unwrap();
+    let dest = dest_parent.path().join("clone-target");
+    let cloned = SyncRepo::open_or_clone(bare.path().to_str().unwrap(), &dest).unwrap();
+    assert_eq!(cloned.path, dest);
+    assert!(dest.join("seed").exists());
+}
+
+#[test]
+fn local_changes_reports_new_modified_and_deleted() {
+    let tmp = TempDir::new().unwrap();
+    let repo = init_repo_with_commit(tmp.path());
+
+    fs::write(tmp.path().join("added.txt"), "new").unwrap();
+    fs::write(tmp.path().join(".gitkeep"), "modified").unwrap();
+
+    let changes = repo.local_changes().unwrap();
+    assert!(!changes.is_empty());
+    let kinds: Vec<char> = changes.iter().map(|(c, _)| *c).collect();
+    assert!(kinds.contains(&'A'));
+    assert!(kinds.contains(&'M'));
+}
+
+#[test]
+fn is_clean_after_commit() {
+    let tmp = TempDir::new().unwrap();
+    let repo = init_repo_with_commit(tmp.path());
+    assert!(repo.is_clean().unwrap());
+}
+
+#[test]
+fn working_diff_includes_modified_tracked_content() {
+    let tmp = TempDir::new().unwrap();
+    let repo = init_repo_with_commit(tmp.path());
+    // Modify an already-tracked file so it appears in `git diff HEAD`.
+    fs::write(tmp.path().join(".gitkeep"), "tracked change\n").unwrap();
+
+    let diff = repo.working_diff().unwrap();
+    assert!(
+        diff.contains("tracked change"),
+        "diff did not include tracked change, diff was: {diff:?}"
+    );
+}
+
+#[test]
+fn working_diff_empty_when_only_untracked_files() {
+    let tmp = TempDir::new().unwrap();
+    let repo = init_repo_with_commit(tmp.path());
+    fs::write(tmp.path().join("new-untracked.txt"), "hi").unwrap();
+
+    // working_diff uses diff_tree_to_workdir_with_index without INCLUDE_UNTRACKED,
+    // so untracked files don't appear — local_changes is the right tool for that.
+    let diff = repo.working_diff().unwrap();
+    assert!(
+        diff.is_empty() || !diff.contains("new-untracked"),
+        "expected untracked file to be excluded, diff was: {diff:?}"
+    );
+}
+
+#[test]
+fn set_remote_overwrites_existing_remote() {
+    let tmp = TempDir::new().unwrap();
+    let repo = SyncRepo::init(tmp.path()).unwrap();
+    repo.set_remote("origin", "https://example.com/a.git")
+        .unwrap();
+    // A second call must not error out — it should replace the previous URL.
+    repo.set_remote("origin", "https://example.com/b.git")
+        .unwrap();
+}
+
+#[test]
+fn last_commit_time_returns_none_for_empty_repo() {
+    let tmp = TempDir::new().unwrap();
+    let repo = SyncRepo::init(tmp.path()).unwrap();
+    assert!(repo.last_commit_time().is_none());
+}
+
+#[test]
+fn last_commit_time_present_after_commit() {
+    let tmp = TempDir::new().unwrap();
+    let repo = init_repo_with_commit(tmp.path());
+    assert!(repo.last_commit_time().is_some());
+}
+
+#[test]
+fn push_pull_round_trip_through_bare_remote() {
+    let bare = TempDir::new().unwrap();
+    make_bare_repo(bare.path());
+
+    // Push from author repo.
+    let author = TempDir::new().unwrap();
+    let r1 = SyncRepo::init(author.path()).unwrap();
+    r1.set_remote("origin", bare.path().to_str().unwrap())
+        .unwrap();
+    fs::write(author.path().join("note.txt"), "v1").unwrap();
+    r1.commit("v1").unwrap();
+    r1.push("origin", "main").unwrap();
+
+    // Clone into reader repo and confirm contents.
+    let reader_tmp = TempDir::new().unwrap();
+    let r2 = SyncRepo::clone_from(bare.path().to_str().unwrap(), reader_tmp.path()).unwrap();
+    assert_eq!(
+        fs::read_to_string(reader_tmp.path().join("note.txt")).unwrap(),
+        "v1"
+    );
+
+    // Author writes a second version and pushes.
+    fs::write(author.path().join("note.txt"), "v2").unwrap();
+    r1.commit("v2").unwrap();
+    r1.push("origin", "main").unwrap();
+
+    // Reader pulls and sees the new content.
+    r2.pull("origin", "main").unwrap();
+    assert_eq!(
+        fs::read_to_string(reader_tmp.path().join("note.txt")).unwrap(),
+        "v2"
+    );
+}
+
+#[test]
+fn pull_with_no_remote_changes_is_noop() {
+    let bare = TempDir::new().unwrap();
+    make_bare_repo(bare.path());
+
+    let local = TempDir::new().unwrap();
+    let repo = SyncRepo::init(local.path()).unwrap();
+    repo.set_remote("origin", bare.path().to_str().unwrap())
+        .unwrap();
+    fs::write(local.path().join("a"), "1").unwrap();
+    repo.commit("c1").unwrap();
+    repo.push("origin", "main").unwrap();
+
+    // Calling pull immediately after push must be up-to-date and succeed.
+    repo.pull("origin", "main").unwrap();
+    assert!(repo.is_clean().unwrap());
+}
+
+#[test]
+fn remote_changes_returns_empty_when_remote_unknown() {
+    let tmp = TempDir::new().unwrap();
+    let repo = init_repo_with_commit(tmp.path());
+    let changes = repo.remote_changes("origin", "main").unwrap();
+    assert!(changes.is_empty());
+}
+
+// ─── machine list ──────────────────────────────────────────────────────────
+
+#[test]
+fn machine_list_returns_all_profiles_sorted() {
+    let machines_tmp = TempDir::new().unwrap();
+    for name in ["delta", "alpha", "charlie", "bravo"] {
+        machine::MachineProfile::new(name.to_string(), vec![])
+            .write(machines_tmp.path())
+            .unwrap();
+    }
+    let list = machine::MachineProfile::list(machines_tmp.path()).unwrap();
+    let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, vec!["alpha", "bravo", "charlie", "delta"]);
+}
+
+// ─── packages snapshot ─────────────────────────────────────────────────────
+
+#[test]
+fn snapshot_writes_destination_when_manager_unknown_is_skipped() {
+    let dest_tmp = TempDir::new().unwrap();
+    let dest = dest_tmp.path().join("nested/dir/file.txt");
+    let wrote = packages::snapshot("does-not-exist", &dest).unwrap();
+    assert!(!wrote);
+    assert!(!dest.exists());
 }

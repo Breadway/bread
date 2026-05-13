@@ -28,8 +28,7 @@ fn install_from_local_succeeds_with_manifest() {
     make_module_dir(src_tmp.path(), "mymod", "1.2.3");
     let src = src_tmp.path().join("mymod");
 
-    let result =
-        modules_mgmt::install_from_local(&src, "test:mymod", modules_tmp.path());
+    let result = modules_mgmt::install_from_local(&src, "test:mymod", modules_tmp.path());
 
     assert!(result.is_ok(), "install failed: {:?}", result.err());
     let manifest = result.unwrap();
@@ -38,7 +37,11 @@ fn install_from_local_succeeds_with_manifest() {
 
     // Module directory must exist in modules dir
     assert!(modules_tmp.path().join("mymod").exists());
-    assert!(modules_tmp.path().join("mymod").join("bread.module.toml").exists());
+    assert!(modules_tmp
+        .path()
+        .join("mymod")
+        .join("bread.module.toml")
+        .exists());
     assert!(modules_tmp.path().join("mymod").join("init.lua").exists());
 }
 
@@ -79,7 +82,10 @@ fn remove_nonexistent_errors() {
     let result = modules_mgmt::remove_module("ghost", modules_tmp.path());
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
-    assert!(msg.contains("ghost"), "expected error mentioning module name, got: {msg}");
+    assert!(
+        msg.contains("ghost"),
+        "expected error mentioning module name, got: {msg}"
+    );
 }
 
 #[test]

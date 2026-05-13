@@ -18,7 +18,12 @@ pub struct SubscriptionTable {
 }
 
 impl SubscriptionTable {
-    pub fn add_with_id(&mut self, id: SubscriptionId, pattern: String, once: bool) -> SubscriptionId {
+    pub fn add_with_id(
+        &mut self,
+        id: SubscriptionId,
+        pattern: String,
+        once: bool,
+    ) -> SubscriptionId {
         self.next_id = self.next_id.max(id.0.saturating_add(1));
 
         let sub = Subscription { id, pattern, once };
@@ -129,24 +134,36 @@ fn matches_glob(pattern: &[u8], text: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::matches_pattern;
+    use super::*;
 
     #[test]
     fn exact_match() {
-        assert!(matches_pattern("bread.device.dock.connected", "bread.device.dock.connected"));
-        assert!(!matches_pattern("bread.device.dock.connected", "bread.device.dock.disconnected"));
+        assert!(matches_pattern(
+            "bread.device.dock.connected",
+            "bread.device.dock.connected"
+        ));
+        assert!(!matches_pattern(
+            "bread.device.dock.connected",
+            "bread.device.dock.disconnected"
+        ));
     }
 
     #[test]
     fn single_segment_wildcard() {
-        assert!(matches_pattern("bread.device.*", "bread.device.dock.connected"));
+        assert!(matches_pattern(
+            "bread.device.*",
+            "bread.device.dock.connected"
+        ));
         assert!(matches_pattern("bread.device.*", "bread.device.foo"));
         assert!(!matches_pattern("bread.device.*", "bread.device"));
     }
 
     #[test]
     fn recursive_wildcard() {
-        assert!(matches_pattern("bread.device.**", "bread.device.dock.connected"));
+        assert!(matches_pattern(
+            "bread.device.**",
+            "bread.device.dock.connected"
+        ));
         assert!(matches_pattern("bread.**", "bread.device.dock.connected"));
         assert!(matches_pattern("bread.**", "bread"));
     }
@@ -156,5 +173,121 @@ mod tests {
         assert!(matches_pattern("bread.monitor.?", "bread.monitor.1"));
         assert!(!matches_pattern("bread.monitor.?", "bread.monitor.10"));
         assert!(!matches_pattern("bread.monitor.?", "bread.monitor."));
+    }
+
+    #[test]
+    fn star_does_not_cross_dot_segments() {
+        // `*` matches within a segment only.
+        assert!(matches_pattern(
+            "bread.*.connected",
+            "bread.device.connected"
+        ));
+        assert!(!matches_pattern(
+            "bread.*.connected",
+            "bread.device.dock.connected"
+        ));
+    }
+
+    #[test]
+    fn double_star_matches_zero_or_more_segments() {
+        assert!(matches_pattern("bread.**", "bread.a"));
+        assert!(matches_pattern("bread.**", "bread.a.b.c.d"));
+    }
+
+    #[test]
+    fn empty_pattern_matches_only_empty_text() {
+        assert!(matches_pattern("", ""));
+        assert!(!matches_pattern("", "bread"));
+    }
+
+    #[test]
+    fn empty_text_only_matches_wildcards() {
+        assert!(matches_pattern("**", ""));
+        assert!(!matches_pattern("bread.*", ""));
+    }
+
+    // ─── SubscriptionTable ────────────────────────────────────────────────
+
+    #[test]
+    fn table_add_assigns_provided_id_and_finds_match() {
+        let mut t = SubscriptionTable::default();
+        let id = t.add_with_id(SubscriptionId(7), "bread.window.*".into(), false);
+        assert_eq!(id, SubscriptionId(7));
+
+        let matches = t.match_event("bread.window.opened");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].id, SubscriptionId(7));
+        assert_eq!(matches[0].pattern, "bread.window.*");
+        assert!(!matches[0].once);
+    }
+
+    #[test]
+    fn table_match_returns_all_matching_subscriptions() {
+        let mut t = SubscriptionTable::default();
+        t.add_with_id(SubscriptionId(1), "bread.window.opened".into(), false);
+        t.add_with_id(SubscriptionId(2), "bread.window.*".into(), false);
+        t.add_with_id(SubscriptionId(3), "bread.**".into(), true);
+        t.add_with_id(SubscriptionId(4), "bread.device.*".into(), false);
+
+        let matches = t.match_event("bread.window.opened");
+        let ids: Vec<u64> = matches.iter().map(|s| s.id.0).collect();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert!(ids.contains(&3));
+        assert!(!ids.contains(&4));
+    }
+
+    #[test]
+    fn table_remove_returns_true_only_for_known_ids() {
+        let mut t = SubscriptionTable::default();
+        t.add_with_id(SubscriptionId(1), "a".into(), false);
+        assert!(t.remove(SubscriptionId(1)));
+        // Second remove of the same id is false.
+        assert!(!t.remove(SubscriptionId(1)));
+        // Removing a never-known id is false.
+        assert!(!t.remove(SubscriptionId(999)));
+    }
+
+    #[test]
+    fn table_remove_preserves_other_entries_after_swap_remove() {
+        let mut t = SubscriptionTable::default();
+        t.add_with_id(SubscriptionId(1), "a".into(), false);
+        t.add_with_id(SubscriptionId(2), "b".into(), false);
+        t.add_with_id(SubscriptionId(3), "c".into(), false);
+
+        // Remove the middle entry — swap_remove will move entry 3 into the slot.
+        assert!(t.remove(SubscriptionId(2)));
+
+        // Subsequent removes still work, proving the by_id index was kept consistent.
+        assert!(t.remove(SubscriptionId(3)));
+        assert!(t.remove(SubscriptionId(1)));
+    }
+
+    #[test]
+    fn table_clear_removes_all() {
+        let mut t = SubscriptionTable::default();
+        t.add_with_id(SubscriptionId(1), "a".into(), false);
+        t.add_with_id(SubscriptionId(2), "b".into(), false);
+        t.clear();
+        assert!(t.match_event("a").is_empty());
+        assert!(t.match_event("b").is_empty());
+        // After clear, the ids are reusable.
+        assert!(!t.remove(SubscriptionId(1)));
+    }
+
+    #[test]
+    fn table_match_returns_empty_for_unmatched_event() {
+        let mut t = SubscriptionTable::default();
+        t.add_with_id(SubscriptionId(1), "bread.device.*".into(), false);
+        assert!(t.match_event("bread.window.opened").is_empty());
+    }
+
+    #[test]
+    fn table_once_flag_is_preserved_in_match_result() {
+        let mut t = SubscriptionTable::default();
+        t.add_with_id(SubscriptionId(1), "bread.test".into(), true);
+        let matches = t.match_event("bread.test");
+        assert_eq!(matches.len(), 1);
+        assert!(matches[0].once);
     }
 }

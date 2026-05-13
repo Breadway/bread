@@ -89,10 +89,21 @@ fi
 echo ""
 
 # ── verify ─────────────────────────────────────────────────────────────────────
-sleep 0.5
-if "$BIN_DIR/bread" ping &>/dev/null; then
+# Wait up to ~5s for the daemon to come up. Polling beats a fixed sleep
+# because a freshly enabled systemd unit can take a variable amount of time
+# to fork, bind the socket, and become ready.
+ready=0
+for _ in $(seq 1 25); do
+    if "$BIN_DIR/bread" ping &>/dev/null; then
+        ready=1
+        break
+    fi
+    sleep 0.2
+done
+
+if [[ "$ready" -eq 1 ]]; then
     "$BIN_DIR/bread" doctor
 else
-    echo "warning: daemon did not respond to ping"
+    echo "warning: daemon did not respond to ping within 5s"
     echo "  check: journalctl --user -u breadd -n 20"
 fi

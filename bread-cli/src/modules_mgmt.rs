@@ -60,13 +60,14 @@ pub fn parse_source(source: &str) -> Result<InstallSource> {
 
 /// Install a module from a local directory into `modules_dir`.
 /// `source_str` is the original source string recorded in the manifest.
-pub fn install_from_local(src: &Path, source_str: &str, modules_dir: &Path) -> Result<ModuleManifest> {
+pub fn install_from_local(
+    src: &Path,
+    source_str: &str,
+    modules_dir: &Path,
+) -> Result<ModuleManifest> {
     let manifest_path = src.join("bread.module.toml");
     if !manifest_path.exists() {
-        bail!(
-            "bread: no bread.module.toml found in {}",
-            src.display()
-        );
+        bail!("bread: no bread.module.toml found in {}", src.display());
     }
 
     let raw = fs::read_to_string(&manifest_path)
@@ -136,8 +137,8 @@ pub fn read_module_manifest(name: &str, modules_dir: &Path) -> Result<ModuleMani
 
 /// Read and parse a `bread.module.toml` file.
 pub fn read_manifest_file(path: &Path) -> Result<ModuleManifest> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     toml::from_str(&raw).context("failed to parse module manifest")
 }
 
@@ -167,8 +168,13 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         if src_path.is_dir() {
             copy_dir(&src_path, &dst_path)?;
         } else {
-            fs::copy(&src_path, &dst_path)
-                .with_context(|| format!("failed to copy {} to {}", src_path.display(), dst_path.display()))?;
+            fs::copy(&src_path, &dst_path).with_context(|| {
+                format!(
+                    "failed to copy {} to {}",
+                    src_path.display(),
+                    dst_path.display()
+                )
+            })?;
         }
     }
     Ok(())
