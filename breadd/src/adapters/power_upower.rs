@@ -6,8 +6,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
-use zbus::{Message, MessageStream};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+use zbus::{Message, MessageStream};
 
 use super::Adapter;
 

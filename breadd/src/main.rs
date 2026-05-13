@@ -4,8 +4,8 @@ mod ipc;
 mod lua;
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use anyhow::Result;
 use bread_shared::{AdapterSource, BreadEvent, RawEvent};
@@ -36,9 +36,10 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let subscription_count = Arc::new(AtomicU64::new(0));
-    let state_handle = StateHandle::new(state.clone(), state_cmd_tx, subscription_count.clone());
+    let state_handle = StateHandle::new(state.clone(), state_cmd_tx);
 
-    let lua_runtime = lua::spawn_runtime(config.clone(), state_handle.clone(), normalized_tx.clone())?;
+    let lua_runtime =
+        lua::spawn_runtime(config.clone(), state_handle.clone(), normalized_tx.clone())?;
     let lua_tx = lua_runtime.sender();
 
     tokio::spawn(run_state_engine(
@@ -144,7 +145,8 @@ async fn wait_for_shutdown() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = ctrl_c => {},
             _ = sigterm.recv() => {},
