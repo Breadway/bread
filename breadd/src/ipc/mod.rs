@@ -3,9 +3,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process;
-use std::time::Instant;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use bread_shared::{now_unix_ms, AdapterSource, BreadEvent};
@@ -52,6 +52,9 @@ struct IpcResponse {
 }
 
 impl Server {
+    // Server::new legitimately requires all 8 fields; a builder pattern here would be
+    // over-engineering for a single-call-site constructor.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         socket_path: PathBuf,
         state_handle: StateHandle,
@@ -161,7 +164,10 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_request(&self, req: IpcRequest) -> std::result::Result<(String, Value), (String, String)> {
+    async fn handle_request(
+        &self,
+        req: IpcRequest,
+    ) -> std::result::Result<(String, Value), (String, String)> {
         let id = req.id.clone();
         let result = match req.method.as_str() {
             "ping" => Ok(json!({ "ok": true })),
@@ -208,11 +214,7 @@ impl Server {
                 Ok(profiles)
             }
             "profile.activate" => {
-                let Some(name) = req
-                    .params
-                    .get("name")
-                    .and_then(Value::as_str)
-                else {
+                let Some(name) = req.params.get("name").and_then(Value::as_str) else {
                     return Err((id, "missing profile name".to_string()));
                 };
 
@@ -231,11 +233,7 @@ impl Server {
                 Ok(json!({ "active": name }))
             }
             "emit" => {
-                let Some(event) = req
-                    .params
-                    .get("event")
-                    .and_then(Value::as_str)
-                else {
+                let Some(event) = req.params.get("event").and_then(Value::as_str) else {
                     return Err((id, "missing event name".to_string()));
                 };
                 let data = req.params.get("data").cloned().unwrap_or_else(|| json!({}));
@@ -253,7 +251,9 @@ impl Server {
                 let state = self.state_handle.state_dump().await;
                 let modules = state.get("modules").cloned().unwrap_or_else(|| json!([]));
                 let adapters = self.adapter_status.read().await.clone();
-                let subscription_count = self.subscription_count.load(std::sync::atomic::Ordering::Relaxed);
+                let subscription_count = self
+                    .subscription_count
+                    .load(std::sync::atomic::Ordering::Relaxed);
                 let recent_errors = self.lua_runtime.recent_errors();
                 Ok(json!({
                     "ok": true,
@@ -268,14 +268,7 @@ impl Server {
                 }))
             }
             "sync.status" => {
-                let cfg_home = std::env::var("XDG_CONFIG_HOME")
-                    .map(std::path::PathBuf::from)
-                    .or_else(|_| {
-                        std::env::var("HOME")
-                            .map(|h| std::path::PathBuf::from(h).join(".config"))
-                    })
-                    .unwrap_or_else(|_| std::path::PathBuf::from(".config"));
-                let sync_path = cfg_home.join("bread").join("sync.toml");
+                let sync_path = bread_sync::config::bread_config_dir().join("sync.toml");
                 match std::fs::read_to_string(&sync_path)
                     .ok()
                     .and_then(|s| s.parse::<toml::Value>().ok())
@@ -301,7 +294,11 @@ impl Server {
                 }
             }
             "events.replay" => {
-                let since_ms = req.params.get("since_ms").and_then(Value::as_u64).unwrap_or(0);
+                let since_ms = req
+                    .params
+                    .get("since_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 let cutoff = now_unix_ms().saturating_sub(since_ms);
                 let replay: Vec<BreadEvent> = self
                     .event_buffer
@@ -410,5 +407,72 @@ fn matches_glob_filter(pattern: &[u8], text: &[u8]) -> bool {
             }
             matches_glob_filter(&pattern[1..], &text[1..])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_filter;
+
+    #[test]
+    fn filter_exact_match() {
+        assert!(matches_filter("bread.window.opened", "bread.window.opened"));
+        assert!(!matches_filter(
+            "bread.window.opened",
+            "bread.window.closed"
+        ));
+    }
+
+    #[test]
+    fn filter_dot_star_matches_one_segment_only() {
+        assert!(matches_filter("bread.device.connected", "bread.device.*"));
+        assert!(matches_filter(
+            "bread.device.dock.connected",
+            "bread.device.*"
+        ));
+        assert!(!matches_filter("bread.device", "bread.device.*"));
+    }
+
+    #[test]
+    fn filter_dot_double_star_matches_zero_or_more_segments() {
+        // Matches the exact prefix (zero segments after).
+        assert!(matches_filter("bread.device", "bread.device.**"));
+        // And matches deeper paths.
+        assert!(matches_filter(
+            "bread.device.dock.connected",
+            "bread.device.**"
+        ));
+        // But not a sibling at the same depth.
+        assert!(!matches_filter(
+            "bread.network.connected",
+            "bread.device.**"
+        ));
+    }
+
+    #[test]
+    fn filter_question_mark_matches_single_char_not_dot() {
+        assert!(matches_filter("bread.x", "bread.?"));
+        assert!(!matches_filter("bread.xy", "bread.?"));
+        assert!(!matches_filter("bread.", "bread.?"));
+    }
+
+    #[test]
+    fn filter_mid_pattern_star_does_not_cross_dots() {
+        // A `*` in the middle of the pattern (not the `.*` suffix shortcut)
+        // matches within a single segment only.
+        assert!(matches_filter("bread.alpha.connected", "bread.*.connected"));
+        assert!(!matches_filter(
+            "bread.alpha.beta.connected",
+            "bread.*.connected"
+        ));
+    }
+
+    #[test]
+    fn filter_dot_star_at_end_acts_as_prefix_match() {
+        // `bread.*` ending the pattern is treated as a prefix match, so
+        // matches everything under `bread.` regardless of depth. This is
+        // consistent with the subscription table's pattern matcher.
+        assert!(matches_filter("bread.alpha", "bread.*"));
+        assert!(matches_filter("bread.alpha.beta", "bread.*"));
     }
 }

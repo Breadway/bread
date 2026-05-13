@@ -23,7 +23,11 @@ fn sync_dir_inner(src: &Path, dst: &Path, root: &Path, patterns: &[Pattern]) -> 
     if dst.exists() {
         for entry in fs::read_dir(dst)? {
             let entry = entry?;
-            let rel = entry.path().strip_prefix(dst).unwrap_or(&entry.path()).to_path_buf();
+            let rel = entry
+                .path()
+                .strip_prefix(dst)
+                .unwrap_or(&entry.path())
+                .to_path_buf();
             let src_counterpart = src.join(&rel);
             if !src_counterpart.exists() {
                 let p = entry.path();
@@ -106,4 +110,138 @@ pub fn resolve_include_paths(includes: &[String]) -> Vec<(String, PathBuf)> {
             (basename, expanded)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn sync_dir_copies_nested_tree() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+
+        fs::create_dir_all(src.path().join("a/b/c")).unwrap();
+        fs::write(src.path().join("a/b/c/leaf.txt"), "hello").unwrap();
+        fs::write(src.path().join("root.txt"), "root").unwrap();
+
+        sync_dir(src.path(), dst.path(), &[]).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dst.path().join("a/b/c/leaf.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.path().join("root.txt")).unwrap(),
+            "root"
+        );
+    }
+
+    #[test]
+    fn sync_dir_overwrites_existing_files() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(src.path().join("f"), "new").unwrap();
+        fs::write(dst.path().join("f"), "old").unwrap();
+
+        sync_dir(src.path(), dst.path(), &[]).unwrap();
+        assert_eq!(fs::read_to_string(dst.path().join("f")).unwrap(), "new");
+    }
+
+    #[test]
+    fn sync_dir_removes_files_no_longer_in_src() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(dst.path().join("orphan.txt"), "to remove").unwrap();
+        fs::write(src.path().join("keeper.txt"), "stay").unwrap();
+
+        sync_dir(src.path(), dst.path(), &[]).unwrap();
+
+        assert!(!dst.path().join("orphan.txt").exists());
+        assert!(dst.path().join("keeper.txt").exists());
+    }
+
+    #[test]
+    fn sync_dir_removes_directories_no_longer_in_src() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::create_dir_all(dst.path().join("ghost-dir")).unwrap();
+        fs::write(dst.path().join("ghost-dir/x"), "").unwrap();
+
+        sync_dir(src.path(), dst.path(), &[]).unwrap();
+        assert!(!dst.path().join("ghost-dir").exists());
+    }
+
+    #[test]
+    fn sync_dir_exclude_filters_by_basename_pattern() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(src.path().join("keep.lua"), "lua").unwrap();
+        fs::write(src.path().join("trash.cache"), "").unwrap();
+
+        sync_dir(src.path(), dst.path(), &["**/*.cache".to_string()]).unwrap();
+        assert!(dst.path().join("keep.lua").exists());
+        assert!(!dst.path().join("trash.cache").exists());
+    }
+
+    #[test]
+    fn sync_dir_exclude_filters_nested_directory_by_name() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::create_dir_all(src.path().join(".git/objects")).unwrap();
+        fs::write(src.path().join(".git/objects/abc"), "").unwrap();
+        fs::write(src.path().join("init.lua"), "lua").unwrap();
+
+        sync_dir(src.path(), dst.path(), &["**/.git".to_string()]).unwrap();
+        assert!(dst.path().join("init.lua").exists());
+        assert!(!dst.path().join(".git").exists());
+    }
+
+    #[test]
+    fn sync_dir_creates_destination_if_missing() {
+        let src = TempDir::new().unwrap();
+        let dst_parent = TempDir::new().unwrap();
+        let dst = dst_parent.path().join("brand-new");
+        fs::write(src.path().join("hi"), "hi").unwrap();
+
+        sync_dir(src.path(), &dst, &[]).unwrap();
+        assert!(dst.join("hi").exists());
+    }
+
+    #[test]
+    fn sync_dir_empty_src_clears_dst() {
+        let src = TempDir::new().unwrap();
+        let dst = TempDir::new().unwrap();
+        fs::write(dst.path().join("a"), "").unwrap();
+        fs::write(dst.path().join("b"), "").unwrap();
+
+        sync_dir(src.path(), dst.path(), &[]).unwrap();
+        let remaining: Vec<_> = fs::read_dir(dst.path()).unwrap().collect();
+        assert!(remaining.is_empty());
+    }
+
+    // ─── resolve_include_paths ────────────────────────────────────────────
+
+    #[test]
+    fn resolve_include_paths_uses_basename_as_key() {
+        let includes = vec!["/etc/foo/bar".to_string(), "/var/lib/quux".to_string()];
+        let resolved = resolve_include_paths(&includes);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].0, "bar");
+        assert_eq!(resolved[0].1, PathBuf::from("/etc/foo/bar"));
+        assert_eq!(resolved[1].0, "quux");
+    }
+
+    #[test]
+    fn resolve_include_paths_expands_tilde_in_source() {
+        let home = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+        if let Some(home) = home {
+            let resolved = resolve_include_paths(&["~/Documents".to_string()]);
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(resolved[0].1, home.join("Documents"));
+            assert_eq!(resolved[0].0, "Documents");
+        }
+    }
 }

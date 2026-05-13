@@ -201,9 +201,7 @@ impl SyncRepo {
         let mut out = Vec::new();
         for entry in statuses.iter() {
             let s = entry.status();
-            let ch = if s.contains(git2::Status::INDEX_NEW)
-                || s.contains(git2::Status::WT_NEW)
-            {
+            let ch = if s.contains(git2::Status::INDEX_NEW) || s.contains(git2::Status::WT_NEW) {
                 'A'
             } else if s.contains(git2::Status::INDEX_DELETED)
                 || s.contains(git2::Status::WT_DELETED)

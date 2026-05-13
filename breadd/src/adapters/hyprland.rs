@@ -71,7 +71,10 @@ fn hyprland_event_socket() -> Result<PathBuf> {
         .collect();
 
     match sockets.len() {
-        0 => Err(anyhow!("no Hyprland instance found in {}", hypr_dir.display())),
+        0 => Err(anyhow!(
+            "no Hyprland instance found in {}",
+            hypr_dir.display()
+        )),
         1 => Ok(sockets.remove(0)),
         n => {
             warn!("found {n} Hyprland instances, using first");

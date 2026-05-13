@@ -133,3 +133,125 @@ pub fn expand_path(path: &str) -> PathBuf {
     }
     PathBuf::from(path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_config() -> SyncConfig {
+        SyncConfig {
+            remote: RemoteConfig {
+                url: "git@github.com:user/repo.git".to_string(),
+                branch: "main".to_string(),
+            },
+            machine: MachineConfig {
+                name: "host".to_string(),
+                tags: vec!["mobile".to_string()],
+            },
+            packages: PackagesConfig::default(),
+            delegates: DelegatesConfig::default(),
+        }
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = sample_config();
+        cfg.save(tmp.path()).unwrap();
+
+        assert!(tmp.path().join("sync.toml").exists());
+
+        let loaded = SyncConfig::load(tmp.path()).unwrap();
+        assert_eq!(loaded.remote.url, cfg.remote.url);
+        assert_eq!(loaded.remote.branch, cfg.remote.branch);
+        assert_eq!(loaded.machine.name, cfg.machine.name);
+        assert_eq!(loaded.machine.tags, cfg.machine.tags);
+    }
+
+    #[test]
+    fn load_missing_config_returns_helpful_error() {
+        let tmp = TempDir::new().unwrap();
+        let err = SyncConfig::load(tmp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sync not initialized") || msg.contains("bread sync init"),
+            "expected init hint, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn load_invalid_toml_returns_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("sync.toml"), "this is not [valid toml").unwrap();
+        let err = SyncConfig::load(tmp.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.to_lowercase().contains("parse"), "got: {msg}");
+    }
+
+    #[test]
+    fn packages_config_default_includes_all_managers() {
+        let cfg = PackagesConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.managers.contains(&"pacman".to_string()));
+        assert!(cfg.managers.contains(&"pip".to_string()));
+        assert!(cfg.managers.contains(&"npm".to_string()));
+        assert!(cfg.managers.contains(&"cargo".to_string()));
+    }
+
+    #[test]
+    fn remote_branch_defaults_to_main_when_omitted() {
+        let raw = r#"
+[remote]
+url = "git@example.com:r.git"
+
+[machine]
+name = "host"
+"#;
+        let cfg: SyncConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.remote.branch, "main");
+    }
+
+    #[test]
+    fn delegates_default_is_empty() {
+        let cfg = DelegatesConfig::default();
+        assert!(cfg.include.is_empty());
+        assert!(cfg.exclude.is_empty());
+    }
+
+    #[test]
+    fn local_repo_path_resolves_to_data_dir() {
+        let path = SyncConfig::local_repo_path();
+        // Must include the bread sync-repo segment at the end.
+        let suffix = path.iter().rev().take(2).collect::<Vec<_>>();
+        assert_eq!(
+            suffix,
+            vec![
+                std::ffi::OsStr::new("sync-repo"),
+                std::ffi::OsStr::new("bread")
+            ]
+        );
+    }
+
+    #[test]
+    fn expand_path_passes_through_absolute_paths() {
+        assert_eq!(expand_path("/etc/bread"), PathBuf::from("/etc/bread"));
+        assert_eq!(expand_path("relative/path"), PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn expand_path_expands_tilde_alone_to_home() {
+        let home = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+        if let Some(home) = home {
+            assert_eq!(expand_path("~"), home);
+        }
+    }
+
+    #[test]
+    fn expand_path_expands_tilde_prefix() {
+        let home = dirs::home_dir().or_else(|| std::env::var("HOME").ok().map(PathBuf::from));
+        if let Some(home) = home {
+            assert_eq!(expand_path("~/.config"), home.join(".config"));
+        }
+    }
+}

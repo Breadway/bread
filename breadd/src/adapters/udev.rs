@@ -165,7 +165,11 @@ fn enumerate_with_udev(subsystems: &[String]) -> Result<Vec<ScannedDevice>> {
             .or_else(|| dev.sysname().to_str().map(ToString::to_string))
             .unwrap_or_else(|| "unknown".to_string());
         let id = dev.syspath().to_string_lossy().to_string();
-        out.push(ScannedDevice { id, name, subsystem });
+        out.push(ScannedDevice {
+            id,
+            name,
+            subsystem,
+        });
     }
 
     Ok(out)

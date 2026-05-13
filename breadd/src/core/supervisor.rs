@@ -8,8 +8,7 @@ pub fn spawn_supervised<F, Fut>(
     name: &'static str,
     mut shutdown_rx: watch::Receiver<bool>,
     mut task_factory: F,
-)
-where
+) where
     F: FnMut() -> Fut + Send + 'static,
     Fut: Future<Output = anyhow::Result<()>> + Send + 'static,
 {
@@ -50,7 +49,11 @@ where
             }
 
             let wait_ms = 500u64.saturating_mul(2u64.saturating_pow(attempt.min(6)));
-            warn!(adapter = name, delay_ms = wait_ms, "restarting adapter after failure");
+            warn!(
+                adapter = name,
+                delay_ms = wait_ms,
+                "restarting adapter after failure"
+            );
             tokio::select! {
                 _ = sleep(Duration::from_millis(wait_ms)) => {},
                 _ = shutdown_rx.changed() => {

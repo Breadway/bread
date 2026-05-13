@@ -77,3 +77,91 @@ pub fn hostname() -> String {
         .or_else(|_| std::env::var("HOST"))
         .unwrap_or_else(|_| "unknown".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn write_creates_machines_dir_if_missing() {
+        let tmp = TempDir::new().unwrap();
+        let machines = tmp.path().join("does/not/exist/yet");
+        let profile = MachineProfile::new("host".to_string(), vec![]);
+        profile.write(&machines).unwrap();
+        assert!(machines.join("host.toml").exists());
+    }
+
+    #[test]
+    fn write_overwrites_existing_profile() {
+        let tmp = TempDir::new().unwrap();
+        let p1 = MachineProfile::new("host".to_string(), vec!["a".to_string()]);
+        p1.write(tmp.path()).unwrap();
+
+        let p2 = MachineProfile::new("host".to_string(), vec!["b".to_string(), "c".to_string()]);
+        p2.write(tmp.path()).unwrap();
+
+        let loaded = MachineProfile::read(tmp.path(), "host").unwrap();
+        assert_eq!(loaded.tags, vec!["b", "c"]);
+    }
+
+    #[test]
+    fn list_returns_empty_when_dir_missing() {
+        let tmp = TempDir::new().unwrap();
+        let missing = tmp.path().join("nope");
+        assert!(MachineProfile::list(&missing).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_returns_sorted_profiles_only_for_toml_files() {
+        let tmp = TempDir::new().unwrap();
+        MachineProfile::new("zebra".to_string(), vec![])
+            .write(tmp.path())
+            .unwrap();
+        MachineProfile::new("alpha".to_string(), vec![])
+            .write(tmp.path())
+            .unwrap();
+        MachineProfile::new("middle".to_string(), vec![])
+            .write(tmp.path())
+            .unwrap();
+        // Non-toml file should be ignored.
+        std::fs::write(tmp.path().join("notes.txt"), "ignored").unwrap();
+
+        let list = MachineProfile::list(tmp.path()).unwrap();
+        let names: Vec<&str> = list.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "middle", "zebra"]);
+    }
+
+    #[test]
+    fn list_skips_invalid_toml_files_without_failing() {
+        let tmp = TempDir::new().unwrap();
+        MachineProfile::new("valid".to_string(), vec![])
+            .write(tmp.path())
+            .unwrap();
+        std::fs::write(tmp.path().join("garbage.toml"), "not valid [toml").unwrap();
+
+        let list = MachineProfile::list(tmp.path()).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "valid");
+    }
+
+    #[test]
+    fn read_returns_helpful_error_when_missing() {
+        let tmp = TempDir::new().unwrap();
+        let err = MachineProfile::read(tmp.path(), "ghost").unwrap_err();
+        assert!(err.to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn new_assigns_current_hostname_and_timestamp() {
+        let p = MachineProfile::new("h".to_string(), vec![]);
+        assert!(!p.hostname.is_empty());
+        assert!(chrono::DateTime::parse_from_rfc3339(&p.last_sync).is_ok());
+    }
+
+    #[test]
+    fn hostname_returns_non_empty_string() {
+        // Whether libc or env fallback fires, the result must be non-empty.
+        assert!(!hostname().is_empty());
+    }
+}

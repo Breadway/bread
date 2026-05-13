@@ -1,21 +1,21 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bread_shared::RawEvent;
-use tokio::sync::{mpsc, watch, RwLock};
-use tracing::info;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::{mpsc, watch, RwLock};
+use tracing::info;
 
 use crate::core::config::Config;
 use crate::core::supervisor::spawn_supervised;
 
 pub mod hyprland;
 pub mod network;
-pub mod power;
-pub mod udev;
 pub mod network_rtnetlink;
+pub mod power;
 pub mod power_upower;
+pub mod udev;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,7 +71,7 @@ impl Manager {
         }
 
         if self.config.adapters.hyprland.enabled {
-            self.spawn_adapter(hyprland::HyprlandAdapter::default());
+            self.spawn_adapter(hyprland::HyprlandAdapter);
         }
 
         if self.config.adapters.power.enabled {
@@ -92,7 +92,7 @@ impl Manager {
             if let Ok(adapter) = rt {
                 self.spawn_adapter(adapter);
             } else {
-                self.spawn_adapter(network::NetworkAdapter::default());
+                self.spawn_adapter(network::NetworkAdapter);
             }
         }
 

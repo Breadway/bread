@@ -1,14 +1,19 @@
-# Maintainer: Your Name <you@example.com>
+# Maintainer: Breadway <rileyhorsham@gmail.com>
 
 pkgname=bread
-pkgver=0.1.0
+pkgver=1.0.0
 pkgrel=1
-pkgdesc="Bread - event normalizer and automation runtime"
+pkgdesc="A reactive automation fabric for Linux desktops"
 arch=('x86_64')
 url="https://github.com/Breadway/bread"
 license=('MIT')
-depends=('glibc')
-makedepends=('rust')
+depends=('glibc' 'libgit2')
+optdepends=(
+  'libnotify: desktop notifications via bread.notify()'
+  'upower: D-Bus battery events (sysfs polling used otherwise)'
+  'git: bread sync push/pull operations'
+)
+makedepends=('rust' 'cargo')
 source=("${pkgname}-${pkgver}.tar.gz")
 sha256sums=('SKIP')
 
@@ -17,8 +22,15 @@ build() {
   cargo build --release --locked
 }
 
+check() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  cargo test --release --locked --workspace
+}
+
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
-  install -Dm755 target/release/bread "${pkgdir}/usr/bin/bread"
-  install -Dm644 packaging/systemd/bread.service "${pkgdir}/usr/lib/systemd/user/bread.service"
+  install -Dm755 target/release/breadd "${pkgdir}/usr/bin/breadd"
+  install -Dm755 target/release/bread  "${pkgdir}/usr/bin/bread"
+  install -Dm644 packaging/systemd/breadd.service "${pkgdir}/usr/lib/systemd/user/breadd.service"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }
