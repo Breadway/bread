@@ -45,7 +45,6 @@ return M
 breadd/          Rust daemon — event pipeline, state engine, IPC, adapter supervision
 bread-cli/       CLI frontend — talks to breadd over a Unix socket
 bread-shared/    Shared types — RawEvent, BreadEvent, AdapterSource
-bread-sync/      Sync engine — snapshot and restore system state via a Git remote
 packaging/       Arch PKGBUILD and systemd user service
 ```
 
@@ -194,26 +193,9 @@ bread profile-activate <name>         # Activate a named profile
 
 # Modules
 bread modules list                    # List installed modules and daemon status
-bread modules install github:user/repo  # Install from GitHub
-bread modules install /local/path     # Install from a local directory
+bread modules install /local/path     # Install from a local module directory
 bread modules remove <name>           # Remove an installed module
-bread modules update [name]           # Re-install one or all GitHub-sourced modules
 bread modules info <name>             # Show full manifest and daemon status
-
-# Sync
-bread sync init                       # Initialize sync for this machine (remote optional)
-bread sync push                       # Commit local snapshot
-bread sync push --message "note"      # Commit with a custom message
-bread sync pull                       # Apply local snapshot to this machine
-bread sync pull --install-packages    # Also install packages from snapshot
-bread sync status                     # Show what has changed since last push
-bread sync diff                       # Show file-level diff vs last commit
-bread sync machines                   # List known machines from sync repo
-bread sync export                     # Create a portable .tar.gz snapshot (no git auth)
-bread sync export --output path       # Export to a specific file or directory
-bread sync import <path>              # Apply a portable snapshot (.tar.gz or directory)
-bread sync import <path> --install-packages  # Also install packages
-bread sync import <path> --no-clone-repos    # Skip cloning git repos
 ```
 
 ---
@@ -224,15 +206,15 @@ Modules are Lua files (or directories) installed to `~/.config/bread/modules/`. 
 
 ### Installing modules
 
+Modules install from a local directory only. Modules run with full
+`bread.exec()` privileges and are **not** sandboxed, so to use a module
+published on a git host, clone it yourself and review the Lua before
+installing from the local checkout:
+
 ```bash
-# From GitHub (downloads latest release tarball)
-bread modules install github:someuser/bread-wifi
-
-# From a local path
-bread modules install ~/src/my-module
-
-# From a specific ref
-bread modules install github:someuser/bread-wifi@v1.2.0
+git clone https://github.com/someuser/bread-wifi ~/src/bread-wifi
+# review ~/src/bread-wifi, then:
+bread modules install ~/src/bread-wifi
 ```
 
 ### Writing a module
@@ -252,7 +234,7 @@ name = "wifi"
 version = "1.0.0"
 description = "WiFi management for Bread"
 author = "someuser"
-source = "github:someuser/bread-wifi"
+source = "/home/you/src/bread-wifi"
 installed_at = "2026-01-01T00:00:00Z"
 ```
 
@@ -265,67 +247,6 @@ bread.on("bread.network.connected", function(event)
 end)
 
 return M
-```
-
----
-
-## Sync system
-
-Bread sync snapshots your entire setup — Bread config, dotfiles, fonts, systemd units, package lists, and git repos — into a local Git repository. Use `export`/`import` to move state between machines without needing a git remote.
-
-```bash
-# First-time setup (remote is optional)
-bread sync init
-bread sync init --remote git@github.com:you/bread-config.git
-
-# Commit a local snapshot
-bread sync push
-
-# Create a portable .tar.gz (no git auth required)
-bread sync export
-
-# On another machine: apply the snapshot
-bread sync import bread-export-hermes-2026-05-16.tar.gz
-
-# Also install packages on import
-bread sync import bread-export.tar.gz --install-packages
-```
-
-Configure what gets synced in `~/.config/bread/sync.toml`:
-
-```toml
-[remote]
-url = "git@github.com:you/bread-config.git"   # optional
-branch = "main"
-
-[machine]
-name = "hermes"
-tags = ["laptop", "battery"]
-
-[packages]
-enabled = true
-managers = ["pacman", "pip", "cargo"]
-
-[delegates]
-include = ["~/.config/nvim", "~/.config/waybar"]
-exclude = ["**/.git", "**/*.cache"]
-```
-
-A portable export snapshot contains:
-
-```
-bread-export-hermes-2026-05-16/
-├── bread/          ← ~/.config/bread/
-├── configs/        ← hypr, nvim, kitty, waybar, fish, dunst, btop, …
-├── dotfiles/       ← .gitconfig, .zshrc, .zprofile, .zshenv, ssh config, …
-├── local-bin/      ← ~/.local/bin/ scripts
-├── local-fonts/    ← ~/.local/share/fonts/
-├── systemd/        ← ~/.config/systemd/user/ units
-├── system/         ← udev rules, modprobe, sysctl (sudo required for some)
-├── packages/       ← pacman.txt, pip.txt, cargo.txt, npm.txt
-├── machines/       ← per-machine profiles
-├── manifest.toml   ← path map for exact restore
-└── restore.sh      ← shell script for manual restore
 ```
 
 ---
@@ -496,7 +417,7 @@ end
 ### Machine and filesystem
 
 ```lua
--- Machine identity (from sync.toml, falls back to hostname)
+-- Machine identity (system hostname)
 local name = bread.machine.name()
 local tags = bread.machine.tags()       -- array of strings
 local ok   = bread.machine.has_tag("laptop")
@@ -616,7 +537,6 @@ Available methods:
 | `events.subscribe` | Upgrade connection to streaming mode |
 | `events.replay` | Replay buffered events from the last N ms |
 | `emit` | Inject a synthetic event into the pipeline |
-| `sync.status` | Return sync initialization state and machine info |
 
 `events.subscribe` upgrades the connection to streaming mode — the daemon pushes events line by line until the client disconnects.
 
@@ -626,7 +546,7 @@ Available methods:
 
 Bread is early-stage software. Contributions, issues, and feedback are welcome.
 
-The daemon (`breadd`) is the most stable part of the codebase. Active development is happening across the Lua API, module system, and sync subsystem.
+The daemon (`breadd`) is the most stable part of the codebase. Active development is happening across the Lua API and module system.
 
 ---
 

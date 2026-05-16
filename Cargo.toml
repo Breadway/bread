@@ -3,6 +3,10 @@ members = [
     "bread-shared",
     "breadd",
     "bread-cli",
+]
+# bread-sync is being extracted into its own project (see bread-sync/EXTRACTION.md).
+# Excluded so it no longer builds, tests, or gates CI as part of bread.
+exclude = [
     "bread-sync",
 ]
 resolver = "2"

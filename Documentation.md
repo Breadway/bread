@@ -7,7 +7,6 @@
 - [Your first module](#your-first-module)
 - [Run, reload, and watch](#run-reload-and-watch)
 - [Modules: install and manage](#modules-install-and-manage)
-- [Sync: snapshot and restore](#sync-snapshot-and-restore)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
   - [Bluetooth](#bluetooth)
@@ -101,24 +100,22 @@ If any module fails to load, `bread reload` prints the error with a full Lua sta
 
 Modules are Lua packages installed to `~/.config/bread/modules/`. The CLI manages the install lifecycle.
 
+Modules install from a **local directory only**. They run with full
+`bread.exec()` privileges and are not sandboxed; remote installation was
+removed so that reviewing third-party code stays an explicit, manual step. To
+use a module published on a git host, clone it yourself, review it, then
+install from the checkout.
+
 ```bash
-# Install from GitHub (downloads and extracts the default branch tarball)
-bread modules install github:someuser/bread-wifi
-
-# Install from a local directory
-bread modules install ~/src/my-module
-
-# Install a specific ref
-bread modules install github:someuser/bread-wifi@v1.2.0
+# Clone and review, then install from the local checkout
+git clone https://github.com/someuser/bread-wifi ~/src/bread-wifi
+bread modules install ~/src/bread-wifi
 
 # List installed modules and their daemon status
 bread modules list
 
 # Show full manifest for one module
 bread modules info bread-wifi
-
-# Re-install all GitHub-sourced modules (pick up upstream changes)
-bread modules update
 
 # Remove a module
 bread modules remove bread-wifi
@@ -132,99 +129,8 @@ name = "wifi"
 version = "1.0.0"
 description = "WiFi management for Bread"
 author = "someuser"
-source = "github:someuser/bread-wifi"
+source = "/home/you/src/bread-wifi"
 installed_at = "2026-01-01T00:00:00Z"
-```
-
-## Sync: snapshot and restore
-
-Bread sync snapshots your config, dotfiles, and installed packages into a local Git repository. Use `export`/`import` to move state between machines — no git remote required.
-
-```bash
-# First-time setup (remote optional)
-bread sync init
-bread sync init --remote git@github.com:you/bread-config.git
-
-# Commit local snapshot
-bread sync push
-bread sync push --message "before reinstall"
-
-# Apply snapshot to this machine
-bread sync pull
-
-# Also reinstall packages from snapshot
-bread sync pull --install-packages
-
-# See what has changed
-bread sync status
-bread sync diff
-
-# List known machines
-bread sync machines
-```
-
-### Portable export/import
-
-`export` creates a self-contained snapshot directory or `.tar.gz` — no git auth needed.
-
-```bash
-# Create a portable snapshot (defaults to ./bread-export-<machine>-<date>.tar.gz)
-bread sync export
-
-# Export to a specific path
-bread sync export --output ~/backups/bread.tar.gz
-bread sync export --output /mnt/usb/bread-snapshot/   # directory
-
-# Apply a snapshot on another machine
-bread sync import bread-export-hermes-2026-05-16.tar.gz
-bread sync import /mnt/usb/bread-snapshot/
-
-# Also install packages from the snapshot
-bread sync import bread-export.tar.gz --install-packages
-
-# Skip cloning git repos back to their original locations
-bread sync import bread-export.tar.gz --no-clone-repos
-
-# Skip confirmation prompt
-bread sync import bread-export.tar.gz --yes
-```
-
-Each export snapshot includes:
-
-| Directory | Contents |
-|-----------|----------|
-| `bread/` | `~/.config/bread/` (your Bread config) |
-| `configs/` | Common app configs (hypr, nvim, kitty, waybar, fish, etc.) |
-| `dotfiles/` | Individual files: `.gitconfig`, `.zshrc`, `.zprofile`, `.zshenv`, SSH config, etc. |
-| `local-bin/` | `~/.local/bin/` scripts (non-symlink, <512 KB) |
-| `local-fonts/` | `~/.local/share/fonts/` |
-| `systemd/` | `~/.config/systemd/user/` units |
-| `system/` | System files: udev rules, modprobe, sysctl, NetworkManager, bluetooth (root-only paths skipped unless run with sudo) |
-| `packages/` | Package lists (pacman.txt, pip.txt, cargo.txt, npm.txt) |
-| `machines/` | Per-machine profile with tags and last-sync time |
-| `manifest.toml` | Path map for exact restoration on import |
-| `restore.sh` | Shell script for manual restore (system files shown as sudo commands) |
-
-**Git repository tracking:** at export time, all git repositories with remotes found under `~`, `~/Projects`, `~/Documents`, and `~/.config` are auto-committed and pushed. Their remote URLs and branches are recorded in the manifest. On import, `--no-clone-repos` suppresses cloning them back.
-
-Configure sync in `~/.config/bread/sync.toml`:
-
-```toml
-[remote]
-url = "git@github.com:you/bread-config.git"
-branch = "main"
-
-[machine]
-name = "hermes"
-tags = ["laptop", "battery"]
-
-[packages]
-enabled = true
-managers = ["pacman", "pip", "cargo"]
-
-[delegates]
-include = ["~/.config/nvim", "~/.config/waybar"]
-exclude = ["**/.git", "**/*.cache"]
 ```
 
 ## Debugging tips
@@ -396,10 +302,13 @@ Logging helpers. Accept any Lua value (coerced via `tostring`).
 ### Machine and filesystem
 
 #### `bread.machine.name() -> string`
-Returns the machine name from `sync.toml`. Falls back to the system hostname if sync is not initialized.
+Returns the system hostname. If an external tool has written a
+`~/.config/bread/sync.toml` with a `[machine].name`, that value takes
+precedence (bread reads the file if present but does not create it).
 
 #### `bread.machine.tags() -> string[]`
-Returns the tags array from `sync.toml`, or `{}` if sync is not initialized.
+Returns `[machine].tags` from `~/.config/bread/sync.toml` if that file
+exists, otherwise `{}`.
 
 #### `bread.machine.has_tag(tag) -> bool`
 Returns true if the machine has the given tag.
@@ -924,4 +833,3 @@ Available methods:
 | `events.subscribe` | — | Upgrade to streaming mode; pushes events line by line |
 | `events.replay` | `since_ms` | Replay buffered events from the last N ms |
 | `emit` | `event`, `data` | Inject a synthetic event into the pipeline |
-| `sync.status` | — | Return sync init state: `{ initialized, machine?, remote? }` |
