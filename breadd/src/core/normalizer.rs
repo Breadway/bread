@@ -31,6 +31,7 @@ impl EventNormalizer {
             AdapterSource::Hyprland => self.normalize_hyprland(raw),
             AdapterSource::Power => self.normalize_power(raw),
             AdapterSource::Network => self.normalize_network(raw),
+            AdapterSource::Bluetooth => self.normalize_bluetooth(raw),
             AdapterSource::System => vec![BreadEvent {
                 event: raw.kind.clone(),
                 timestamp: raw.timestamp,
@@ -301,6 +302,83 @@ impl EventNormalizer {
         }
 
         events
+    }
+
+    fn normalize_bluetooth(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        let path = raw
+            .payload
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let address = raw
+            .payload
+            .get("address")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let name = raw
+            .payload
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                raw.payload
+                    .pointer("/properties/Name")
+                    .or_else(|| raw.payload.pointer("/properties/Alias"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("unknown");
+
+        match raw.kind.as_str() {
+            "bluetooth.enumerate" | "bluetooth.device.connected" => vec![BreadEvent {
+                event: "bread.device.connected".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Bluetooth,
+                data: json!({
+                    "id": path,
+                    "device": "unknown",
+                    "name": name,
+                    "address": address,
+                    "subsystem": "bluetooth",
+                    "raw": raw.payload,
+                }),
+            }],
+            "bluetooth.device.disconnected" => vec![BreadEvent {
+                event: "bread.device.disconnected".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Bluetooth,
+                data: json!({
+                    "id": path,
+                    "device": "unknown",
+                    "name": name,
+                    "address": address,
+                    "subsystem": "bluetooth",
+                    "raw": raw.payload,
+                }),
+            }],
+            "bluetooth.device.added" => vec![BreadEvent {
+                event: "bread.bluetooth.device.paired".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Bluetooth,
+                data: json!({
+                    "id": path,
+                    "name": name,
+                    "address": address,
+                    "subsystem": "bluetooth",
+                    "raw": raw.payload,
+                }),
+            }],
+            "bluetooth.device.removed" => vec![BreadEvent {
+                event: "bread.bluetooth.device.unpaired".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Bluetooth,
+                data: json!({
+                    "id": path,
+                    "address": address,
+                    "subsystem": "bluetooth",
+                    "raw": raw.payload,
+                }),
+            }],
+            _ => vec![],
+        }
     }
 
     fn normalize_network(&self, raw: &RawEvent) -> Vec<BreadEvent> {
@@ -659,6 +737,123 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|e| e.event.as_str()).collect();
         assert!(names.contains(&"bread.power.ac.disconnected"));
         assert!(names.contains(&"bread.power.battery.critical"));
+    }
+
+    // ─── Bluetooth ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn bluetooth_connected_emits_device_connected() {
+        let n = EventNormalizer::new(0);
+        let ev = raw(
+            AdapterSource::Bluetooth,
+            "bluetooth",
+            json!({
+                "path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                "address": "AA:BB:CC:DD:EE:FF",
+                "properties": { "Connected": true },
+            }),
+            1,
+        );
+        let out = n.normalize(&raw(
+            AdapterSource::Bluetooth,
+            "bluetooth.device.connected",
+            ev.payload.clone(),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.device.connected");
+        assert_eq!(out[0].data.get("address").unwrap(), "AA:BB:CC:DD:EE:FF");
+        assert_eq!(out[0].data.get("subsystem").unwrap(), "bluetooth");
+        assert_eq!(out[0].data.get("device").unwrap(), "unknown");
+    }
+
+    #[test]
+    fn bluetooth_disconnected_emits_device_disconnected() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::Bluetooth,
+            "bluetooth.device.disconnected",
+            json!({
+                "path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                "address": "AA:BB:CC:DD:EE:FF",
+                "properties": { "Connected": false },
+            }),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.device.disconnected");
+    }
+
+    #[test]
+    fn bluetooth_enumerate_includes_name() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::Bluetooth,
+            "bluetooth.enumerate",
+            json!({
+                "path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                "address": "AA:BB:CC:DD:EE:FF",
+                "name": "WH-1000XM4",
+                "properties": {},
+            }),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.device.connected");
+        assert_eq!(out[0].data.get("name").unwrap(), "WH-1000XM4");
+    }
+
+    #[test]
+    fn bluetooth_paired_emits_bluetooth_specific_event() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::Bluetooth,
+            "bluetooth.device.added",
+            json!({
+                "path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                "address": "AA:BB:CC:DD:EE:FF",
+                "name": "My Headphones",
+                "properties": {},
+            }),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.bluetooth.device.paired");
+        assert_eq!(out[0].data.get("name").unwrap(), "My Headphones");
+    }
+
+    #[test]
+    fn bluetooth_unpaired_emits_bluetooth_specific_event() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::Bluetooth,
+            "bluetooth.device.removed",
+            json!({
+                "path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                "address": "AA:BB:CC:DD:EE:FF",
+            }),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.bluetooth.device.unpaired");
+        assert_eq!(out[0].data.get("address").unwrap(), "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn bluetooth_name_falls_back_to_properties() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::Bluetooth,
+            "bluetooth.device.connected",
+            json!({
+                "path": "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF",
+                "address": "AA:BB:CC:DD:EE:FF",
+                "properties": { "Connected": true, "Name": "Fallback Name" },
+            }),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].data.get("name").unwrap(), "Fallback Name");
     }
 
     // ─── Network ───────────────────────────────────────────────────────────

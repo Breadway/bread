@@ -51,7 +51,7 @@ packaging/       Arch PKGBUILD and systemd user service
 
 The daemon is structured in four layers:
 
-- **Adapters** — interface with Hyprland IPC, udev, power state, and network interfaces
+- **Adapters** — interface with Hyprland IPC, udev, power state, network interfaces, and Bluetooth (BlueZ)
 - **Normalizer** — transforms raw adapter signals into semantic Bread events
 - **State engine** — maintains runtime state and dispatches events to subscribers
 - **Lua runtime** — loads your modules, registers handlers, executes automation
@@ -68,6 +68,7 @@ The daemon is structured in four layers:
 Optional but preferred:
 - UPower (for battery events via D-Bus rather than sysfs polling)
 - rtnetlink (for network events; falls back to sysfs polling without it)
+- BlueZ (for Bluetooth device events and control)
 
 ---
 
@@ -138,6 +139,9 @@ poll_interval_secs = 30
 [adapters.network]
 enabled = true
 
+[adapters.bluetooth]
+enabled = true
+
 [events]
 dedup_window_ms = 100
 
@@ -197,14 +201,19 @@ bread modules update [name]           # Re-install one or all GitHub-sourced mod
 bread modules info <name>             # Show full manifest and daemon status
 
 # Sync
-bread sync init                       # Initialize sync for this machine
-bread sync push                       # Snapshot and push current state to remote
-bread sync pull                       # Pull and apply latest state from remote
+bread sync init                       # Initialize sync for this machine (remote optional)
+bread sync push                       # Commit local snapshot
+bread sync push --message "note"      # Commit with a custom message
+bread sync pull                       # Apply local snapshot to this machine
 bread sync pull --install-packages    # Also install packages from snapshot
 bread sync status                     # Show what has changed since last push
 bread sync diff                       # Show file-level diff vs last commit
-bread sync diff --remote              # Show diff vs remote
 bread sync machines                   # List known machines from sync repo
+bread sync export                     # Create a portable .tar.gz snapshot (no git auth)
+bread sync export --output path       # Export to a specific file or directory
+bread sync import <path>              # Apply a portable snapshot (.tar.gz or directory)
+bread sync import <path> --install-packages  # Also install packages
+bread sync import <path> --no-clone-repos    # Skip cloning git repos
 ```
 
 ---
@@ -262,27 +271,31 @@ return M
 
 ## Sync system
 
-Bread sync snapshots your entire setup — Bread config, arbitrary dotfiles, and package lists — and stores it in a Git repository. Pull it on another machine to restore.
+Bread sync snapshots your entire setup — Bread config, dotfiles, fonts, systemd units, package lists, and git repos — into a local Git repository. Use `export`/`import` to move state between machines without needing a git remote.
 
 ```bash
-# First-time setup
+# First-time setup (remote is optional)
+bread sync init
 bread sync init --remote git@github.com:you/bread-config.git
 
-# Push current state
+# Commit a local snapshot
 bread sync push
 
-# On another machine: pull and apply
-bread sync pull
+# Create a portable .tar.gz (no git auth required)
+bread sync export
 
-# Check what's pending
-bread sync status
+# On another machine: apply the snapshot
+bread sync import bread-export-hermes-2026-05-16.tar.gz
+
+# Also install packages on import
+bread sync import bread-export.tar.gz --install-packages
 ```
 
 Configure what gets synced in `~/.config/bread/sync.toml`:
 
 ```toml
 [remote]
-url = "git@github.com:you/bread-config.git"
+url = "git@github.com:you/bread-config.git"   # optional
 branch = "main"
 
 [machine]
@@ -298,14 +311,21 @@ include = ["~/.config/nvim", "~/.config/waybar"]
 exclude = ["**/.git", "**/*.cache"]
 ```
 
-The sync repo stores:
+A portable export snapshot contains:
 
 ```
-sync-repo/
-├── bread/          ← ~/.config/bread/ snapshot
-├── configs/        ← delegate paths (nvim, waybar, etc.)
+bread-export-hermes-2026-05-16/
+├── bread/          ← ~/.config/bread/
+├── configs/        ← hypr, nvim, kitty, waybar, fish, dunst, btop, …
+├── dotfiles/       ← .gitconfig, .zshrc, .zprofile, .zshenv, ssh config, …
+├── local-bin/      ← ~/.local/bin/ scripts
+├── local-fonts/    ← ~/.local/share/fonts/
+├── systemd/        ← ~/.config/systemd/user/ units
+├── system/         ← udev rules, modprobe, sysctl (sudo required for some)
+├── packages/       ← pacman.txt, pip.txt, cargo.txt, npm.txt
 ├── machines/       ← per-machine profiles
-└── packages/       ← package snapshots (pacman.txt, pip.txt, etc.)
+├── manifest.toml   ← path map for exact restore
+└── restore.sh      ← shell script for manual restore
 ```
 
 ---
@@ -335,6 +355,8 @@ Events follow the namespace convention `bread.<subsystem>.<noun>.<verb>`.
 | `bread.power.battery.full` | Battery at 100% |
 | `bread.network.connected` | Network interface came online |
 | `bread.network.disconnected` | Network interface went offline |
+| `bread.bluetooth.device.paired` | Bluetooth device paired / discovered |
+| `bread.bluetooth.device.unpaired` | Bluetooth device removed from BlueZ |
 | `bread.profile.activated` | Profile switched |
 | `bread.notify.sent` | Desktop notification dispatched |
 
@@ -513,6 +535,44 @@ local clients    = bread.hyprland.clients()
 -- Subscribe to raw Hyprland events (bypass normalization)
 bread.hyprland.on_raw("activewindow", function(raw)
     -- raw is the unparsed string from Hyprland's event socket
+end)
+```
+
+### Bluetooth
+
+The `bread.bluetooth` namespace provides BlueZ control. All operations degrade gracefully when Bluetooth hardware is unavailable.
+
+```lua
+-- Power the adapter on or off
+bread.bluetooth.power(true)
+bread.bluetooth.power(false)
+
+-- Query current power state (returns true/false, or nil if unavailable)
+local on = bread.bluetooth.powered()
+
+-- Connect/disconnect a paired device by MAC address
+-- Fire-and-forget; result arrives as bread.device.connected/disconnected
+bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
+bread.bluetooth.disconnect("AA:BB:CC:DD:EE:FF")
+
+-- Start or stop device discovery
+bread.bluetooth.scan(true)
+bread.bluetooth.scan(false)
+
+-- List all devices known to BlueZ
+local devs = bread.bluetooth.devices()
+-- Returns nil if BlueZ is unavailable, otherwise:
+-- { { address, name, connected, paired }, ... }
+```
+
+Example — auto-connect headphones when Bluetooth powers on:
+
+```lua
+bread.state.watch("power.ac_connected", function(ac)
+    if ac then
+        bread.bluetooth.power(true)
+        bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
+    end
 end)
 ```
 

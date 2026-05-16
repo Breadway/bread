@@ -50,6 +50,7 @@ impl Default for PackagesConfig {
             enabled: true,
             managers: vec![
                 "pacman".to_string(),
+                "aur".to_string(),
                 "pip".to_string(),
                 "npm".to_string(),
                 "cargo".to_string(),
@@ -194,6 +195,7 @@ mod tests {
         let cfg = PackagesConfig::default();
         assert!(cfg.enabled);
         assert!(cfg.managers.contains(&"pacman".to_string()));
+        assert!(cfg.managers.contains(&"aur".to_string()));
         assert!(cfg.managers.contains(&"pip".to_string()));
         assert!(cfg.managers.contains(&"npm".to_string()));
         assert!(cfg.managers.contains(&"cargo".to_string()));

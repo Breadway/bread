@@ -934,6 +934,74 @@ impl LuaEngine {
 
         bread.set("fs", fs_tbl)?;
 
+        // bread.bluetooth — BlueZ control
+        let bluetooth_tbl = self.lua.create_table()?;
+
+        let power_fn = self.lua.create_function(move |_lua, enabled: bool| {
+            bluetooth_spawn(move || async move {
+                if let Err(e) = bluetooth_set_powered(enabled).await {
+                    tracing::warn!("bread.bluetooth.power failed: {e}");
+                }
+            });
+            Ok(())
+        })?;
+        bluetooth_tbl.set("power", power_fn)?;
+
+        let powered_fn = self.lua.create_function(move |_lua, ()| {
+            Ok(bluetooth_query(|| bluetooth_get_powered()).ok())
+        })?;
+        bluetooth_tbl.set("powered", powered_fn)?;
+
+        let connect_fn = self.lua.create_function(move |_lua, address: String| {
+            bluetooth_spawn(move || async move {
+                if let Err(e) = bluetooth_connect(address).await {
+                    tracing::warn!("bread.bluetooth.connect failed: {e}");
+                }
+            });
+            Ok(())
+        })?;
+        bluetooth_tbl.set("connect", connect_fn)?;
+
+        let disconnect_fn = self.lua.create_function(move |_lua, address: String| {
+            bluetooth_spawn(move || async move {
+                if let Err(e) = bluetooth_disconnect(address).await {
+                    tracing::warn!("bread.bluetooth.disconnect failed: {e}");
+                }
+            });
+            Ok(())
+        })?;
+        bluetooth_tbl.set("disconnect", disconnect_fn)?;
+
+        let scan_fn = self.lua.create_function(move |_lua, enabled: bool| {
+            bluetooth_spawn(move || async move {
+                if let Err(e) = bluetooth_set_scanning(enabled).await {
+                    tracing::warn!("bread.bluetooth.scan failed: {e}");
+                }
+            });
+            Ok(())
+        })?;
+        bluetooth_tbl.set("scan", scan_fn)?;
+
+        let devices_fn = self.lua.create_function(move |lua, ()| {
+            let devs = match bluetooth_query(|| bluetooth_list_devices()) {
+                Ok(d) => d,
+                Err(_) => return Ok(Value::Nil),
+            };
+            let tbl = lua.create_table()?;
+            for (i, dev) in devs.iter().enumerate() {
+                let dt = lua.create_table()?;
+                dt.set("address", dev.address.clone())?;
+                dt.set("name", dev.name.clone())?;
+                dt.set("connected", dev.connected)?;
+                dt.set("paired", dev.paired)?;
+                tbl.set(i + 1, dt)?;
+            }
+            Ok(Value::Table(tbl))
+        })?;
+        bluetooth_tbl.set("devices", devices_fn)?;
+
+        bread.set("bluetooth", bluetooth_tbl)?;
+
         globals.set("bread", bread)?;
         self.install_require_loader()?;
         self.install_wait_helper()?;
@@ -2192,4 +2260,200 @@ fn list_lua_files(root: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(out)
+}
+
+// ─── Bluetooth helpers ────────────────────────────────────────────────────────
+
+/// Spawn a dedicated thread with its own Tokio runtime for a fire-and-forget
+/// async Bluetooth operation. Needed because the Lua thread runs inside
+/// `block_on` on a current-thread runtime, so nested `block_on` is forbidden.
+fn bluetooth_spawn<F, Fut>(factory: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()>,
+{
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("bluetooth action thread")
+            .block_on(factory());
+    });
+}
+
+/// Like `bluetooth_spawn` but waits for the result via a sync channel so Lua
+/// gets a return value.
+fn bluetooth_query<F, Fut, T>(factory: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("bluetooth query thread")
+            .block_on(factory());
+        let _ = tx.send(result);
+    });
+    rx.recv().map_err(|_| anyhow::anyhow!("bluetooth query thread failed"))?
+}
+
+async fn bluetooth_find_adapter(conn: &zbus::Connection) -> anyhow::Result<String> {
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    let msg = conn
+        .call_method(
+            Some("org.bluez"),
+            "/",
+            Some("org.freedesktop.DBus.ObjectManager"),
+            "GetManagedObjects",
+            &(),
+        )
+        .await?;
+    let objects: std::collections::HashMap<
+        OwnedObjectPath,
+        std::collections::HashMap<String, std::collections::HashMap<String, OwnedValue>>,
+    > = msg.body()?;
+    for (path, interfaces) in &objects {
+        if interfaces.contains_key("org.bluez.Adapter1") {
+            return Ok(path.as_str().to_string());
+        }
+    }
+    Err(anyhow::anyhow!("no Bluetooth adapter found"))
+}
+
+async fn bluetooth_set_powered(enabled: bool) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let adapter = bluetooth_find_adapter(&conn).await?;
+    conn.call_method(
+        Some("org.bluez"),
+        adapter.as_str(),
+        Some("org.freedesktop.DBus.Properties"),
+        "Set",
+        &(
+            "org.bluez.Adapter1",
+            "Powered",
+            zbus::zvariant::Value::from(enabled),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn bluetooth_get_powered() -> anyhow::Result<bool> {
+    let conn = zbus::Connection::system().await?;
+    let adapter = bluetooth_find_adapter(&conn).await?;
+    let msg = conn
+        .call_method(
+            Some("org.bluez"),
+            adapter.as_str(),
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.bluez.Adapter1", "Powered"),
+        )
+        .await?;
+    let (value,): (zbus::zvariant::OwnedValue,) = msg.body()?;
+    let json = serde_json::to_value(&value).unwrap_or(serde_json::json!(false));
+    Ok(json.as_bool().unwrap_or(false))
+}
+
+async fn bluetooth_connect(address: String) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let adapter = bluetooth_find_adapter(&conn).await?;
+    let dev_path = format!("{}/dev_{}", adapter, address.replace(':', "_"));
+    conn.call_method(
+        Some("org.bluez"),
+        dev_path.as_str(),
+        Some("org.bluez.Device1"),
+        "Connect",
+        &(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn bluetooth_disconnect(address: String) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let adapter = bluetooth_find_adapter(&conn).await?;
+    let dev_path = format!("{}/dev_{}", adapter, address.replace(':', "_"));
+    conn.call_method(
+        Some("org.bluez"),
+        dev_path.as_str(),
+        Some("org.bluez.Device1"),
+        "Disconnect",
+        &(),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn bluetooth_set_scanning(enabled: bool) -> anyhow::Result<()> {
+    let conn = zbus::Connection::system().await?;
+    let adapter = bluetooth_find_adapter(&conn).await?;
+    let method = if enabled { "StartDiscovery" } else { "StopDiscovery" };
+    conn.call_method(
+        Some("org.bluez"),
+        adapter.as_str(),
+        Some("org.bluez.Adapter1"),
+        method,
+        &(),
+    )
+    .await?;
+    Ok(())
+}
+
+struct BluetoothDevice {
+    address: String,
+    name: String,
+    connected: bool,
+    paired: bool,
+}
+
+async fn bluetooth_list_devices() -> anyhow::Result<Vec<BluetoothDevice>> {
+    use zbus::zvariant::{OwnedObjectPath, OwnedValue};
+    let conn = zbus::Connection::system().await?;
+    let msg = conn
+        .call_method(
+            Some("org.bluez"),
+            "/",
+            Some("org.freedesktop.DBus.ObjectManager"),
+            "GetManagedObjects",
+            &(),
+        )
+        .await?;
+    let objects: std::collections::HashMap<
+        OwnedObjectPath,
+        std::collections::HashMap<String, std::collections::HashMap<String, OwnedValue>>,
+    > = msg.body()?;
+
+    let mut devices = Vec::new();
+    for (_, interfaces) in &objects {
+        if let Some(props) = interfaces.get("org.bluez.Device1") {
+            let json = serde_json::to_value(props).unwrap_or_else(|_| serde_json::json!({}));
+            devices.push(BluetoothDevice {
+                address: json
+                    .get("Address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                name: json
+                    .get("Name")
+                    .or_else(|| json.get("Alias"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                connected: json
+                    .get("Connected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                paired: json
+                    .get("Paired")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            });
+        }
+    }
+    Ok(devices)
 }

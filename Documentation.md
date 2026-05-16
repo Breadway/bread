@@ -10,6 +10,7 @@
 - [Sync: snapshot and restore](#sync-snapshot-and-restore)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
+  - [Bluetooth](#bluetooth)
 - [Dictionary: Built-in modules](#dictionary-built-in-modules)
 - [Dictionary: Event reference](#dictionary-event-reference)
 - [Dictionary: Runtime state schema](#dictionary-runtime-state-schema)
@@ -22,6 +23,8 @@ Bread is a reactive automation fabric for Linux desktops. The daemon (`breadd`) 
 - **Daemon** (`breadd`) — long-running Rust process; source of truth for runtime state
 - **Lua runtime** — dedicated thread inside the daemon; automation logic lives here
 - **CLI** (`bread`) — talks to the daemon over a Unix socket
+
+Adapters currently supported: Hyprland compositor IPC, Linux udev/netlink, UPower/sysfs power, rtnetlink/sysfs network, and BlueZ Bluetooth.
 
 If you are new to Bread, start with the quick walkthrough below, then jump to the full dictionary when you need exact API details.
 
@@ -135,16 +138,18 @@ installed_at = "2026-01-01T00:00:00Z"
 
 ## Sync: snapshot and restore
 
-Bread sync snapshots your Bread config, arbitrary dotfiles, and installed package lists into a Git repository. Pull it on another machine to restore state.
+Bread sync snapshots your config, dotfiles, and installed packages into a local Git repository. Use `export`/`import` to move state between machines — no git remote required.
 
 ```bash
-# First-time setup
+# First-time setup (remote optional)
+bread sync init
 bread sync init --remote git@github.com:you/bread-config.git
 
-# Snapshot and push
+# Commit local snapshot
 bread sync push
+bread sync push --message "before reinstall"
 
-# On another machine: pull and apply
+# Apply snapshot to this machine
 bread sync pull
 
 # Also reinstall packages from snapshot
@@ -153,11 +158,54 @@ bread sync pull --install-packages
 # See what has changed
 bread sync status
 bread sync diff
-bread sync diff --remote
 
 # List known machines
 bread sync machines
 ```
+
+### Portable export/import
+
+`export` creates a self-contained snapshot directory or `.tar.gz` — no git auth needed.
+
+```bash
+# Create a portable snapshot (defaults to ./bread-export-<machine>-<date>.tar.gz)
+bread sync export
+
+# Export to a specific path
+bread sync export --output ~/backups/bread.tar.gz
+bread sync export --output /mnt/usb/bread-snapshot/   # directory
+
+# Apply a snapshot on another machine
+bread sync import bread-export-hermes-2026-05-16.tar.gz
+bread sync import /mnt/usb/bread-snapshot/
+
+# Also install packages from the snapshot
+bread sync import bread-export.tar.gz --install-packages
+
+# Skip cloning git repos back to their original locations
+bread sync import bread-export.tar.gz --no-clone-repos
+
+# Skip confirmation prompt
+bread sync import bread-export.tar.gz --yes
+```
+
+Each export snapshot includes:
+
+| Directory | Contents |
+|-----------|----------|
+| `bread/` | `~/.config/bread/` (your Bread config) |
+| `configs/` | Common app configs (hypr, nvim, kitty, waybar, fish, etc.) |
+| `dotfiles/` | Individual files: `.gitconfig`, `.zshrc`, `.zprofile`, `.zshenv`, SSH config, etc. |
+| `local-bin/` | `~/.local/bin/` scripts (non-symlink, <512 KB) |
+| `local-fonts/` | `~/.local/share/fonts/` |
+| `systemd/` | `~/.config/systemd/user/` units |
+| `system/` | System files: udev rules, modprobe, sysctl, NetworkManager, bluetooth (root-only paths skipped unless run with sudo) |
+| `packages/` | Package lists (pacman.txt, pip.txt, cargo.txt, npm.txt) |
+| `machines/` | Per-machine profile with tags and last-sync time |
+| `manifest.toml` | Path map for exact restoration on import |
+| `restore.sh` | Shell script for manual restore (system files shown as sudo commands) |
+
+**Git repository tracking:** at export time, all git repositories with remotes found under `~`, `~/Projects`, `~/Documents`, and `~/.config` are auto-committed and pushed. Their remote URLs and branches are recorded in the manifest. On import, `--no-clone-repos` suppresses cloning them back.
 
 Configure sync in `~/.config/bread/sync.toml`:
 
@@ -177,16 +225,6 @@ managers = ["pacman", "pip", "cargo"]
 [delegates]
 include = ["~/.config/nvim", "~/.config/waybar"]
 exclude = ["**/.git", "**/*.cache"]
-```
-
-The sync repo stores:
-
-```
-~/.local/share/bread/sync-repo/
-├── bread/          ← ~/.config/bread/ snapshot
-├── configs/        ← delegate paths (nvim, waybar, etc.)
-├── machines/       ← per-machine profiles with tags and last-sync time
-└── packages/       ← package snapshots (pacman.txt, pip.txt, etc.)
 ```
 
 ## Debugging tips
@@ -399,6 +437,83 @@ local clients    = bread.hyprland.clients()
 -- Subscribe to raw Hyprland events (bypasses normalization)
 bread.hyprland.on_raw("activewindow", function(raw)
     -- raw payload includes: kind, raw (original string), data
+end)
+```
+
+### Bluetooth
+
+The `bread.bluetooth` namespace provides control over the local Bluetooth adapter and its paired devices via BlueZ D-Bus. All functions degrade gracefully when BlueZ is unavailable — control functions log a warning and return `nil`, query functions return `nil`.
+
+#### `bread.bluetooth.power(enabled)`
+Power the Bluetooth adapter on (`true`) or off (`false`). Fire-and-forget.
+
+#### `bread.bluetooth.powered() -> bool | nil`
+Returns the current power state of the adapter, or `nil` if unavailable.
+
+```lua
+if bread.bluetooth.powered() then
+    bread.log("Bluetooth is on")
+end
+```
+
+#### `bread.bluetooth.connect(address)`
+Connect to a paired device by MAC address. Fire-and-forget — the result is delivered as a `bread.device.connected` event when the connection succeeds.
+
+```lua
+bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
+```
+
+#### `bread.bluetooth.disconnect(address)`
+Disconnect from a device by MAC address. Fire-and-forget — delivered as `bread.device.disconnected`.
+
+#### `bread.bluetooth.scan(enabled)`
+Start (`true`) or stop (`false`) device discovery.
+
+#### `bread.bluetooth.devices() -> table | nil`
+Returns all devices known to BlueZ as an array of tables. Returns `nil` if BlueZ is unavailable.
+
+```lua
+local devs = bread.bluetooth.devices()
+if devs then
+    for _, dev in ipairs(devs) do
+        bread.log(dev.name .. " " .. dev.address
+            .. (dev.connected and " [connected]" or ""))
+    end
+end
+```
+
+Each device table:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `address` | string | Bluetooth MAC address, e.g. `"AA:BB:CC:DD:EE:FF"` |
+| `name` | string | Device name from BlueZ (Alias or Name property) |
+| `connected` | bool | Whether the device is currently connected |
+| `paired` | bool | Whether the device is paired |
+
+#### Example: auto-connect headphones on AC power
+
+```lua
+local M = bread.module({ name = "headphones", version = "1.0.0" })
+local HEADPHONES = "AA:BB:CC:DD:EE:FF"
+
+function M.on_load()
+    bread.state.watch("power.ac_connected", function(ac)
+        if ac then
+            bread.bluetooth.power(true)
+            bread.bluetooth.connect(HEADPHONES)
+        end
+    end)
+end
+
+return M
+```
+
+#### Example: turn off Bluetooth on battery
+
+```lua
+bread.state.watch("power.ac_connected", function(ac)
+    bread.bluetooth.power(ac)
 end)
 ```
 
@@ -646,7 +761,7 @@ Events are delivered as a `BreadEvent`:
 |-------|------|
 | `bread.system.startup` | `{}` |
 
-#### Devices (udev)
+#### Devices (udev / Bluetooth)
 
 | Event | Data |
 |-------|------|
@@ -656,6 +771,26 @@ Events are delivered as a `BreadEvent`:
 | `bread.device.<device>.disconnected` | `{ id, device }` |
 
 `device` is the name resolved from `~/.config/bread/devices.lua`. Devices that match no rule use `"unknown"`. The generic `bread.device.connected` event carries the full payload including `raw` udev properties; the named companion event carries only `id` and `device`.
+
+Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bread.device.disconnected`. They can be distinguished by `event.data.subsystem`:
+
+| `subsystem` | Source | Unique identifier field |
+|-------------|--------|------------------------|
+| `"usb"`, `"input"`, etc. | udev | `vendor_id` + `product_id` |
+| `"bluetooth"` | BlueZ | `address` (MAC address) |
+
+#### Bluetooth (BlueZ)
+
+| Event | Data |
+|-------|------|
+| `bread.device.connected` | `{ id, device, name, address, subsystem: "bluetooth", raw }` |
+| `bread.device.disconnected` | same |
+| `bread.bluetooth.device.paired` | `{ id, name, address, subsystem: "bluetooth", raw }` |
+| `bread.bluetooth.device.unpaired` | `{ id, address, subsystem: "bluetooth", raw }` |
+
+`bread.bluetooth.device.paired` fires when BlueZ first learns about a device (new pairing or adapter restart). It does not mean the device is connected. `bread.device.connected` fires when the device profile actually connects.
+
+`name` may be `"unknown"` on `bread.device.connected` events emitted from `PropertiesChanged` signals, since BlueZ only includes changed properties. It is always populated on `bread.bluetooth.device.paired` and on events from the initial enumeration at startup.
 
 #### Hyprland
 
