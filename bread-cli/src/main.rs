@@ -3,7 +3,7 @@ mod modules_mgmt;
 use anyhow::{Context, Result};
 use bread_sync::{
     config::{bread_config_dir, SyncConfig},
-    delegates, machine, packages, SyncRepo,
+    delegates, machine, packages, apply_import, stage_export, SyncRepo,
 };
 use clap::{Parser, Subcommand};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -143,6 +143,26 @@ enum SyncCommand {
     },
     /// List known machines from sync repo
     Machines,
+    /// Create a portable export archive (no git auth required)
+    Export {
+        /// Output path: directory or .tar.gz file. Defaults to ./bread-export-<machine>-<date>.tar.gz
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    /// Apply a portable export archive to this machine
+    Import {
+        /// Path to a bread export directory or .tar.gz file
+        from: PathBuf,
+        /// Also install packages from the package manifests
+        #[arg(long)]
+        install_packages: bool,
+        /// Skip cloning git repositories to their original locations
+        #[arg(long)]
+        no_clone_repos: bool,
+        /// Skip confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -447,6 +467,10 @@ async fn handle_sync_cmd(cmd: SyncCommand, socket: &Path) -> Result<()> {
         SyncCommand::Status => cmd_sync_status(&cfg_dir).await?,
         SyncCommand::Diff { remote } => cmd_sync_diff(&cfg_dir, remote).await?,
         SyncCommand::Machines => cmd_sync_machines(&cfg_dir).await?,
+        SyncCommand::Export { output } => cmd_sync_export(&cfg_dir, output).await?,
+        SyncCommand::Import { from, install_packages, no_clone_repos, yes } => {
+            cmd_sync_import(&cfg_dir, from, install_packages, !no_clone_repos, yes, &socket).await?
+        }
     }
     Ok(())
 }
@@ -464,7 +488,7 @@ async fn cmd_sync_init(cfg_dir: &Path, remote: Option<String>) -> Result<()> {
     let remote_url = match remote {
         Some(u) => u,
         None => {
-            print!("Sync remote URL (git remote or path): ");
+            print!("Sync remote URL (leave empty for local-only, e.g. git@github.com:you/config): ");
             io::stdout().flush()?;
             let mut line = String::new();
             io::stdin().read_line(&mut line)?;
@@ -512,15 +536,17 @@ async fn cmd_sync_init(cfg_dir: &Path, remote: Option<String>) -> Result<()> {
     };
     config.save(cfg_dir)?;
 
-    // If it looks like a URL (not a local path), check if it exists
-    if !remote_url.starts_with('/') && !remote_url.starts_with('.') {
-        println!("remote does not exist yet — it will be created on first push");
-    }
-
     println!();
     println!("sync initialized");
     println!("  machine: {}", machine_name);
-    println!("  remote:  {}", remote_url);
+    if remote_url.is_empty() {
+        println!("  remote:  (local-only — use 'bread sync export' to create a portable snapshot)");
+    } else {
+        println!("  remote:  {}", remote_url);
+        if !remote_url.starts_with('/') && !remote_url.starts_with('.') {
+            println!("  note:    remote will be created on first push");
+        }
+    }
     println!("  config:  {}", cfg_dir.join("sync.toml").display());
     Ok(())
 }
@@ -529,19 +555,15 @@ async fn cmd_sync_push(cfg_dir: &Path, message: Option<String>) -> Result<()> {
     let config = load_sync_config(cfg_dir)?;
     let repo_path = SyncConfig::local_repo_path();
 
-    // Clone or open the local sync repo
-    let repo = SyncRepo::open_or_clone(&config.remote.url, &repo_path)?;
+    let repo = if repo_path.exists() {
+        SyncRepo::open(&repo_path)?
+    } else {
+        SyncRepo::init(&repo_path)?
+    };
 
     // Snapshot bread/ directory
     let bread_dest = repo_path.join("bread");
-    delegates::sync_dir(
-        cfg_dir,
-        &bread_dest,
-        &[
-            // Don't recurse into the sync repo itself
-            ".git".to_string(),
-        ],
-    )?;
+    delegates::sync_dir(cfg_dir, &bread_dest, &[".git".to_string()])?;
 
     // Snapshot delegate configs
     let configs_dir = repo_path.join("configs");
@@ -559,22 +581,16 @@ async fn cmd_sync_push(cfg_dir: &Path, message: Option<String>) -> Result<()> {
         for manager in &config.packages.managers {
             let dest_file = packages_dir.join(format!("{manager}.txt"));
             if let Err(e) = packages::snapshot(manager, &dest_file) {
-                eprintln!(
-                    "bread: warning: package snapshot for {} failed: {}",
-                    manager, e
-                );
+                eprintln!("bread: warning: package snapshot for {manager} failed: {e}");
             }
         }
     }
 
     // Write machine profile
     let machines_dir = repo_path.join("machines");
-    let profile =
-        machine::MachineProfile::new(config.machine.name.clone(), config.machine.tags.clone());
-    profile.write(&machines_dir)?;
+    machine::MachineProfile::new(config.machine.name.clone(), config.machine.tags.clone())
+        .write(&machines_dir)?;
 
-    // Set remote and commit
-    repo.set_remote("origin", &config.remote.url)?;
     let commit_msg = message.unwrap_or_else(|| {
         format!(
             "sync: {} {}",
@@ -584,19 +600,15 @@ async fn cmd_sync_push(cfg_dir: &Path, message: Option<String>) -> Result<()> {
     });
 
     if repo.commit(&commit_msg)?.is_none() {
-        println!("nothing to push — already up to date");
+        println!("nothing to commit — already up to date");
         return Ok(());
     }
 
-    repo.push("origin", &config.remote.branch)?;
-
-    println!("pushed sync for {}", config.machine.name);
-    println!("  bread config:  {}", cfg_dir.display());
-    if !config.delegates.include.is_empty() {
-        println!("  delegates:     {}", config.delegates.include.len());
-    }
+    println!("committed sync for {}", config.machine.name);
+    println!("  snapshot: {}", repo_path.display());
+    println!("  tip: run 'bread sync export' to create a portable snapshot");
     if config.packages.enabled {
-        println!("  packages:      {}", config.packages.managers.join(", "));
+        println!("  packages: {}", config.packages.managers.join(", "));
     }
     Ok(())
 }
@@ -605,15 +617,9 @@ async fn cmd_sync_pull(cfg_dir: &Path, install_packages: bool, socket: &Path) ->
     let config = load_sync_config(cfg_dir)?;
     let repo_path = SyncConfig::local_repo_path();
 
-    let repo = SyncRepo::open_or_clone(&config.remote.url, &repo_path)?;
-    repo.set_remote("origin", &config.remote.url)?;
-
-    match repo.pull("origin", &config.remote.branch) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("{}", e);
-            std::process::exit(1);
-        }
+    if !repo_path.exists() {
+        eprintln!("bread: no local snapshot found. Run 'bread sync push' first.");
+        std::process::exit(1);
     }
 
     // Apply bread/ → ~/.config/bread/
@@ -667,29 +673,25 @@ async fn cmd_sync_status(cfg_dir: &Path) -> Result<()> {
 
     if !repo_path.exists() {
         println!("bread sync status");
-        println!("  not yet pushed");
+        println!("  not yet committed — run 'bread sync push'");
         return Ok(());
     }
 
     let repo = SyncRepo::open(&repo_path)?;
-    repo.set_remote("origin", &config.remote.url)?;
 
-    // Fetch remote refs without merging
-    let _ = repo.fetch("origin", &config.remote.branch);
-
-    let last_push = repo
+    let last_commit = repo
         .last_commit_time()
         .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "never".to_string());
 
     println!("bread sync status");
     println!("  machine      {}", config.machine.name);
-    println!("  remote       {}", config.remote.url);
-    println!("  last push    {}", last_push);
+    println!("  snapshot     {}", repo_path.display());
+    println!("  last commit  {}", last_commit);
 
     let local_changes = repo.local_changes()?;
     println!();
-    println!("local changes (not yet pushed):");
+    println!("uncommitted changes:");
     if local_changes.is_empty() {
         println!("  none");
     } else {
@@ -698,22 +700,11 @@ async fn cmd_sync_status(cfg_dir: &Path) -> Result<()> {
         }
     }
 
-    let remote_changes = repo.remote_changes("origin", &config.remote.branch)?;
-    println!();
-    println!("remote changes (not yet pulled):");
-    if remote_changes.is_empty() {
-        println!("  none");
-    } else {
-        for (ch, path) in &remote_changes {
-            println!("  {}  {}", ch, path);
-        }
-    }
-
     Ok(())
 }
 
-async fn cmd_sync_diff(cfg_dir: &Path, vs_remote: bool) -> Result<()> {
-    let config = load_sync_config(cfg_dir)?;
+async fn cmd_sync_diff(cfg_dir: &Path, _vs_remote: bool) -> Result<()> {
+    let _config = load_sync_config(cfg_dir)?;
     let repo_path = SyncConfig::local_repo_path();
 
     if !repo_path.exists() {
@@ -722,15 +713,7 @@ async fn cmd_sync_diff(cfg_dir: &Path, vs_remote: bool) -> Result<()> {
     }
 
     let repo = SyncRepo::open(&repo_path)?;
-
-    let diff = if vs_remote {
-        repo.set_remote("origin", &config.remote.url)?;
-        let _ = repo.fetch("origin", &config.remote.branch);
-        repo.remote_diff("origin", &config.remote.branch)?
-    } else {
-        repo.working_diff()?
-    };
-
+    let diff = repo.working_diff()?;
     print!("{}", diff);
     Ok(())
 }
@@ -750,6 +733,238 @@ async fn cmd_sync_machines(cfg_dir: &Path) -> Result<()> {
         println!("  {:20} last sync: {}{}", p.name, &p.last_sync[..16], tags);
     }
     Ok(())
+}
+
+async fn cmd_sync_export(cfg_dir: &Path, output: Option<PathBuf>) -> Result<()> {
+    // Load sync config if available; fall back to machine defaults.
+    let config = match SyncConfig::load(cfg_dir) {
+        Ok(c) => c,
+        Err(_) => {
+            let name = machine::hostname();
+            SyncConfig {
+                remote: bread_sync::config::RemoteConfig {
+                    url: String::new(),
+                    branch: "main".to_string(),
+                },
+                machine: bread_sync::config::MachineConfig { name, tags: vec![] },
+                packages: bread_sync::config::PackagesConfig::default(),
+                delegates: bread_sync::config::DelegatesConfig::default(),
+            }
+        }
+    };
+
+    let date = chrono::Utc::now().format("%Y-%m-%d");
+    let export_name = format!("bread-export-{}-{}", config.machine.name, date);
+
+    // Decide: tarball or directory?
+    let (staging_path, make_tarball, final_path) = match &output {
+        Some(p) if p.extension().and_then(|e| e.to_str()) == Some("gz") => {
+            // User wants a .tar.gz at a specific path
+            let staging = std::env::temp_dir().join(&export_name);
+            (staging, true, p.clone())
+        }
+        Some(p) if p.is_dir() || !p.exists() => {
+            // User wants a directory
+            let dir = if p.is_dir() { p.join(&export_name) } else { p.clone() };
+            (dir.clone(), false, dir)
+        }
+        Some(p) => {
+            anyhow::bail!("output path {} already exists and is not a directory", p.display());
+        }
+        None => {
+            // Default: .tar.gz in current directory
+            let tarball = std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(format!("{export_name}.tar.gz"));
+            let staging = std::env::temp_dir().join(&export_name);
+            (staging, true, tarball)
+        }
+    };
+
+    // Stage everything into the staging directory
+    let manifest = stage_export(cfg_dir, &config, &staging_path)
+        .context("failed to stage export")?;
+
+    // Optionally pack into a tarball
+    if make_tarball {
+        create_tarball(&staging_path, &final_path)
+            .context("failed to create tarball")?;
+        std::fs::remove_dir_all(&staging_path).ok();
+    }
+
+    println!("exported to {}", final_path.display());
+    println!("  machine:  {}", manifest.machine);
+    if !manifest.configs.is_empty() {
+        println!("  configs:  {}", manifest.configs.join(", "));
+    }
+    if !manifest.path_map.is_empty() {
+        let file_count = manifest.path_map.iter().filter(|r| r.is_file).count();
+        let dir_count = manifest.path_map.iter().filter(|r| !r.is_file).count();
+        if file_count > 0 {
+            println!("  dotfiles: {} file(s)", file_count);
+        }
+        if dir_count > manifest.configs.len() {
+            println!("  dirs:     {} total", dir_count);
+        }
+    }
+    if !manifest.packages.is_empty() {
+        println!("  packages: {}", manifest.packages.join(", "));
+    }
+    if !manifest.repos.is_empty() {
+        println!("  repos:    {} git repositories tracked", manifest.repos.len());
+    }
+    if manifest.system {
+        println!("  system:   udev / modprobe / sysctl (see restore.sh for sudo commands)");
+    }
+    Ok(())
+}
+
+async fn cmd_sync_import(
+    cfg_dir: &Path,
+    from: PathBuf,
+    install_packages: bool,
+    clone_repos: bool,
+    yes: bool,
+    socket: &Path,
+) -> Result<()> {
+    // Determine staging directory
+    let is_tarball = from.extension().and_then(|e| e.to_str()) == Some("gz");
+
+    let (staging, _tmp_guard) = if is_tarball {
+        let tmp = tempfile::tempdir().context("failed to create temp dir")?;
+        extract_tarball(&from, tmp.path()).context("failed to extract tarball")?;
+        // GitHub-style tarballs extract into a single subdirectory; unwrap if needed
+        let inner = find_single_subdir(tmp.path()).unwrap_or_else(|| tmp.path().to_path_buf());
+        (inner, Some(tmp))
+    } else if from.is_dir() {
+        (from.clone(), None)
+    } else {
+        anyhow::bail!("'{}' is not a directory or .tar.gz file", from.display());
+    };
+
+    // Read manifest for summary
+    let manifest_path = staging.join("manifest.toml");
+    if !manifest_path.exists() {
+        anyhow::bail!("not a bread export: manifest.toml not found in {}", staging.display());
+    }
+    let manifest_raw = std::fs::read_to_string(&manifest_path)?;
+    let manifest: bread_sync::ExportManifest = toml::from_str(&manifest_raw)
+        .context("failed to parse manifest.toml")?;
+
+    println!("bread import: {} (exported {})", manifest.machine, &manifest.exported_at[..16]);
+    println!("  configs:  {}", if manifest.configs.is_empty() { "-".to_string() } else { manifest.configs.join(", ") });
+    println!("  packages: {}", if manifest.packages.is_empty() { "-".to_string() } else { manifest.packages.join(", ") });
+    if !manifest.repos.is_empty() {
+        println!("  repos:    {} git repositories found", manifest.repos.len());
+        if clone_repos {
+            println!("            (will be cloned to their original locations)");
+        } else {
+            println!("            (skipping clone — remove --no-clone-repos to restore)");
+        }
+    }
+    if manifest.system {
+        println!("  note: system files (udev/modprobe/sysctl) will NOT be applied automatically");
+    }
+
+    if !yes {
+        print!("\nApply to ~/.config and ~/.local? (y/n): ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if !line.trim().eq_ignore_ascii_case("y") {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+
+    let applied = apply_import(&staging, cfg_dir, install_packages, clone_repos)
+        .context("import failed")?;
+
+    println!();
+    for item in &applied {
+        println!("  + {item}");
+    }
+
+    if manifest.system {
+        println!();
+        println!("system files were NOT applied automatically. To restore them:");
+        println!("  {}/restore.sh", staging.display());
+    }
+
+    // Notify daemon
+    try_daemon_reload(socket).await;
+
+    Ok(())
+}
+
+fn create_tarball(src_dir: &Path, dest: &Path) -> Result<()> {
+    use flate2::{write::GzEncoder, Compression};
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::File::create(dest)
+        .with_context(|| format!("failed to create {}", dest.display()))?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+
+    let base_name = src_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bread-export");
+
+    // Walk the staging directory and append every file
+    append_dir_recursive(&mut archive, src_dir, src_dir, base_name)?;
+
+    archive.finish()?;
+    Ok(())
+}
+
+fn append_dir_recursive(
+    archive: &mut tar::Builder<flate2::write::GzEncoder<std::fs::File>>,
+    root: &Path,
+    current: &Path,
+    base_name: &str,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current).context("failed to read dir for tarball")? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        let tar_path = PathBuf::from(base_name).join(rel);
+
+        if path.is_dir() {
+            archive.append_dir(&tar_path, &path)?;
+            append_dir_recursive(archive, root, &path, base_name)?;
+        } else if path.is_file() {
+            archive.append_path_with_name(&path, &tar_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn extract_tarball(src: &Path, dest: &Path) -> Result<()> {
+    use flate2::read::GzDecoder;
+
+    let file = std::fs::File::open(src)
+        .with_context(|| format!("failed to open {}", src.display()))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(dest)
+        .with_context(|| format!("failed to extract {}", src.display()))?;
+    Ok(())
+}
+
+/// If a directory contains exactly one subdirectory and nothing else, return it.
+fn find_single_subdir(dir: &Path) -> Option<PathBuf> {
+    let entries: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .collect();
+    if entries.len() == 1 && entries[0].path().is_dir() {
+        Some(entries[0].path())
+    } else {
+        None
+    }
 }
 
 fn load_sync_config(cfg_dir: &Path) -> Result<SyncConfig> {
