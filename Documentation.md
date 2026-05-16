@@ -138,16 +138,18 @@ installed_at = "2026-01-01T00:00:00Z"
 
 ## Sync: snapshot and restore
 
-Bread sync snapshots your Bread config, arbitrary dotfiles, and installed package lists into a Git repository. Pull it on another machine to restore state.
+Bread sync snapshots your config, dotfiles, and installed packages into a local Git repository. Use `export`/`import` to move state between machines — no git remote required.
 
 ```bash
-# First-time setup
+# First-time setup (remote optional)
+bread sync init
 bread sync init --remote git@github.com:you/bread-config.git
 
-# Snapshot and push
+# Commit local snapshot
 bread sync push
+bread sync push --message "before reinstall"
 
-# On another machine: pull and apply
+# Apply snapshot to this machine
 bread sync pull
 
 # Also reinstall packages from snapshot
@@ -156,11 +158,54 @@ bread sync pull --install-packages
 # See what has changed
 bread sync status
 bread sync diff
-bread sync diff --remote
 
 # List known machines
 bread sync machines
 ```
+
+### Portable export/import
+
+`export` creates a self-contained snapshot directory or `.tar.gz` — no git auth needed.
+
+```bash
+# Create a portable snapshot (defaults to ./bread-export-<machine>-<date>.tar.gz)
+bread sync export
+
+# Export to a specific path
+bread sync export --output ~/backups/bread.tar.gz
+bread sync export --output /mnt/usb/bread-snapshot/   # directory
+
+# Apply a snapshot on another machine
+bread sync import bread-export-hermes-2026-05-16.tar.gz
+bread sync import /mnt/usb/bread-snapshot/
+
+# Also install packages from the snapshot
+bread sync import bread-export.tar.gz --install-packages
+
+# Skip cloning git repos back to their original locations
+bread sync import bread-export.tar.gz --no-clone-repos
+
+# Skip confirmation prompt
+bread sync import bread-export.tar.gz --yes
+```
+
+Each export snapshot includes:
+
+| Directory | Contents |
+|-----------|----------|
+| `bread/` | `~/.config/bread/` (your Bread config) |
+| `configs/` | Common app configs (hypr, nvim, kitty, waybar, fish, etc.) |
+| `dotfiles/` | Individual files: `.gitconfig`, `.zshrc`, `.zprofile`, `.zshenv`, SSH config, etc. |
+| `local-bin/` | `~/.local/bin/` scripts (non-symlink, <512 KB) |
+| `local-fonts/` | `~/.local/share/fonts/` |
+| `systemd/` | `~/.config/systemd/user/` units |
+| `system/` | System files: udev rules, modprobe, sysctl, NetworkManager, bluetooth (root-only paths skipped unless run with sudo) |
+| `packages/` | Package lists (pacman.txt, pip.txt, cargo.txt, npm.txt) |
+| `machines/` | Per-machine profile with tags and last-sync time |
+| `manifest.toml` | Path map for exact restoration on import |
+| `restore.sh` | Shell script for manual restore (system files shown as sudo commands) |
+
+**Git repository tracking:** at export time, all git repositories with remotes found under `~`, `~/Projects`, `~/Documents`, and `~/.config` are auto-committed and pushed. Their remote URLs and branches are recorded in the manifest. On import, `--no-clone-repos` suppresses cloning them back.
 
 Configure sync in `~/.config/bread/sync.toml`:
 
@@ -180,16 +225,6 @@ managers = ["pacman", "pip", "cargo"]
 [delegates]
 include = ["~/.config/nvim", "~/.config/waybar"]
 exclude = ["**/.git", "**/*.cache"]
-```
-
-The sync repo stores:
-
-```
-~/.local/share/bread/sync-repo/
-├── bread/          ← ~/.config/bread/ snapshot
-├── configs/        ← delegate paths (nvim, waybar, etc.)
-├── machines/       ← per-machine profiles with tags and last-sync time
-└── packages/       ← package snapshots (pacman.txt, pip.txt, etc.)
 ```
 
 ## Debugging tips
