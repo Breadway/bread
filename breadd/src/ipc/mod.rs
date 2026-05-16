@@ -267,32 +267,6 @@ impl Server {
                     "recent_errors": recent_errors,
                 }))
             }
-            "sync.status" => {
-                let sync_path = bread_sync::config::bread_config_dir().join("sync.toml");
-                match std::fs::read_to_string(&sync_path)
-                    .ok()
-                    .and_then(|s| s.parse::<toml::Value>().ok())
-                {
-                    Some(toml) => {
-                        let machine = toml
-                            .get("machine")
-                            .and_then(|m| m.get("name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        let remote = toml
-                            .get("remote")
-                            .and_then(|r| r.get("url"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown");
-                        Ok(json!({
-                            "initialized": true,
-                            "machine": machine,
-                            "remote": remote,
-                        }))
-                    }
-                    None => Ok(json!({ "initialized": false })),
-                }
-            }
             "events.replay" => {
                 let since_ms = req
                     .params

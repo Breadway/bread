@@ -89,10 +89,52 @@ pub fn now_unix_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Expand a leading `~` or `~/` in a path string to the user's home directory.
+///
+/// Falls back to returning the path unchanged if `$HOME` is unset, which keeps
+/// callers infallible. Shared by the daemon and CLI for resolving
+/// user-supplied paths (config entries, module install sources).
+pub fn expand_path(path: &str) -> std::path::PathBuf {
+    use std::path::PathBuf;
+    let home = std::env::var("HOME").ok();
+    if path == "~" {
+        if let Some(home) = home {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn expand_path_leaves_non_tilde_paths_unchanged() {
+        use std::path::PathBuf;
+        assert_eq!(expand_path("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_path("relative/x"), PathBuf::from("relative/x"));
+        assert_eq!(expand_path("./x"), PathBuf::from("./x"));
+        // A `~` not in leading position is not special.
+        assert_eq!(expand_path("/etc/~weird"), PathBuf::from("/etc/~weird"));
+    }
+
+    #[test]
+    fn expand_path_expands_leading_tilde() {
+        // Read-only env access; safe under parallel test execution.
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(expand_path("~"), std::path::PathBuf::from(&home));
+            assert_eq!(
+                expand_path("~/.config/bread"),
+                std::path::PathBuf::from(&home).join(".config/bread")
+            );
+        }
+    }
 
     #[test]
     fn adapter_source_serializes_as_snake_case() {

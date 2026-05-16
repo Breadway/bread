@@ -873,7 +873,8 @@ impl LuaEngine {
         })?;
         bread.set("module", module_fn)?;
 
-        // bread.machine — machine name and tags from sync.toml
+        // bread.machine — hostname/tags; reads an optional, externally-managed
+        // ~/.config/bread/sync.toml if present (bread does not create it)
         let machine_tbl = self.lua.create_table()?;
 
         let name_fn = self
@@ -947,9 +948,9 @@ impl LuaEngine {
         })?;
         bluetooth_tbl.set("power", power_fn)?;
 
-        let powered_fn = self.lua.create_function(move |_lua, ()| {
-            Ok(bluetooth_query(|| bluetooth_get_powered()).ok())
-        })?;
+        let powered_fn = self
+            .lua
+            .create_function(move |_lua, ()| Ok(bluetooth_query(bluetooth_get_powered).ok()))?;
         bluetooth_tbl.set("powered", powered_fn)?;
 
         let connect_fn = self.lua.create_function(move |_lua, address: String| {
@@ -983,7 +984,7 @@ impl LuaEngine {
         bluetooth_tbl.set("scan", scan_fn)?;
 
         let devices_fn = self.lua.create_function(move |lua, ()| {
-            let devs = match bluetooth_query(|| bluetooth_list_devices()) {
+            let devs = match bluetooth_query(bluetooth_list_devices) {
                 Ok(d) => d,
                 Err(_) => return Ok(Value::Nil),
             };
@@ -2298,7 +2299,8 @@ where
             .block_on(factory());
         let _ = tx.send(result);
     });
-    rx.recv().map_err(|_| anyhow::anyhow!("bluetooth query thread failed"))?
+    rx.recv()
+        .map_err(|_| anyhow::anyhow!("bluetooth query thread failed"))?
 }
 
 async fn bluetooth_find_adapter(conn: &zbus::Connection) -> anyhow::Result<String> {
@@ -2392,7 +2394,11 @@ async fn bluetooth_disconnect(address: String) -> anyhow::Result<()> {
 async fn bluetooth_set_scanning(enabled: bool) -> anyhow::Result<()> {
     let conn = zbus::Connection::system().await?;
     let adapter = bluetooth_find_adapter(&conn).await?;
-    let method = if enabled { "StartDiscovery" } else { "StopDiscovery" };
+    let method = if enabled {
+        "StartDiscovery"
+    } else {
+        "StopDiscovery"
+    };
     conn.call_method(
         Some("org.bluez"),
         adapter.as_str(),
@@ -2429,7 +2435,7 @@ async fn bluetooth_list_devices() -> anyhow::Result<Vec<BluetoothDevice>> {
     > = msg.body()?;
 
     let mut devices = Vec::new();
-    for (_, interfaces) in &objects {
+    for interfaces in objects.values() {
         if let Some(props) = interfaces.get("org.bluez.Device1") {
             let json = serde_json::to_value(props).unwrap_or_else(|_| serde_json::json!({}));
             devices.push(BluetoothDevice {

@@ -15,44 +15,31 @@ pub struct ModuleManifest {
     pub installed_at: String,
 }
 
-/// Parsed install source.
-pub enum InstallSource {
-    GitHub {
-        user: String,
-        repo: String,
-        git_ref: Option<String>,
-    },
-    LocalPath(PathBuf),
-}
-
-/// Parse a source string into an `InstallSource`.
-pub fn parse_source(source: &str) -> Result<InstallSource> {
-    if let Some(rest) = source.strip_prefix("github:") {
-        let (repo_part, ref_part) = rest
-            .split_once('@')
-            .map(|(r, v)| (r, Some(v.to_string())))
-            .unwrap_or((rest, None));
-        let (user, repo) = repo_part.split_once('/').ok_or_else(|| {
-            anyhow::anyhow!(
-                "bread: invalid github source '{}'. Expected 'github:user/repo[@ref]'",
-                source
-            )
-        })?;
-        Ok(InstallSource::GitHub {
-            user: user.to_string(),
-            repo: repo.to_string(),
-            git_ref: ref_part,
-        })
-    } else if source.starts_with('/')
+/// Resolve a module source string to a local directory path.
+///
+/// Only local paths are accepted. Remote fetching (`github:user/repo`) was
+/// removed: it pulled arbitrary, unsandboxed Lua that the daemon then runs with
+/// full `bread.exec()` privileges as the user. Installing a remote module now
+/// requires cloning it yourself, so the review step stays in the user's hands.
+pub fn parse_source(source: &str) -> Result<PathBuf> {
+    if source.starts_with("github:") || source.starts_with("git:") {
+        bail!(
+            "bread: remote module installation has been removed for security \
+             (it ran unreviewed third-party Lua with full exec privileges). \
+             Clone the repository yourself, review it, then run \
+             'bread modules install /path/to/checkout'"
+        );
+    }
+    if source.starts_with('/')
         || source.starts_with("./")
         || source.starts_with("../")
         || source.starts_with('~')
     {
-        let expanded = bread_sync::config::expand_path(source);
-        Ok(InstallSource::LocalPath(expanded))
+        Ok(bread_shared::expand_path(source))
     } else {
         bail!(
-            "bread: invalid module source '{}'. Use 'github:user/repo' or an absolute/relative path",
+            "bread: invalid module source '{}'. Provide an absolute or relative \
+             path to a local module directory",
             source
         )
     }

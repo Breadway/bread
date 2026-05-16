@@ -161,37 +161,49 @@ async fn modules_reload_succeeds() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_status_uninitialized_when_no_config() -> Result<()> {
+async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
 
-    let result = harness.send_request("sync.status", json!({})).await?;
-    assert_eq!(
-        result.get("initialized").and_then(Value::as_bool),
-        Some(false)
-    );
+    // Event emitted before any reload.
+    harness
+        .send_request("emit", json!({"event": "bread.reload.before", "data": {}}))
+        .await?;
 
-    harness.shutdown();
-    Ok(())
-}
+    // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
+    // and re-registers subscriptions. A wedge here (lost Lua thread, deadlocked
+    // dispatch, paused-and-never-resumed pipeline) is the regression this guards
+    // — the previous suite only checked a single happy-path reload.
+    for _ in 0..3 {
+        let r = harness.send_request("modules.reload", json!({})).await?;
+        assert_eq!(r.get("ok").and_then(Value::as_bool), Some(true));
+    }
 
-#[tokio::test]
-async fn sync_status_reports_initialized_with_config() -> Result<()> {
-    let harness = TestHarness::spawn_with_sync_config("myhost", "git@example.com:user/repo.git")?;
-    harness.wait_until_ready().await?;
+    // Daemon must still answer control requests after the reload storm.
+    let ping = harness.send_request("ping", json!({})).await?;
+    assert_eq!(ping.get("ok").and_then(Value::as_bool), Some(true));
+    let health = harness.send_request("health", json!({})).await?;
+    assert_eq!(health.get("ok").and_then(Value::as_bool), Some(true));
 
-    let result = harness.send_request("sync.status", json!({})).await?;
-    assert_eq!(
-        result.get("initialized").and_then(Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        result.get("machine").and_then(Value::as_str),
-        Some("myhost")
-    );
-    assert_eq!(
-        result.get("remote").and_then(Value::as_str),
-        Some("git@example.com:user/repo.git")
+    // The pipeline must have resumed: an event emitted *after* the reloads
+    // still flows through normalization into the replay buffer.
+    harness
+        .send_request("emit", json!({"event": "bread.reload.after", "data": {}}))
+        .await?;
+    sleep(Duration::from_millis(100)).await;
+
+    let replay = harness
+        .send_request("events.replay", json!({"since_ms": 30_000}))
+        .await?;
+    let names: Vec<&str> = replay
+        .as_array()
+        .expect("replay result should be array")
+        .iter()
+        .filter_map(|e| e.get("event").and_then(Value::as_str))
+        .collect();
+    assert!(
+        names.contains(&"bread.reload.after"),
+        "event pipeline did not resume after reload; got {names:?}"
     );
 
     harness.shutdown();
@@ -385,14 +397,6 @@ struct TestHarness {
 
 impl TestHarness {
     fn spawn() -> Result<Self> {
-        Self::spawn_inner(None)
-    }
-
-    fn spawn_with_sync_config(machine: &str, remote_url: &str) -> Result<Self> {
-        Self::spawn_inner(Some((machine.to_string(), remote_url.to_string())))
-    }
-
-    fn spawn_inner(sync_config: Option<(String, String)>) -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -432,21 +436,6 @@ enabled = false
 enabled = false
 "#,
         )?;
-
-        if let Some((machine, remote_url)) = sync_config {
-            let sync_toml = format!(
-                r#"
-[remote]
-url = "{remote_url}"
-branch = "main"
-
-[machine]
-name = "{machine}"
-tags = []
-"#
-            );
-            fs::write(bread_cfg.join("sync.toml"), sync_toml)?;
-        }
 
         let socket_path = runtime_dir.join("bread").join("breadd.sock");
         let child = Command::new(env!("CARGO_BIN_EXE_breadd"))
