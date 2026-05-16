@@ -55,6 +55,8 @@ pub struct AdaptersConfig {
     pub power: PowerConfig,
     #[serde(default)]
     pub network: AdapterToggle,
+    #[serde(default)]
+    pub bluetooth: AdapterToggle,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -306,6 +308,7 @@ mod tests {
         assert!(cfg.adapters.udev.enabled);
         assert!(cfg.adapters.power.enabled);
         assert!(cfg.adapters.network.enabled);
+        assert!(cfg.adapters.bluetooth.enabled);
         assert_eq!(cfg.adapters.power.poll_interval_secs, 30);
         assert_eq!(cfg.events.dedup_window_ms, 100);
         assert_eq!(cfg.notifications.default_timeout_ms, 3000);
@@ -359,6 +362,9 @@ poll_interval_secs = 5
 [adapters.network]
 enabled = false
 
+[adapters.bluetooth]
+enabled = false
+
 [events]
 dedup_window_ms = 250
 
@@ -380,6 +386,7 @@ notify_send_path = "/usr/local/bin/notify-send"
         assert!(!cfg.adapters.power.enabled);
         assert_eq!(cfg.adapters.power.poll_interval_secs, 5);
         assert!(!cfg.adapters.network.enabled);
+        assert!(!cfg.adapters.bluetooth.enabled);
         assert_eq!(cfg.events.dedup_window_ms, 250);
         assert_eq!(cfg.notifications.default_timeout_ms, 1000);
         assert_eq!(cfg.notifications.default_urgency, "critical");

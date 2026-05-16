@@ -51,7 +51,7 @@ packaging/       Arch PKGBUILD and systemd user service
 
 The daemon is structured in four layers:
 
-- **Adapters** — interface with Hyprland IPC, udev, power state, and network interfaces
+- **Adapters** — interface with Hyprland IPC, udev, power state, network interfaces, and Bluetooth (BlueZ)
 - **Normalizer** — transforms raw adapter signals into semantic Bread events
 - **State engine** — maintains runtime state and dispatches events to subscribers
 - **Lua runtime** — loads your modules, registers handlers, executes automation
@@ -68,6 +68,7 @@ The daemon is structured in four layers:
 Optional but preferred:
 - UPower (for battery events via D-Bus rather than sysfs polling)
 - rtnetlink (for network events; falls back to sysfs polling without it)
+- BlueZ (for Bluetooth device events and control)
 
 ---
 
@@ -136,6 +137,9 @@ enabled = true
 poll_interval_secs = 30
 
 [adapters.network]
+enabled = true
+
+[adapters.bluetooth]
 enabled = true
 
 [events]
@@ -335,6 +339,8 @@ Events follow the namespace convention `bread.<subsystem>.<noun>.<verb>`.
 | `bread.power.battery.full` | Battery at 100% |
 | `bread.network.connected` | Network interface came online |
 | `bread.network.disconnected` | Network interface went offline |
+| `bread.bluetooth.device.paired` | Bluetooth device paired / discovered |
+| `bread.bluetooth.device.unpaired` | Bluetooth device removed from BlueZ |
 | `bread.profile.activated` | Profile switched |
 | `bread.notify.sent` | Desktop notification dispatched |
 
@@ -513,6 +519,44 @@ local clients    = bread.hyprland.clients()
 -- Subscribe to raw Hyprland events (bypass normalization)
 bread.hyprland.on_raw("activewindow", function(raw)
     -- raw is the unparsed string from Hyprland's event socket
+end)
+```
+
+### Bluetooth
+
+The `bread.bluetooth` namespace provides BlueZ control. All operations degrade gracefully when Bluetooth hardware is unavailable.
+
+```lua
+-- Power the adapter on or off
+bread.bluetooth.power(true)
+bread.bluetooth.power(false)
+
+-- Query current power state (returns true/false, or nil if unavailable)
+local on = bread.bluetooth.powered()
+
+-- Connect/disconnect a paired device by MAC address
+-- Fire-and-forget; result arrives as bread.device.connected/disconnected
+bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
+bread.bluetooth.disconnect("AA:BB:CC:DD:EE:FF")
+
+-- Start or stop device discovery
+bread.bluetooth.scan(true)
+bread.bluetooth.scan(false)
+
+-- List all devices known to BlueZ
+local devs = bread.bluetooth.devices()
+-- Returns nil if BlueZ is unavailable, otherwise:
+-- { { address, name, connected, paired }, ... }
+```
+
+Example — auto-connect headphones when Bluetooth powers on:
+
+```lua
+bread.state.watch("power.ac_connected", function(ac)
+    if ac then
+        bread.bluetooth.power(true)
+        bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
+    end
 end)
 ```
 

@@ -9,6 +9,7 @@ use std::process::Command;
 pub fn snapshot(manager: &str, dest: &Path) -> Result<bool> {
     let content = match manager {
         "pacman" => run_pacman()?,
+        "aur" => run_aur()?,
         "pip" => run_pip()?,
         "npm" => run_npm()?,
         "cargo" => run_cargo()?,
@@ -85,6 +86,17 @@ pub fn parse_cargo(content: &str) -> Vec<String> {
         .filter(|l| !l.starts_with(' ') && !l.trim().is_empty())
         .map(|l| l.split_whitespace().next().unwrap_or(l).to_string())
         .collect()
+}
+
+fn run_aur() -> Result<Option<String>> {
+    match Command::new("pacman").arg("-Qm").output() {
+        Ok(out) if out.status.success() => {
+            Ok(Some(String::from_utf8_lossy(&out.stdout).to_string()))
+        }
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn run_pacman() -> Result<Option<String>> {

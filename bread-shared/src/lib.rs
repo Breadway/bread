@@ -26,6 +26,8 @@ pub enum AdapterSource {
     /// Internal events synthesized by the daemon itself
     /// (e.g. `bread.profile.activated`, `bread.state.changed.*`).
     System,
+    /// BlueZ Bluetooth stack via D-Bus.
+    Bluetooth,
 }
 
 /// An unnormalized event as emitted by an adapter.
@@ -114,6 +116,10 @@ mod tests {
             serde_json::to_string(&AdapterSource::System).unwrap(),
             "\"system\""
         );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Bluetooth).unwrap(),
+            "\"bluetooth\""
+        );
     }
 
     #[test]
@@ -124,6 +130,7 @@ mod tests {
             AdapterSource::Power,
             AdapterSource::Network,
             AdapterSource::System,
+            AdapterSource::Bluetooth,
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let back: AdapterSource = serde_json::from_str(&s).unwrap();
@@ -205,7 +212,8 @@ mod tests {
         set.insert(AdapterSource::Hyprland);
         set.insert(AdapterSource::Hyprland);
         set.insert(AdapterSource::Udev);
-        assert_eq!(set.len(), 2);
+        set.insert(AdapterSource::Bluetooth);
+        assert_eq!(set.len(), 3);
         assert!(set.contains(&AdapterSource::Hyprland));
     }
 }

@@ -10,6 +10,7 @@ use tracing::info;
 use crate::core::config::Config;
 use crate::core::supervisor::spawn_supervised;
 
+pub mod bluetooth;
 pub mod hyprland;
 pub mod network;
 pub mod network_rtnetlink;
@@ -84,6 +85,12 @@ impl Manager {
                     self.config.adapters.power.poll_interval_secs,
                 ));
             }
+        }
+
+        if self.config.adapters.bluetooth.enabled {
+            let adapter = bluetooth::BluetoothAdapter::new();
+            adapter.enumerate_existing(&self.raw_tx).await;
+            self.spawn_adapter(adapter);
         }
 
         if self.config.adapters.network.enabled {

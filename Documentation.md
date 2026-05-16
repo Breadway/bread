@@ -10,6 +10,7 @@
 - [Sync: snapshot and restore](#sync-snapshot-and-restore)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
+  - [Bluetooth](#bluetooth)
 - [Dictionary: Built-in modules](#dictionary-built-in-modules)
 - [Dictionary: Event reference](#dictionary-event-reference)
 - [Dictionary: Runtime state schema](#dictionary-runtime-state-schema)
@@ -22,6 +23,8 @@ Bread is a reactive automation fabric for Linux desktops. The daemon (`breadd`) 
 - **Daemon** (`breadd`) — long-running Rust process; source of truth for runtime state
 - **Lua runtime** — dedicated thread inside the daemon; automation logic lives here
 - **CLI** (`bread`) — talks to the daemon over a Unix socket
+
+Adapters currently supported: Hyprland compositor IPC, Linux udev/netlink, UPower/sysfs power, rtnetlink/sysfs network, and BlueZ Bluetooth.
 
 If you are new to Bread, start with the quick walkthrough below, then jump to the full dictionary when you need exact API details.
 
@@ -402,6 +405,83 @@ bread.hyprland.on_raw("activewindow", function(raw)
 end)
 ```
 
+### Bluetooth
+
+The `bread.bluetooth` namespace provides control over the local Bluetooth adapter and its paired devices via BlueZ D-Bus. All functions degrade gracefully when BlueZ is unavailable — control functions log a warning and return `nil`, query functions return `nil`.
+
+#### `bread.bluetooth.power(enabled)`
+Power the Bluetooth adapter on (`true`) or off (`false`). Fire-and-forget.
+
+#### `bread.bluetooth.powered() -> bool | nil`
+Returns the current power state of the adapter, or `nil` if unavailable.
+
+```lua
+if bread.bluetooth.powered() then
+    bread.log("Bluetooth is on")
+end
+```
+
+#### `bread.bluetooth.connect(address)`
+Connect to a paired device by MAC address. Fire-and-forget — the result is delivered as a `bread.device.connected` event when the connection succeeds.
+
+```lua
+bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
+```
+
+#### `bread.bluetooth.disconnect(address)`
+Disconnect from a device by MAC address. Fire-and-forget — delivered as `bread.device.disconnected`.
+
+#### `bread.bluetooth.scan(enabled)`
+Start (`true`) or stop (`false`) device discovery.
+
+#### `bread.bluetooth.devices() -> table | nil`
+Returns all devices known to BlueZ as an array of tables. Returns `nil` if BlueZ is unavailable.
+
+```lua
+local devs = bread.bluetooth.devices()
+if devs then
+    for _, dev in ipairs(devs) do
+        bread.log(dev.name .. " " .. dev.address
+            .. (dev.connected and " [connected]" or ""))
+    end
+end
+```
+
+Each device table:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `address` | string | Bluetooth MAC address, e.g. `"AA:BB:CC:DD:EE:FF"` |
+| `name` | string | Device name from BlueZ (Alias or Name property) |
+| `connected` | bool | Whether the device is currently connected |
+| `paired` | bool | Whether the device is paired |
+
+#### Example: auto-connect headphones on AC power
+
+```lua
+local M = bread.module({ name = "headphones", version = "1.0.0" })
+local HEADPHONES = "AA:BB:CC:DD:EE:FF"
+
+function M.on_load()
+    bread.state.watch("power.ac_connected", function(ac)
+        if ac then
+            bread.bluetooth.power(true)
+            bread.bluetooth.connect(HEADPHONES)
+        end
+    end)
+end
+
+return M
+```
+
+#### Example: turn off Bluetooth on battery
+
+```lua
+bread.state.watch("power.ac_connected", function(ac)
+    bread.bluetooth.power(ac)
+end)
+```
+
 ### Module lifecycle hooks
 
 All hooks are optional.
@@ -646,7 +726,7 @@ Events are delivered as a `BreadEvent`:
 |-------|------|
 | `bread.system.startup` | `{}` |
 
-#### Devices (udev)
+#### Devices (udev / Bluetooth)
 
 | Event | Data |
 |-------|------|
@@ -656,6 +736,26 @@ Events are delivered as a `BreadEvent`:
 | `bread.device.<device>.disconnected` | `{ id, device }` |
 
 `device` is the name resolved from `~/.config/bread/devices.lua`. Devices that match no rule use `"unknown"`. The generic `bread.device.connected` event carries the full payload including `raw` udev properties; the named companion event carries only `id` and `device`.
+
+Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bread.device.disconnected`. They can be distinguished by `event.data.subsystem`:
+
+| `subsystem` | Source | Unique identifier field |
+|-------------|--------|------------------------|
+| `"usb"`, `"input"`, etc. | udev | `vendor_id` + `product_id` |
+| `"bluetooth"` | BlueZ | `address` (MAC address) |
+
+#### Bluetooth (BlueZ)
+
+| Event | Data |
+|-------|------|
+| `bread.device.connected` | `{ id, device, name, address, subsystem: "bluetooth", raw }` |
+| `bread.device.disconnected` | same |
+| `bread.bluetooth.device.paired` | `{ id, name, address, subsystem: "bluetooth", raw }` |
+| `bread.bluetooth.device.unpaired` | `{ id, address, subsystem: "bluetooth", raw }` |
+
+`bread.bluetooth.device.paired` fires when BlueZ first learns about a device (new pairing or adapter restart). It does not mean the device is connected. `bread.device.connected` fires when the device profile actually connects.
+
+`name` may be `"unknown"` on `bread.device.connected` events emitted from `PropertiesChanged` signals, since BlueZ only includes changed properties. It is always populated on `bread.bluetooth.device.paired` and on events from the initial enumeration at startup.
 
 #### Hyprland
 
