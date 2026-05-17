@@ -1,11 +1,10 @@
 [package]
 name = "breadd"
-version = "1.0.0"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]
 bread-shared = { path = "../bread-shared" }
-bread-sync = { path = "../bread-sync" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
