@@ -64,48 +64,48 @@ pub struct ExportManifest {
 
 /// Config directories always included in the export (if they exist on disk).
 static BUILTIN_CONFIGS: &[(&str, &str)] = &[
-    ("hypr",      "~/.config/hypr"),
-    ("fish",      "~/.config/fish"),
-    ("kitty",     "~/.config/kitty"),
-    ("nvim",      "~/.config/nvim"),
-    ("ags",       "~/.config/ags"),
-    ("wofi",      "~/.config/wofi"),
-    ("waybar",    "~/.config/waybar"),
-    ("dunst",     "~/.config/dunst"),
-    ("mako",      "~/.config/mako"),
-    ("hyprlock",  "~/.config/hyprlock"),
+    ("hypr", "~/.config/hypr"),
+    ("fish", "~/.config/fish"),
+    ("kitty", "~/.config/kitty"),
+    ("nvim", "~/.config/nvim"),
+    ("ags", "~/.config/ags"),
+    ("wofi", "~/.config/wofi"),
+    ("waybar", "~/.config/waybar"),
+    ("dunst", "~/.config/dunst"),
+    ("mako", "~/.config/mako"),
+    ("hyprlock", "~/.config/hyprlock"),
     ("hyprpaper", "~/.config/hyprpaper"),
-    ("swaylock",  "~/.config/swaylock"),
-    ("wlogout",   "~/.config/wlogout"),
-    ("swappy",    "~/.config/swappy"),
-    ("btop",      "~/.config/btop"),
-    ("waypaper",  "~/.config/waypaper"),
-    ("wal",       "~/.config/wal"),
-    ("gtk-3.0",   "~/.config/gtk-3.0"),
-    ("gtk-4.0",   "~/.config/gtk-4.0"),
-    ("keyd",      "~/.config/keyd"),
+    ("swaylock", "~/.config/swaylock"),
+    ("wlogout", "~/.config/wlogout"),
+    ("swappy", "~/.config/swappy"),
+    ("btop", "~/.config/btop"),
+    ("waypaper", "~/.config/waypaper"),
+    ("wal", "~/.config/wal"),
+    ("gtk-3.0", "~/.config/gtk-3.0"),
+    ("gtk-4.0", "~/.config/gtk-4.0"),
+    ("keyd", "~/.config/keyd"),
     ("autostart", "~/.config/autostart"),
 ];
 
 /// Standalone dotfiles captured as individual files: (staging-name, source-path).
 static BUILTIN_DOTFILES: &[(&str, &str)] = &[
-    (".gitconfig",     "~/.gitconfig"),
+    (".gitconfig", "~/.gitconfig"),
     ("user-dirs.dirs", "~/.config/user-dirs.dirs"),
-    ("mimeapps.list",  "~/.config/mimeapps.list"),
-    ("ssh_config",     "~/.ssh/config"),
-    (".zshrc",         "~/.zshrc"),
-    (".zprofile",      "~/.zprofile"),
-    (".zshenv",        "~/.zshenv"),
+    ("mimeapps.list", "~/.config/mimeapps.list"),
+    ("ssh_config", "~/.ssh/config"),
+    (".zshrc", "~/.zshrc"),
+    (".zprofile", "~/.zprofile"),
+    (".zshenv", "~/.zshenv"),
 ];
 
 /// System-level directories. World-readable ones are copied directly;
 /// root-only ones (networkmanager, bluetooth) require running with sudo.
 static SYSTEM_PATHS: &[(&str, &str)] = &[
-    ("udev",           "/etc/udev/rules.d"),
-    ("modprobe",       "/etc/modprobe.d"),
-    ("sysctl",         "/etc/sysctl.d"),
+    ("udev", "/etc/udev/rules.d"),
+    ("modprobe", "/etc/modprobe.d"),
+    ("sysctl", "/etc/sysctl.d"),
     ("networkmanager", "/etc/NetworkManager/system-connections"),
-    ("bluetooth",      "/var/lib/bluetooth"),
+    ("bluetooth", "/var/lib/bluetooth"),
 ];
 
 /// Directories excluded from every recursive copy.
@@ -120,18 +120,22 @@ static DEFAULT_EXCLUDES: &[&str] = &[
 
 /// Directories skipped when searching for git repos.
 static GIT_SKIP_DIRS: &[&str] = &[
-    ".local", "Nextcloud", "target", "node_modules", "__pycache__",
-    ".cache", "snap", "flatpak", "@girs", "Steam",
+    ".local",
+    "Nextcloud",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".cache",
+    "snap",
+    "flatpak",
+    "@girs",
+    "Steam",
 ];
 
 // ── stage_export ────────────────────────────────────────────────────────────
 
 /// Build a self-contained snapshot directory at `staging`.
-pub fn stage_export(
-    cfg_dir: &Path,
-    config: &SyncConfig,
-    staging: &Path,
-) -> Result<ExportManifest> {
+pub fn stage_export(cfg_dir: &Path, config: &SyncConfig, staging: &Path) -> Result<ExportManifest> {
     fs::create_dir_all(staging)?;
 
     let excludes: Vec<String> = DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect();
@@ -238,8 +242,7 @@ pub fn stage_export(
     let fonts_src = expand_path("~/.local/share/fonts");
     let fonts_dst = staging.join("local-fonts");
     if fonts_src.exists() {
-        sync_dir(&fonts_src, &fonts_dst, &excludes)
-            .context("failed to snapshot fonts")?;
+        sync_dir(&fonts_src, &fonts_dst, &excludes).context("failed to snapshot fonts")?;
         path_map.push(PathRecord {
             staging: "local-fonts".to_string(),
             original: "~/.local/share/fonts".to_string(),
@@ -292,9 +295,7 @@ pub fn stage_export(
             match packages::snapshot(manager, &dest_file) {
                 Ok(true) => included_managers.push(manager.clone()),
                 Ok(false) => {}
-                Err(e) => eprintln!(
-                    "bread: warning: package snapshot for {manager} failed: {e}"
-                ),
+                Err(e) => eprintln!("bread: warning: package snapshot for {manager} failed: {e}"),
             }
         }
     }
@@ -307,10 +308,18 @@ pub fn stage_export(
     // 11. Git repositories — find all repos with a remote, commit+push each
     let nc_dirs = nextcloud_sync_dirs(&home);
     if !nc_dirs.is_empty() {
-        let labels: Vec<_> = nc_dirs.iter()
-            .map(|p| p.strip_prefix(&home).map(|r| format!("~/{}", r.display())).unwrap_or_else(|_| p.display().to_string()))
+        let labels: Vec<_> = nc_dirs
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&home)
+                    .map(|r| format!("~/{}", r.display()))
+                    .unwrap_or_else(|_| p.display().to_string())
+            })
             .collect();
-        eprintln!("bread: skipping Nextcloud-tracked folders: {}", labels.join(", "));
+        eprintln!(
+            "bread: skipping Nextcloud-tracked folders: {}",
+            labels.join(", ")
+        );
     }
     let repos = find_git_repos(&home);
     commit_and_push_repos(&repos, &home);
@@ -565,10 +574,7 @@ fn commit_and_push_repos(repos: &[GitRepoRecord], home: &Path) {
             .output();
         match push {
             Ok(o) if o.status.success() => eprintln!("ok"),
-            Ok(o) => eprintln!(
-                "failed: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
+            Ok(o) => eprintln!("failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
             Err(e) => eprintln!("failed: {}", e),
         }
     }
@@ -611,7 +617,15 @@ fn find_git_repos(home: &Path) -> Vec<GitRepoRecord> {
     walk_repos(home, home, 0, 1, &mut repos, &nc_dirs);
 
     // Deeper search in common project directories
-    for subdir in &["Projects", "Documents", "src", "dev", "code", "repos", "builds"] {
+    for subdir in &[
+        "Projects",
+        "Documents",
+        "src",
+        "dev",
+        "code",
+        "repos",
+        "builds",
+    ] {
         let p = home.join(subdir);
         if p.exists() {
             walk_repos(&p, home, 0, 3, &mut repos, &nc_dirs);
@@ -630,7 +644,14 @@ fn find_git_repos(home: &Path) -> Vec<GitRepoRecord> {
     repos
 }
 
-fn walk_repos(dir: &Path, home: &Path, depth: u32, max_depth: u32, repos: &mut Vec<GitRepoRecord>, nc_dirs: &[PathBuf]) {
+fn walk_repos(
+    dir: &Path,
+    home: &Path,
+    depth: u32,
+    max_depth: u32,
+    repos: &mut Vec<GitRepoRecord>,
+    nc_dirs: &[PathBuf],
+) {
     // Skip anything inside a Nextcloud sync root
     if nc_dirs.iter().any(|nc| dir.starts_with(nc)) {
         return;
@@ -655,7 +676,11 @@ fn walk_repos(dir: &Path, home: &Path, depth: u32, max_depth: u32, repos: &mut V
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| dir.to_string_lossy().to_string());
 
-                repos.push(GitRepoRecord { path: rel, remote, branch });
+                repos.push(GitRepoRecord {
+                    path: rel,
+                    remote,
+                    branch,
+                });
             }
         }
         return; // don't recurse into git repos (skip submodules)
@@ -700,7 +725,9 @@ fn install_packages_from(packages_dir: &Path) -> Result<()> {
     let cargo_file = packages_dir.join("cargo.txt");
     if cargo_file.exists() {
         for pkg in packages::parse_cargo(&fs::read_to_string(&cargo_file)?) {
-            let _ = std::process::Command::new("cargo").args(["install", &pkg]).status();
+            let _ = std::process::Command::new("cargo")
+                .args(["install", &pkg])
+                .status();
         }
     }
     let pip_file = packages_dir.join("pip.txt");
@@ -713,7 +740,9 @@ fn install_packages_from(packages_dir: &Path) -> Result<()> {
     let npm_file = packages_dir.join("npm.txt");
     if npm_file.exists() {
         for pkg in packages::parse_npm(&fs::read_to_string(&npm_file)?) {
-            let _ = std::process::Command::new("npm").args(["install", "-g", &pkg]).status();
+            let _ = std::process::Command::new("npm")
+                .args(["install", "-g", &pkg])
+                .status();
         }
     }
     Ok(())
@@ -787,7 +816,9 @@ fn generate_restore_sh(manifest: &ExportManifest) -> String {
             s.push_str("echo \"  cargo:   grep -v '^ ' \\\"$RESTORE_DIR/packages/cargo.txt\\\" | awk '{print \\$1}' | xargs -I{} cargo install {}\"\n");
         }
         if manifest.packages.contains(&"pip".to_string()) {
-            s.push_str("echo \"  pip:     pip install --user -r \\\"$RESTORE_DIR/packages/pip.txt\\\"\"\n");
+            s.push_str(
+                "echo \"  pip:     pip install --user -r \\\"$RESTORE_DIR/packages/pip.txt\\\"\"\n",
+            );
         }
         if manifest.packages.contains(&"npm".to_string()) {
             s.push_str("echo \"  npm:     awk -F/ '{print \\$NF}' \\\"$RESTORE_DIR/packages/npm.txt\\\" | xargs npm install -g\"\n");
@@ -832,9 +863,7 @@ fn generate_restore_sh(manifest: &ExportManifest) -> String {
             if !parent.is_empty() {
                 s.push_str(&format!("mkdir -p \"$HOME/{parent}\"\n"));
             }
-            s.push_str(&format!(
-                "if [ ! -d \"{dest}/.git\" ]; then\n"
-            ));
+            s.push_str(&format!("if [ ! -d \"{dest}/.git\" ]; then\n"));
             s.push_str(&format!(
                 "  git clone --branch {branch} {remote} \"{dest}\" && echo \"[OK] ~/{}\"\n",
                 repo.path

@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "bread-cli"
-version = "1.0.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "bread-shared",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "bread-shared"
-version = "1.0.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "breadd"
-version = "1.0.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
