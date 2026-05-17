@@ -36,7 +36,7 @@ jobs:
       - name: Package artifacts
         run: |
           mkdir -p dist
-          tar -czf dist/bread-ubuntu-latest.tgz target/release/breadd target/release/bread-cli
+          tar -czf dist/bread-ubuntu-latest.tgz target/release/breadd target/release/bread
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
