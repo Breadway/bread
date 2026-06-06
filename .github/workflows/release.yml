@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  DL_DIR: /srv/breadway-dl
+  ECOSYSTEM_DIR: /home/breadway/Projects/bread-ecosystem
+
+jobs:
+  build:
+    runs-on: [self-hosted, hestia]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build
+        run: cargo build --release --locked
+
+      - name: test
+        run: cargo test --release --locked --workspace
+
+      - name: prepare artifacts
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG_DIR="${DL_DIR}/bread/${VERSION}"
+          mkdir -p "${PKG_DIR}"
+          for bin in breadd bread; do
+            cp "target/release/${bin}" "${PKG_DIR}/${bin}-x86_64"
+            strip "${PKG_DIR}/${bin}-x86_64"
+            sha256sum "${PKG_DIR}/${bin}-x86_64" | awk '{print $1}' \
+              > "${PKG_DIR}/${bin}-x86_64.sha256"
+          done
+          cp packaging/systemd/breadd.service "${PKG_DIR}/"
+          cp bakery.toml "${PKG_DIR}/bakery.toml"
+          ln -sfn "${PKG_DIR}" "${DL_DIR}/bread/latest"
+
+      - name: ensure bread-ecosystem
+        run: |
+          if [[ -d "${ECOSYSTEM_DIR}/.git" ]]; then
+            git -C "${ECOSYSTEM_DIR}" pull --ff-only
+          else
+            mkdir -p "$(dirname "${ECOSYSTEM_DIR}")"
+            git clone https://github.com/Breadway/bread-ecosystem.git "${ECOSYSTEM_DIR}"
+          fi
+
+      - name: regenerate index.json
+        run: bash "${ECOSYSTEM_DIR}/scripts/gen-index.sh"
+
+      - name: upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG_DIR="${DL_DIR}/bread/${VERSION}"
+          gh release upload "${GITHUB_REF_NAME}" \
+            "${PKG_DIR}/breadd-x86_64" \
+            "${PKG_DIR}/bread-x86_64" \
+            "${PKG_DIR}/breadd-x86_64.sha256" \
+            "${PKG_DIR}/bread-x86_64.sha256" \
+            --clobber

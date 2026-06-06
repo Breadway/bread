@@ -1,0 +1,18 @@
+name = "bread"
+description = "Reactive automation daemon and CLI for Linux desktops"
+binaries = ["breadd", "bread"]
+system_deps = []
+bread_deps = []
+
+[[service]]
+unit = "breadd.service"
+enable = true
+
+[config]
+dir = "~/.config/bread"
+example = "breadd.toml"
+
+[install]
+post_install = [
+    "systemctl --user is-active --quiet breadd || systemctl --user start breadd",
+]
