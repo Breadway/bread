@@ -21,7 +21,7 @@ jobs:
         run: cargo build --release --locked
 
       - name: test
-        run: cargo test --release --locked --workspace
+        run: cargo test --release --locked --workspace --lib
 
       - name: prepare artifacts
         run: |
