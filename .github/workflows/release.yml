@@ -39,7 +39,7 @@ jobs:
           done
           cp packaging/systemd/breadd.service "${PKG_DIR}/"
           cp bakery.toml "${PKG_DIR}/bakery.toml"
-          ln -sfn "${PKG_DIR}" "${DL_DIR}/bread/latest"
+          ln -sfn "${VERSION}" "${DL_DIR}/bread/latest"
 
       - name: ensure bread-ecosystem
         run: |
