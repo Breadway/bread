@@ -10,7 +10,7 @@ license=('MIT')
 # mlua builds Lua from vendored C source. makepkg's default -flto=auto would
 # emit GCC LTO bitcode into liblua5.4.a, which the Rust (lld) link can't read,
 # leaving all lua_* symbols undefined. Disable LTO for a clean static link.
-options=(!lto)
+options=(!lto !debug)
 depends=('glibc' 'libgit2')
 optdepends=(
   'libnotify: desktop notifications via bread.notify()'
