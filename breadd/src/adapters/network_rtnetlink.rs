@@ -16,16 +16,9 @@ pub struct RtnetlinkAdapter;
 
 impl RtnetlinkAdapter {
     pub fn new() -> Result<Self> {
-        // Try to create a connection to validate presence of rtnetlink
-        let conn = new_connection();
-        match conn {
-            Ok((connection, _handle, _messages)) => {
-                // Spawn and immediately drop the connection task; we just validated
-                tokio::spawn(connection);
-                Ok(Self)
-            }
-            Err(e) => Err(anyhow!(e)),
-        }
+        // Validate that rtnetlink is available; drop the result immediately.
+        new_connection().map_err(|e| anyhow!(e))?;
+        Ok(Self)
     }
 }
 

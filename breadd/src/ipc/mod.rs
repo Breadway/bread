@@ -93,6 +93,14 @@ impl Server {
 
         info!(socket = %self.socket_path.display(), "ipc server listening");
 
+        // Emit the startup event after the socket is bound so that clients
+        // connecting immediately after the socket appears can subscribe and receive it.
+        let _ = self.emit_tx.send(BreadEvent::new(
+            "bread.system.startup",
+            AdapterSource::System,
+            serde_json::json!({}),
+        ));
+
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -124,7 +132,22 @@ impl Server {
                 continue;
             }
 
-            let req: IpcRequest = serde_json::from_str(&line)?;
+            let req: IpcRequest = match serde_json::from_str(&line) {
+                Ok(r) => r,
+                Err(e) => {
+                    let err_resp = IpcResponse {
+                        id: "?".to_string(),
+                        result: None,
+                        error: Some(format!("parse error: {e}")),
+                    };
+                    write_half
+                        .write_all(
+                            format!("{}\n", serde_json::to_string(&err_resp)?).as_bytes(),
+                        )
+                        .await?;
+                    continue;
+                }
+            };
             if req.method == "events.subscribe" {
                 let filter = req
                     .params
@@ -206,12 +229,8 @@ impl Server {
             }
             "profile.list" => {
                 let full = self.state_handle.state_dump().await;
-                let profiles = full
-                    .get("profile")
-                    .and_then(|v| v.get("profiles"))
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                Ok(profiles)
+                let profile = full.get("profile").cloned().unwrap_or_else(|| json!({}));
+                Ok(profile)
             }
             "profile.activate" => {
                 let Some(name) = req.params.get("name").and_then(Value::as_str) else {
@@ -319,14 +338,8 @@ impl Server {
 }
 
 fn matches_filter(event_name: &str, pattern: &str) -> bool {
-    // Delegate to the same glob logic used by the subscription table so that
-    // `bread events --filter "bread.device.**"` behaves identically to
-    // `bread.on("bread.device.**", ...)` in Lua.
-    if pattern.ends_with(".*") {
-        let prefix = &pattern[..pattern.len() - 1];
-        return event_name.starts_with(prefix);
-    }
-
+    // Delegates to the same glob logic as the subscription table:
+    // `*` matches one segment (no dot-crossing), `**` matches any depth.
     if let Some(prefix) = pattern.strip_suffix(".**") {
         if event_name == prefix || event_name.starts_with(&format!("{prefix}.")) {
             return true;
@@ -400,7 +413,7 @@ mod tests {
     #[test]
     fn filter_dot_star_matches_one_segment_only() {
         assert!(matches_filter("bread.device.connected", "bread.device.*"));
-        assert!(matches_filter(
+        assert!(!matches_filter(
             "bread.device.dock.connected",
             "bread.device.*"
         ));
@@ -442,11 +455,9 @@ mod tests {
     }
 
     #[test]
-    fn filter_dot_star_at_end_acts_as_prefix_match() {
-        // `bread.*` ending the pattern is treated as a prefix match, so
-        // matches everything under `bread.` regardless of depth. This is
-        // consistent with the subscription table's pattern matcher.
+    fn filter_dot_star_matches_exactly_one_segment() {
         assert!(matches_filter("bread.alpha", "bread.*"));
-        assert!(matches_filter("bread.alpha.beta", "bread.*"));
+        assert!(!matches_filter("bread.alpha.beta", "bread.*"));
+        assert!(!matches_filter("bread", "bread.*"));
     }
 }

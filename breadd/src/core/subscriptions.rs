@@ -67,11 +67,6 @@ impl SubscriptionTable {
 }
 
 fn matches_pattern(pattern: &str, event_name: &str) -> bool {
-    if pattern.ends_with(".*") {
-        let prefix = &pattern[..pattern.len() - 1];
-        return event_name.starts_with(prefix);
-    }
-
     if let Some(prefix) = pattern.strip_suffix(".**") {
         if event_name == prefix {
             return true;
@@ -150,11 +145,11 @@ mod tests {
 
     #[test]
     fn single_segment_wildcard() {
-        assert!(matches_pattern(
+        assert!(matches_pattern("bread.device.*", "bread.device.foo"));
+        assert!(!matches_pattern(
             "bread.device.*",
             "bread.device.dock.connected"
         ));
-        assert!(matches_pattern("bread.device.*", "bread.device.foo"));
         assert!(!matches_pattern("bread.device.*", "bread.device"));
     }
 

@@ -315,6 +315,9 @@ async fn handle_command(
             let mut guard = state.write().await;
             if guard.profile.active != name {
                 let previous = guard.profile.active.clone();
+                if guard.profile.history.len() >= 50 {
+                    guard.profile.history.remove(0);
+                }
                 guard.profile.history.push(previous);
                 guard.profile.active = name;
             }
@@ -450,6 +453,9 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
             if let Some(name) = event.data.get("name").and_then(Value::as_str) {
                 if state.profile.active != name {
                     let previous = state.profile.active.clone();
+                    if state.profile.history.len() >= 50 {
+                        state.profile.history.remove(0);
+                    }
                     state.profile.history.push(previous);
                     state.profile.active = name.to_string();
                 }

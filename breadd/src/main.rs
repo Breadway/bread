@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use anyhow::Result;
-use bread_shared::{AdapterSource, BreadEvent, RawEvent};
+use bread_shared::{BreadEvent, RawEvent};
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
@@ -104,12 +104,6 @@ async fn main() -> Result<()> {
             }
         });
     }
-
-    let _ = normalized_tx.send(BreadEvent::new(
-        "bread.system.startup",
-        AdapterSource::System,
-        serde_json::json!({}),
-    ));
 
     let ipc_server = ipc::Server::new(
         config.socket_path(),

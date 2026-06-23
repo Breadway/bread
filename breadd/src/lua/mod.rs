@@ -254,23 +254,23 @@ impl LuaEngine {
         self.lua = Lua::new();
         self.handlers
             .lock()
-            .expect("lua handlers mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.watch_ids
             .lock()
-            .expect("lua watch ids mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.modules
             .lock()
-            .expect("lua modules mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.module_decls
             .lock()
-            .expect("lua module decls mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clear();
         self.module_order
             .lock()
-            .expect("lua module order mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clear();
 
         self.install_api()?;
@@ -1138,7 +1138,7 @@ impl LuaEngine {
         let mut decl_map = self
             .module_decls
             .lock()
-            .expect("module decls mutex poisoned");
+            .unwrap_or_else(|e| e.into_inner());
         decl_map.clear();
         for decl in &ordered {
             decl_map.insert(decl.name.clone(), decl.clone());
@@ -1176,7 +1176,7 @@ impl LuaEngine {
         *self
             .module_order
             .lock()
-            .expect("module order mutex poisoned") = load_order;
+            .unwrap_or_else(|e| e.into_inner()) = load_order;
 
         Ok(())
     }
@@ -1229,7 +1229,7 @@ impl LuaEngine {
 
     fn handle_event(&self, id: SubscriptionId, event: BreadEvent) -> Result<()> {
         let (callback, filter, raw_kind, kind, module) = {
-            let handlers = self.handlers.lock().expect("lua handlers mutex poisoned");
+            let handlers = self.handlers.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = handlers.get(&id) else {
                 return Ok(());
             };
@@ -1290,7 +1290,7 @@ impl LuaEngine {
 
     fn handle_timer(&self, id: TimerId) -> Result<()> {
         let (callback, repeating) = {
-            let timers = self.timers.lock().expect("lua timers mutex poisoned");
+            let timers = self.timers.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = timers.get(&id) else {
                 return Ok(());
             };
@@ -1334,7 +1334,7 @@ impl LuaEngine {
         let order = self
             .module_order
             .lock()
-            .expect("module order mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
         for name in order {
             if let Some(hook) = self.get_module_hook(&name, "on_reload") {
@@ -1356,7 +1356,7 @@ impl LuaEngine {
         let order = self
             .module_order
             .lock()
-            .expect("module order mutex poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone();
         for name in order.into_iter().rev() {
             if let Some(hook) = self.get_module_hook(&name, "on_unload") {
@@ -1792,6 +1792,7 @@ fn state_value_to_lua<'lua>(
             break g;
         }
         std::hint::spin_loop();
+        std::thread::yield_now();
     };
     let mut value =
         serde_json::to_value(&*snapshot).map_err(|e| LuaError::external(e.to_string()))?;
@@ -1820,6 +1821,7 @@ fn module_store_get(
             break g;
         }
         std::hint::spin_loop();
+        std::thread::yield_now();
     };
     let entry = guard.modules.iter().find(|m| m.name == module)?;
     entry.store.get(key).cloned()
@@ -1836,6 +1838,7 @@ fn module_store_set(
             break g;
         }
         std::hint::spin_loop();
+        std::thread::yield_now();
     };
     if let Some(entry) = guard.modules.iter_mut().find(|m| m.name == module) {
         entry.store.insert(key, value);
@@ -2210,7 +2213,13 @@ fn hyprland_request_socket() -> Result<PathBuf> {
             hypr_dir.display()
         )),
         1 => Ok(sockets.remove(0)),
-        _ => Ok(sockets.remove(0)),
+        _ => {
+            warn!(
+                "multiple Hyprland instances found in {}; using the first one",
+                hypr_dir.display()
+            );
+            Ok(sockets.remove(0))
+        }
     }
 }
 
@@ -2274,11 +2283,17 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
+        let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("bluetooth action thread")
-            .block_on(factory());
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(error = %e, "bluetooth action: failed to build tokio runtime");
+                return;
+            }
+        };
+        rt.block_on(factory());
     });
 }
 
@@ -2292,11 +2307,13 @@ where
 {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let result = tokio::runtime::Builder::new_current_thread()
+        let result = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("bluetooth query thread")
-            .block_on(factory());
+        {
+            Ok(rt) => rt.block_on(factory()),
+            Err(e) => Err(anyhow::anyhow!("bluetooth query: failed to build tokio runtime: {e}")),
+        };
         let _ = tx.send(result);
     });
     rx.recv()

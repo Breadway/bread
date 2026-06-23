@@ -15,9 +15,11 @@ use super::Adapter;
 pub struct UPowerAdapter;
 
 impl UPowerAdapter {
-    pub fn new() -> Result<Self> {
-        // Attempt to connect to system bus to validate availability
-        // We don't actually open the connection here because zbus::Connection::system() is async.
+    /// Try to connect to the D-Bus system bus. Returns Err if D-Bus is unavailable.
+    pub async fn probe() -> Result<Self> {
+        let _ = zbus::Connection::system()
+            .await
+            .map_err(|e| anyhow::anyhow!("D-Bus system bus unavailable: {e}"))?;
         Ok(Self)
     }
 }

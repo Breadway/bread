@@ -374,6 +374,18 @@ async fn stream_events(
         .await?;
 
     let mut lines = BufReader::new(read_half).lines();
+
+    // Consume the subscribe ack before entering the event loop.
+    match lines.next_line().await? {
+        Some(ack) => {
+            let v: Value = serde_json::from_str(&ack)?;
+            if let Some(err) = v.get("error").and_then(Value::as_str) {
+                anyhow::bail!("{err}");
+            }
+        }
+        None => anyhow::bail!("daemon closed connection during subscribe"),
+    }
+
     while let Some(line) = lines.next_line().await? {
         let value: Value = serde_json::from_str(&line)?;
         if raw_json {
@@ -507,23 +519,17 @@ async fn watch_reload(socket: &Path) -> Result<()> {
 }
 
 async fn print_doctor(socket: &Path) -> Result<()> {
-    let stream = match UnixStream::connect(socket).await {
-        Ok(stream) => stream,
-        Err(err) => {
-            if err.kind() == io::ErrorKind::NotFound {
-                println!("bread doctor");
-                println!("  daemon     ✗ not running");
-                println!("  socket     {}  (not found)", socket.display());
-                println!();
-                println!("  start the daemon:   systemctl --user start breadd");
-                println!("  view logs:          journalctl --user -u breadd -f");
-                return Ok(());
-            }
-            return Err(err.into());
-        }
-    };
+    if !socket.exists() {
+        println!("bread doctor");
+        println!("  daemon     ✗ not running");
+        println!("  socket     {}  (not found)", socket.display());
+        println!();
+        println!("  start the daemon:   systemctl --user start breadd");
+        println!("  view logs:          journalctl --user -u breadd -f");
+        return Ok(());
+    }
 
-    let response = send_request_with_stream(stream, "health", json!({})).await?;
+    let response = send_request(socket, "health", json!({})).await?;
     render_doctor(&response);
     Ok(())
 }
@@ -583,33 +589,6 @@ fn render_doctor(health: &Value) {
             }
         }
     }
-}
-
-async fn send_request_with_stream(
-    stream: UnixStream,
-    method: &str,
-    params: Value,
-) -> Result<Value> {
-    let (read_half, mut write_half) = stream.into_split();
-    let request = json!({
-        "id": "1",
-        "method": method,
-        "params": params,
-    });
-
-    write_half
-        .write_all(format!("{}\n", serde_json::to_string(&request)?).as_bytes())
-        .await?;
-
-    let mut lines = BufReader::new(read_half).lines();
-    let Some(line) = lines.next_line().await? else {
-        anyhow::bail!("daemon closed connection without response");
-    };
-    let response: Value = serde_json::from_str(&line)?;
-    if let Some(error) = response.get("error").and_then(Value::as_str) {
-        anyhow::bail!(error.to_string());
-    }
-    Ok(response.get("result").cloned().unwrap_or_else(|| json!({})))
 }
 
 fn config_directory() -> PathBuf {

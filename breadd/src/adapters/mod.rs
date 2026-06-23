@@ -76,14 +76,15 @@ impl Manager {
         }
 
         if self.config.adapters.power.enabled {
-            // Prefer UPower DBus adapter; fall back to sysfs poller
-            let upower = power_upower::UPowerAdapter::new();
-            if let Ok(adapter) = upower {
-                self.spawn_adapter(adapter);
-            } else {
-                self.spawn_adapter(power::PowerAdapter::new(
-                    self.config.adapters.power.poll_interval_secs,
-                ));
+            // Prefer UPower D-Bus adapter; fall back to sysfs poller if D-Bus is unavailable.
+            match power_upower::UPowerAdapter::probe().await {
+                Ok(adapter) => self.spawn_adapter(adapter),
+                Err(e) => {
+                    info!("upower unavailable ({e}), falling back to sysfs power poller");
+                    self.spawn_adapter(power::PowerAdapter::new(
+                        self.config.adapters.power.poll_interval_secs,
+                    ));
+                }
             }
         }
 

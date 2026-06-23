@@ -134,9 +134,6 @@ pub fn modules_dir() -> PathBuf {
     if let Some(cfg) = dirs::config_dir() {
         return cfg.join("bread").join("modules");
     }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("bread").join("modules");
-    }
     if let Ok(home) = std::env::var("HOME") {
         return PathBuf::from(home)
             .join(".config")

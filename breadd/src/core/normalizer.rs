@@ -382,22 +382,39 @@ impl EventNormalizer {
     }
 
     fn normalize_network(&self, raw: &RawEvent) -> Vec<BreadEvent> {
-        let online = raw
-            .payload
-            .get("online")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        // The sysfs NetworkAdapter puts `online: bool` directly in the payload.
+        // The rtnetlink adapter omits it; derive connectivity from the event kind instead.
+        let online = if let Some(v) = raw.payload.get("online").and_then(Value::as_bool) {
+            v
+        } else {
+            match raw.kind.as_str() {
+                "link.up" | "address.added" => true,
+                "link.down" | "address.removed" => false,
+                "route.default.changed" => raw
+                    .payload
+                    .get("gateway")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false),
+                _ => return vec![],
+            }
+        };
+
         let name = if online {
             "bread.network.connected"
         } else {
             "bread.network.disconnected"
         };
 
+        let mut data = raw.payload.clone();
+        if let Some(obj) = data.as_object_mut() {
+            obj.insert("online".to_string(), Value::Bool(online));
+        }
+
         vec![BreadEvent {
             event: name.to_string(),
             timestamp: raw.timestamp,
             source: AdapterSource::Network,
-            data: raw.payload.clone(),
+            data,
         }]
     }
 
