@@ -175,6 +175,7 @@ All commands communicate with the running daemon over a Unix socket at `$XDG_RUN
 bread ping                            # Check daemon connectivity
 bread health                          # Daemon version, uptime, PID
 bread doctor                          # Diagnose daemon and module health
+bread doctor --json                   # Output raw JSON
 
 # Lua runtime
 bread reload                          # Hot-reload all Lua modules
@@ -182,9 +183,13 @@ bread reload --watch                  # Watch config dir and reload on changes
 
 # State and events
 bread state                           # Dump full runtime state as JSON
+bread state network                   # Read a single path from state
+bread state --json                    # Output raw JSON
 bread events                          # Stream live normalized events
 bread events bread.device.*           # Stream filtered events
 bread events --since 60               # Replay events from the last 60 seconds
+bread events --fields event,data      # Limit output to specific fields
+bread events --json                   # Output raw JSON
 bread emit <event>                    # Manually fire an event (for testing)
 
 # Profiles
@@ -194,7 +199,7 @@ bread profile-activate <name>         # Activate a named profile
 # Modules
 bread modules list                    # List installed modules and daemon status
 bread modules install /local/path     # Install from a local module directory
-bread modules remove <name>           # Remove an installed module
+bread modules remove <name>           # Remove an installed module (--yes skips confirmation)
 bread modules info <name>             # Show full manifest and daemon status
 ```
 
@@ -377,8 +382,9 @@ bread.profile.activate("default")
 bread.exec("kitty")
 
 -- Desktop notification (uses notify-send)
-bread.notify("Title", { urgency = "normal", timeout = 3000, icon = "dialog-info" })
-bread.notify("Simple message")   -- title defaults to "bread"
+-- First arg is the message body; opts.title sets the notification title (default: "bread")
+bread.notify("Something happened", { title = "My Module", urgency = "normal", timeout = 3000, icon = "dialog-info" })
+bread.notify("AC connected")   -- title defaults to "bread"
 ```
 
 ### Timers
