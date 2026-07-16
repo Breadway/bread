@@ -323,7 +323,7 @@ impl Server {
         loop {
             let evt = rx.recv().await?;
             if let Some(filter) = filter.as_deref() {
-                if !matches_filter(&evt.event, filter) {
+                if !bread_shared::glob::matches_pattern(filter, &evt.event) {
                     continue;
                 }
             }
@@ -337,127 +337,9 @@ impl Server {
     }
 }
 
-fn matches_filter(event_name: &str, pattern: &str) -> bool {
-    // Delegates to the same glob logic as the subscription table:
-    // `*` matches one segment (no dot-crossing), `**` matches any depth.
-    if let Some(prefix) = pattern.strip_suffix(".**") {
-        if event_name == prefix || event_name.starts_with(&format!("{prefix}.")) {
-            return true;
-        }
-        return false;
-    }
-
-    matches_glob_filter(pattern.as_bytes(), event_name.as_bytes())
-}
-
-fn matches_glob_filter(pattern: &[u8], text: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return text.is_empty();
-    }
-
-    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
-        let rest = &pattern[2..];
-        if rest.is_empty() {
-            return true;
-        }
-        for offset in 0..=text.len() {
-            if matches_glob_filter(rest, &text[offset..]) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    match pattern[0] {
-        b'*' => {
-            let mut offset = 0;
-            loop {
-                if matches_glob_filter(&pattern[1..], &text[offset..]) {
-                    return true;
-                }
-                if offset == text.len() || text[offset] == b'.' {
-                    break;
-                }
-                offset += 1;
-            }
-            false
-        }
-        b'?' => {
-            if text.is_empty() || text[0] == b'.' {
-                return false;
-            }
-            matches_glob_filter(&pattern[1..], &text[1..])
-        }
-        ch => {
-            if text.first().copied() != Some(ch) {
-                return false;
-            }
-            matches_glob_filter(&pattern[1..], &text[1..])
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::matches_filter;
-
-    #[test]
-    fn filter_exact_match() {
-        assert!(matches_filter("bread.window.opened", "bread.window.opened"));
-        assert!(!matches_filter(
-            "bread.window.opened",
-            "bread.window.closed"
-        ));
-    }
-
-    #[test]
-    fn filter_dot_star_matches_one_segment_only() {
-        assert!(matches_filter("bread.device.connected", "bread.device.*"));
-        assert!(!matches_filter(
-            "bread.device.dock.connected",
-            "bread.device.*"
-        ));
-        assert!(!matches_filter("bread.device", "bread.device.*"));
-    }
-
-    #[test]
-    fn filter_dot_double_star_matches_zero_or_more_segments() {
-        // Matches the exact prefix (zero segments after).
-        assert!(matches_filter("bread.device", "bread.device.**"));
-        // And matches deeper paths.
-        assert!(matches_filter(
-            "bread.device.dock.connected",
-            "bread.device.**"
-        ));
-        // But not a sibling at the same depth.
-        assert!(!matches_filter(
-            "bread.network.connected",
-            "bread.device.**"
-        ));
-    }
-
-    #[test]
-    fn filter_question_mark_matches_single_char_not_dot() {
-        assert!(matches_filter("bread.x", "bread.?"));
-        assert!(!matches_filter("bread.xy", "bread.?"));
-        assert!(!matches_filter("bread.", "bread.?"));
-    }
-
-    #[test]
-    fn filter_mid_pattern_star_does_not_cross_dots() {
-        // A `*` in the middle of the pattern (not the `.*` suffix shortcut)
-        // matches within a single segment only.
-        assert!(matches_filter("bread.alpha.connected", "bread.*.connected"));
-        assert!(!matches_filter(
-            "bread.alpha.beta.connected",
-            "bread.*.connected"
-        ));
-    }
-
-    #[test]
-    fn filter_dot_star_matches_exactly_one_segment() {
-        assert!(matches_filter("bread.alpha", "bread.*"));
-        assert!(!matches_filter("bread.alpha.beta", "bread.*"));
-        assert!(!matches_filter("bread", "bread.*"));
-    }
-}
+// The CLI `--filter` glob semantics used to be a second, hand-rolled copy of
+// the subscription-table matcher (`matches_filter`/`matches_glob_filter`
+// used to live here). That duplication is exactly what let the two paths
+// drift out of sync despite the docs claiming parity. Both now delegate to
+// the single implementation in `bread_shared::glob::matches_pattern`; see
+// that module for the pattern-matching test suite.

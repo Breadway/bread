@@ -540,7 +540,7 @@ impl LuaEngine {
         let exec_fn = self.lua.create_function(move |_lua, cmd: String| {
             task::spawn_blocking(move || {
                 match std::process::Command::new("sh")
-                    .arg("-lc")
+                    .arg("-c")
                     .arg(&cmd)
                     .status()
                 {

@@ -1,7 +1,7 @@
 # Maintainer: Breadway <rileyhorsham@gmail.com>
 
 pkgname=bread
-pkgver=0.6.0
+pkgver=0.6.6
 pkgrel=1
 pkgdesc="A reactive automation fabric for Linux desktops"
 arch=('x86_64')
@@ -11,11 +11,10 @@ license=('MIT')
 # emit GCC LTO bitcode into liblua5.4.a, which the Rust (lld) link can't read,
 # leaving all lua_* symbols undefined. Disable LTO for a clean static link.
 options=(!lto !debug)
-depends=('glibc' 'libgit2')
+depends=('glibc')
 optdepends=(
   'libnotify: desktop notifications via bread.notify()'
   'upower: D-Bus battery events (sysfs polling used otherwise)'
-  'git: bread sync push/pull operations'
 )
 makedepends=('rust' 'cargo')
 source=("${pkgname}-${pkgver}.tar.gz")

@@ -16,7 +16,7 @@ makepkg -si
 3. Update `source` to the release tarball URL.
 4. Run `updpkgsums` (or manually set `sha256sums`).
 5. Update `url` if the repository has moved.
-6. Set `depends` accurately — at minimum: `glibc`. Add `udev` and `libgit2` if not linking statically.
+6. Set `depends` accurately — at minimum: `glibc`. Add `udev` if not linking statically.
 
 ## Runtime dependencies
 
@@ -26,4 +26,3 @@ makepkg -si
 | `udev` | yes | device events |
 | `dbus` | optional | UPower battery events |
 | `libnotify` | optional | `bread.notify()` (uses `notify-send`) |
-| `git` | optional | `bread sync` push/pull |

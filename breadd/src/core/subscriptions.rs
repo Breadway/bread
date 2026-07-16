@@ -60,146 +60,21 @@ impl SubscriptionTable {
     pub fn match_event(&self, event_name: &str) -> Vec<Subscription> {
         self.entries
             .iter()
-            .filter(|sub| matches_pattern(&sub.pattern, event_name))
+            .filter(|sub| bread_shared::glob::matches_pattern(&sub.pattern, event_name))
             .cloned()
             .collect()
     }
 }
 
-fn matches_pattern(pattern: &str, event_name: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix(".**") {
-        if event_name == prefix {
-            return true;
-        }
-    }
-
-    matches_glob(pattern.as_bytes(), event_name.as_bytes())
-}
-
-fn matches_glob(pattern: &[u8], text: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return text.is_empty();
-    }
-
-    if pattern.len() >= 2 && pattern[0] == b'*' && pattern[1] == b'*' {
-        let mut idx = 2;
-        while pattern.len() >= idx + 2 && pattern[idx] == b'*' && pattern[idx + 1] == b'*' {
-            idx += 2;
-        }
-        let rest = &pattern[idx..];
-        if rest.is_empty() {
-            return true;
-        }
-        for offset in 0..=text.len() {
-            if matches_glob(rest, &text[offset..]) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    match pattern[0] {
-        b'*' => {
-            let mut offset = 0;
-            loop {
-                if matches_glob(&pattern[1..], &text[offset..]) {
-                    return true;
-                }
-                if offset == text.len() || text[offset] == b'.' {
-                    break;
-                }
-                offset += 1;
-            }
-            false
-        }
-        b'?' => {
-            if text.is_empty() || text[0] == b'.' {
-                return false;
-            }
-            matches_glob(&pattern[1..], &text[1..])
-        }
-        ch => {
-            if text.first().copied() != Some(ch) {
-                return false;
-            }
-            matches_glob(&pattern[1..], &text[1..])
-        }
-    }
-}
+// Glob-matching semantics (`*`, `**`, `?`) are implemented and tested once,
+// in `bread_shared::glob`. Both this module (real event dispatch) and
+// `breadd::ipc` (the CLI `--filter` path) delegate to that single
+// implementation so they cannot drift apart. See `bread-shared/src/glob.rs`
+// for the pattern-matching test suite.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn exact_match() {
-        assert!(matches_pattern(
-            "bread.device.dock.connected",
-            "bread.device.dock.connected"
-        ));
-        assert!(!matches_pattern(
-            "bread.device.dock.connected",
-            "bread.device.dock.disconnected"
-        ));
-    }
-
-    #[test]
-    fn single_segment_wildcard() {
-        assert!(matches_pattern("bread.device.*", "bread.device.foo"));
-        assert!(!matches_pattern(
-            "bread.device.*",
-            "bread.device.dock.connected"
-        ));
-        assert!(!matches_pattern("bread.device.*", "bread.device"));
-    }
-
-    #[test]
-    fn recursive_wildcard() {
-        assert!(matches_pattern(
-            "bread.device.**",
-            "bread.device.dock.connected"
-        ));
-        assert!(matches_pattern("bread.**", "bread.device.dock.connected"));
-        assert!(matches_pattern("bread.**", "bread"));
-    }
-
-    #[test]
-    fn single_char_wildcard() {
-        assert!(matches_pattern("bread.monitor.?", "bread.monitor.1"));
-        assert!(!matches_pattern("bread.monitor.?", "bread.monitor.10"));
-        assert!(!matches_pattern("bread.monitor.?", "bread.monitor."));
-    }
-
-    #[test]
-    fn star_does_not_cross_dot_segments() {
-        // `*` matches within a segment only.
-        assert!(matches_pattern(
-            "bread.*.connected",
-            "bread.device.connected"
-        ));
-        assert!(!matches_pattern(
-            "bread.*.connected",
-            "bread.device.dock.connected"
-        ));
-    }
-
-    #[test]
-    fn double_star_matches_zero_or_more_segments() {
-        assert!(matches_pattern("bread.**", "bread.a"));
-        assert!(matches_pattern("bread.**", "bread.a.b.c.d"));
-    }
-
-    #[test]
-    fn empty_pattern_matches_only_empty_text() {
-        assert!(matches_pattern("", ""));
-        assert!(!matches_pattern("", "bread"));
-    }
-
-    #[test]
-    fn empty_text_only_matches_wildcards() {
-        assert!(matches_pattern("**", ""));
-        assert!(!matches_pattern("bread.*", ""));
-    }
 
     // ─── SubscriptionTable ────────────────────────────────────────────────
 

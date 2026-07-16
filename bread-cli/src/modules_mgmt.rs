@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Contents of `bread.module.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +45,67 @@ pub fn parse_source(source: &str) -> Result<PathBuf> {
     }
 }
 
+/// Validate that a module name is safe to join onto `modules_dir`.
+///
+/// Module names ultimately come from untrusted input: a manifest file
+/// (`bread.module.toml`, which could be crafted by anyone who hands the user
+/// a "module" to install) or a raw CLI argument (`bread modules remove
+/// <name>`). Without this check, a name like `../../../../etc` or an
+/// absolute path would let install/remove escape `modules_dir` entirely —
+/// classic path traversal. Reject any name containing a path separator,
+/// a `..` component, or that is otherwise not a single plain path segment.
+fn validate_module_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("bread: module name must not be empty");
+    }
+    let path = Path::new(name);
+    // A valid module name must be exactly one normal path component, e.g.
+    // it must not contain `/`, must not be `.`/`..`, and must not be an
+    // absolute path or reference a prefix/root.
+    let mut components = path.components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(seg)), None) if seg == name => {}
+        _ => {
+            bail!(
+                "bread: invalid module name '{}' (must be a single path segment, \
+                 no '/', '..', or absolute paths)",
+                name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Join `name` onto `modules_dir`, validating the name and verifying the
+/// resulting path is still contained within `modules_dir`.
+///
+/// This is defense in depth on top of [`validate_module_name`]: even if the
+/// name passes the component check, we canonicalize the parent directory
+/// and confirm the joined path's parent resolves to it before allowing any
+/// filesystem operation on the result.
+fn resolve_module_dir(name: &str, modules_dir: &Path) -> Result<PathBuf> {
+    validate_module_name(name)?;
+    let dest = modules_dir.join(name);
+
+    // Canonicalize modules_dir itself (it should exist by the time we're
+    // installing/removing/reading from it in practice; callers that need it
+    // pre-creation call fs::create_dir_all first).
+    if let Ok(canonical_root) = modules_dir.canonicalize() {
+        if let Some(parent) = dest.parent() {
+            if let Ok(canonical_parent) = parent.canonicalize() {
+                if canonical_parent != canonical_root {
+                    bail!(
+                        "bread: resolved module path '{}' escapes modules directory",
+                        dest.display()
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(dest)
+}
+
 /// Install a module from a local directory into `modules_dir`.
 /// `source_str` is the original source string recorded in the manifest.
 pub fn install_from_local(
@@ -65,7 +126,9 @@ pub fn install_from_local(
     manifest.source = source_str.to_string();
     manifest.installed_at = Utc::now().to_rfc3339();
 
-    let dest = modules_dir.join(&manifest.name);
+    fs::create_dir_all(modules_dir)
+        .with_context(|| format!("failed to create {}", modules_dir.display()))?;
+    let dest = resolve_module_dir(&manifest.name, modules_dir)?;
     if dest.exists() {
         fs::remove_dir_all(&dest)
             .with_context(|| format!("failed to remove existing module at {}", dest.display()))?;
@@ -83,7 +146,7 @@ pub fn install_from_local(
 
 /// Remove a module directory from `modules_dir`.
 pub fn remove_module(name: &str, modules_dir: &Path) -> Result<()> {
-    let module_dir = modules_dir.join(name);
+    let module_dir = resolve_module_dir(name, modules_dir)?;
     if !module_dir.exists() {
         bail!("bread: module '{}' is not installed", name);
     }
@@ -115,7 +178,8 @@ pub fn list_modules(modules_dir: &Path) -> Result<Vec<ModuleManifest>> {
 
 /// Read a module manifest by name.
 pub fn read_module_manifest(name: &str, modules_dir: &Path) -> Result<ModuleManifest> {
-    let manifest_path = modules_dir.join(name).join("bread.module.toml");
+    let module_dir = resolve_module_dir(name, modules_dir)?;
+    let manifest_path = module_dir.join("bread.module.toml");
     if !manifest_path.exists() {
         bail!("bread: module '{}' is not installed", name);
     }

@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod glob;
+
 /// Identifies which adapter produced an event.
 ///
 /// The state engine uses this to choose a normalization strategy and the

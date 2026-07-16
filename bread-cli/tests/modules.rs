@@ -104,6 +104,63 @@ fn list_reads_manifests_from_disk() {
 }
 
 #[test]
+fn remove_rejects_path_traversal_name() {
+    let modules_tmp = TempDir::new().unwrap();
+    // A sibling directory outside modules_dir that an attacker would want to delete.
+    let victim_parent = modules_tmp.path().parent().unwrap();
+    let victim = victim_parent.join("victim-dir");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("keepme.txt"), "do not delete").unwrap();
+
+    let result = modules_mgmt::remove_module("../victim-dir", modules_tmp.path());
+    assert!(result.is_err(), "path traversal name must be rejected");
+    assert!(victim.join("keepme.txt").exists(), "victim dir must survive");
+
+    let _ = fs::remove_dir_all(&victim);
+}
+
+#[test]
+fn remove_rejects_absolute_path_name() {
+    let modules_tmp = TempDir::new().unwrap();
+    let result = modules_mgmt::remove_module("/etc/passwd", modules_tmp.path());
+    assert!(result.is_err(), "absolute path name must be rejected");
+}
+
+#[test]
+fn remove_rejects_name_with_slash() {
+    let modules_tmp = TempDir::new().unwrap();
+    make_module_dir(modules_tmp.path(), "alpha", "1.0.0");
+    let result = modules_mgmt::remove_module("alpha/../alpha", modules_tmp.path());
+    assert!(result.is_err(), "name containing a slash must be rejected");
+    // Original module must be untouched.
+    assert!(modules_tmp.path().join("alpha").exists());
+}
+
+#[test]
+fn install_rejects_manifest_with_path_traversal_name() {
+    let src_tmp = TempDir::new().unwrap();
+    let modules_tmp = TempDir::new().unwrap();
+
+    // Craft a manifest whose `name` field is a traversal attempt.
+    let manifest = r#"name = "../evil"
+version = "1.0.0"
+description = "malicious"
+author = "attacker"
+source = "/tmp/test"
+installed_at = ""
+"#;
+    fs::write(src_tmp.path().join("bread.module.toml"), manifest).unwrap();
+    fs::write(src_tmp.path().join("init.lua"), "-- evil\n").unwrap();
+
+    let result =
+        modules_mgmt::install_from_local(src_tmp.path(), "test:evil", modules_tmp.path());
+    assert!(
+        result.is_err(),
+        "install must reject a manifest name containing path traversal"
+    );
+}
+
+#[test]
 fn manifest_written_correctly_on_install() {
     let src_tmp = TempDir::new().unwrap();
     let modules_tmp = TempDir::new().unwrap();
