@@ -14,6 +14,7 @@ pub struct RuntimeState {
     pub power: PowerState,
     pub profile: ProfileState,
     pub modules: Vec<ModuleStatus>,
+    pub workflows: Vec<WorkflowStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,4 +128,35 @@ pub enum ModuleLoadState {
     NotFound,
     Degraded,
     Disabled,
+}
+
+/// Introspectable state for a `bread.workflow` instance, surfaced via the
+/// `workflows.list` IPC method. One entry per workflow *name* — starting a
+/// workflow with a name that's already running replaces its entry (this is
+/// a live-status registry, not a run history).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowStatus {
+    pub name: String,
+    pub state: WorkflowState,
+    /// The most recent `bread.workflow.step(label)` call inside the body,
+    /// if any.
+    pub step: Option<String>,
+    pub started_at: u64,
+    pub updated_at: u64,
+    /// Set when `state` is `Failed`: the captured Lua error message.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowState {
+    Running,
+    Done,
+    Failed,
+    /// The `opts.deadline` timer fired before the workflow reached a
+    /// terminal state. Note: since a suspended coroutine isn't forcibly
+    /// killed, it's possible (rare) for a workflow to still complete after
+    /// this and overwrite the status again — this is a status marker, not
+    /// a hard cancellation.
+    TimedOut,
 }

@@ -11,11 +11,15 @@ use crate::core::config::Config;
 use crate::core::supervisor::spawn_supervised;
 
 pub mod bluetooth;
+pub mod filesystem;
+pub mod git;
 pub mod hyprland;
 pub mod network;
 pub mod network_rtnetlink;
+pub mod podman;
 pub mod power;
 pub mod power_upower;
+pub mod systemd;
 pub mod udev;
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +106,32 @@ impl Manager {
             } else {
                 self.spawn_adapter(network::NetworkAdapter);
             }
+        }
+
+        // Filesystem/git/systemd all default to "no roots/units configured",
+        // in which case they'd have nothing to do — skip spawning them
+        // entirely rather than running an adapter that can never emit.
+        if self.config.adapters.filesystem.enabled
+            && !self.config.adapters.filesystem.roots.is_empty()
+        {
+            let adapter =
+                filesystem::FilesystemAdapter::new(self.config.adapters.filesystem.roots.clone());
+            adapter.enumerate_existing(&self.raw_tx).await;
+            self.spawn_adapter(adapter);
+        }
+
+        if self.config.adapters.git.enabled && !self.config.adapters.git.roots.is_empty() {
+            let adapter = git::GitAdapter::new(self.config.adapters.git.roots.clone());
+            self.spawn_adapter(adapter);
+        }
+
+        if self.config.adapters.systemd.enabled && !self.config.adapters.systemd.units.is_empty() {
+            let adapter = systemd::SystemdAdapter::new(self.config.adapters.systemd.units.clone());
+            self.spawn_adapter(adapter);
+        }
+
+        if self.config.adapters.podman.enabled {
+            self.spawn_adapter(podman::PodmanAdapter::new());
         }
 
         Ok(())

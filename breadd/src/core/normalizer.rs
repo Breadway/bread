@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use bread_shared::{AdapterSource, BreadEvent, RawEvent};
+use bread_shared::{apps::validate_app_namespace, AdapterSource, BreadEvent, RawEvent};
 use serde_json::{json, Value};
 
 /// How many multiples of `dedup_window_ms` an entry must be idle before eviction.
@@ -26,16 +26,23 @@ impl EventNormalizer {
     }
 
     pub fn normalize(&self, raw: &RawEvent) -> Vec<BreadEvent> {
-        let mut out = match raw.source {
+        let mut out = match &raw.source {
             AdapterSource::Udev => self.normalize_udev(raw),
             AdapterSource::Hyprland => self.normalize_hyprland(raw),
             AdapterSource::Power => self.normalize_power(raw),
             AdapterSource::Network => self.normalize_network(raw),
             AdapterSource::Bluetooth => self.normalize_bluetooth(raw),
+            AdapterSource::Terminal => self.normalize_terminal(raw),
+            AdapterSource::Git => self.normalize_git(raw),
+            AdapterSource::Filesystem => self.normalize_filesystem(raw),
+            AdapterSource::Systemd => self.normalize_systemd(raw),
+            AdapterSource::Podman => self.normalize_podman(raw),
+            AdapterSource::Remote => self.normalize_remote(raw),
+            AdapterSource::App(_) => self.normalize_app(raw),
             AdapterSource::System => vec![BreadEvent {
                 event: raw.kind.clone(),
                 timestamp: raw.timestamp,
-                source: raw.source,
+                source: raw.source.clone(),
                 data: raw.payload.clone(),
             }],
         };
@@ -418,7 +425,105 @@ impl EventNormalizer {
         }]
     }
 
+    // Adapter contracts: each of these adapters emits `RawEvent.kind` already
+    // namespaced for its family (e.g. filesystem emits "file.changed",
+    // "detected", "build_artifact.created"), so normalization here is just a
+    // `bread.<family>.` prefix — except systemd (`unit.*` -> `service.*`) and
+    // podman's health-status rename, which need a small rewrite.
+    fn normalize_terminal(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        vec![BreadEvent {
+            event: format!("bread.terminal.{}", raw.kind),
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
+    fn normalize_remote(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        vec![BreadEvent {
+            event: format!("bread.remote.{}", raw.kind),
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
+    fn normalize_git(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        vec![BreadEvent {
+            event: format!("bread.git.{}", raw.kind),
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
+    fn normalize_filesystem(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        vec![BreadEvent {
+            event: format!("bread.project.{}", raw.kind),
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
+    fn normalize_systemd(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        // Adapter emits "unit.started"/"unit.stopped"/"unit.failed"; the public
+        // namespace is `service.*`, not `unit.*`.
+        let suffix = raw.kind.strip_prefix("unit.").unwrap_or(raw.kind.as_str());
+        vec![BreadEvent {
+            event: format!("bread.service.{suffix}"),
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
+    fn normalize_podman(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        // Adapter emits "container.started"/"container.stopped"/"container.health_status";
+        // the public name for the latter is `container.health.changed`.
+        let event = if raw.kind == "container.health_status" {
+            "bread.container.health.changed".to_string()
+        } else {
+            format!("bread.{}", raw.kind)
+        };
+        vec![BreadEvent {
+            event,
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
+    /// Sibling `bread*` app events. Unlike the other sources, `raw.kind`
+    /// already carries the full dotted event name (the IPC boundary builds
+    /// it that way before construction), so this is validate-and-wrap, not
+    /// a transform. The namespace check is defense in depth — the IPC layer
+    /// already validates before constructing the `RawEvent` — so a
+    /// malformed event here is dropped silently rather than treated as an
+    /// adapter failure.
+    fn normalize_app(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        let AdapterSource::App(app) = &raw.source else {
+            return vec![];
+        };
+        if !validate_app_namespace(app, &raw.kind) {
+            return vec![];
+        }
+        vec![BreadEvent {
+            event: raw.kind.clone(),
+            timestamp: raw.timestamp,
+            source: raw.source.clone(),
+            data: raw.payload.clone(),
+        }]
+    }
+
     fn accept(&self, event: &BreadEvent) -> bool {
+        // Terminal commands legitimately repeat (running the same command twice
+        // in quick succession); the dedup window exists for noisy hardware
+        // signals, not user-initiated terminal activity, so exempt it.
+        if matches!(&event.source, AdapterSource::Terminal) {
+            return true;
+        }
+
         let key = format!("{}:{}", event.event, event.data);
         let now = event.timestamp;
 

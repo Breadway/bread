@@ -8,13 +8,19 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod apps;
 pub mod glob;
 
 /// Identifies which adapter produced an event.
 ///
 /// The state engine uses this to choose a normalization strategy and the
 /// IPC layer surfaces it so subscribers can filter by origin.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash)]
+///
+/// Not `Copy`: the [`App`](AdapterSource::App) variant carries an owned
+/// `String` (a sibling `bread*` app id), so callers that used to copy a
+/// `AdapterSource` by value now `.clone()` it — see `breadd/src/core/normalizer.rs`
+/// for the (small, compiler-driven) set of call sites this touches.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterSource {
     /// The Hyprland compositor IPC socket.
@@ -30,6 +36,23 @@ pub enum AdapterSource {
     System,
     /// BlueZ Bluetooth stack via D-Bus.
     Bluetooth,
+    /// Shell precmd/preexec hooks (terminal command lifecycle, cwd changes).
+    Terminal,
+    /// Git hooks (commit/branch) and the in-daemon dirty-state poller.
+    Git,
+    /// Project-root file watches (via `notify`/inotify).
+    Filesystem,
+    /// systemd --user unit state, via the session D-Bus.
+    Systemd,
+    /// Podman container lifecycle, via `podman events`.
+    Podman,
+    /// SSH/remote session detection, via the shell hook.
+    Remote,
+    /// A sibling `bread*` application (breadclip, breadpad, ...), identified
+    /// by its registered app id (see [`apps::KNOWN_APPS`]). Confined to the
+    /// `bread.<app>.*` event namespace — enforced at the IPC boundary via
+    /// [`apps::validate_app_namespace`], not by this type itself.
+    App(String),
 }
 
 /// An unnormalized event as emitted by an adapter.
@@ -89,6 +112,44 @@ pub fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[derive(Deserialize, Default)]
+struct DaemonSection {
+    #[serde(default)]
+    socket_path: String,
+}
+
+#[derive(Deserialize, Default)]
+struct SocketPathConfig {
+    #[serde(default)]
+    daemon: DaemonSection,
+}
+
+/// Resolve breadd's Unix socket path exactly as `breadd::core::config::Config::socket_path`
+/// resolves its own: an explicit `daemon.socket_path` in `~/.config/bread/breadd.toml` wins,
+/// otherwise `$XDG_RUNTIME_DIR/bread/breadd.sock`, falling back to `/tmp/bread/breadd.sock`.
+///
+/// Shared by every socket client that lives outside the daemon itself (`bread-emit`, and
+/// `bread-client` in `bread-ecosystem/bread-utils`) so they can't drift from how the daemon
+/// actually resolves its own socket — before this existed, `bread-emit` carried its own
+/// hand-rolled copy of this exact logic.
+pub fn resolve_socket_path() -> std::path::PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        let config_path = home.join(".config/bread/breadd.toml");
+        if let Ok(contents) = std::fs::read_to_string(&config_path) {
+            if let Ok(cfg) = toml::from_str::<SocketPathConfig>(&contents) {
+                if !cfg.daemon.socket_path.is_empty() {
+                    return expand_path(&cfg.daemon.socket_path);
+                }
+            }
+        }
+    }
+
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(runtime_dir)
+        .join("bread")
+        .join("breadd.sock")
 }
 
 /// Expand a leading `~` or `~/` in a path string to the user's home directory.
@@ -164,6 +225,38 @@ mod tests {
             serde_json::to_string(&AdapterSource::Bluetooth).unwrap(),
             "\"bluetooth\""
         );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Terminal).unwrap(),
+            "\"terminal\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Git).unwrap(),
+            "\"git\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Filesystem).unwrap(),
+            "\"filesystem\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Systemd).unwrap(),
+            "\"systemd\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Podman).unwrap(),
+            "\"podman\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::Remote).unwrap(),
+            "\"remote\""
+        );
+    }
+
+    #[test]
+    fn adapter_source_app_serializes_as_externally_tagged_object() {
+        assert_eq!(
+            serde_json::to_string(&AdapterSource::App("clip".to_string())).unwrap(),
+            "{\"app\":\"clip\"}"
+        );
     }
 
     #[test]
@@ -175,6 +268,13 @@ mod tests {
             AdapterSource::Network,
             AdapterSource::System,
             AdapterSource::Bluetooth,
+            AdapterSource::Terminal,
+            AdapterSource::Git,
+            AdapterSource::Filesystem,
+            AdapterSource::Systemd,
+            AdapterSource::Podman,
+            AdapterSource::Remote,
+            AdapterSource::App("clip".to_string()),
         ] {
             let s = serde_json::to_string(&source).unwrap();
             let back: AdapterSource = serde_json::from_str(&s).unwrap();

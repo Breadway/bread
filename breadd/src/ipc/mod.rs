@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use bread_shared::{now_unix_ms, AdapterSource, BreadEvent};
+use bread_shared::apps::{is_known_app, validate_app_namespace};
+use bread_shared::{now_unix_ms, AdapterSource, BreadEvent, RawEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,6 +21,14 @@ use crate::adapters::AdapterStatus;
 use crate::core::state_engine::StateHandle;
 use crate::lua::RuntimeHandle;
 
+/// The Bread Automation API version (Lua API surface + IPC methods + event
+/// vocabulary + runtime-state schema), per `Documentation.md`'s "API
+/// Stability & Versioning" section. Bump the minor version when adding
+/// something new-but-additive (a binding, an event, an IPC param); bump the
+/// major version only for a breaking change, which should not happen inside
+/// this daemon's v1 lifetime per that section's stated policy.
+const API_VERSION: &str = "1.2.0";
+
 #[derive(Clone)]
 pub struct Server {
     socket_path: PathBuf,
@@ -27,6 +36,7 @@ pub struct Server {
     event_tx: broadcast::Sender<BreadEvent>,
     lua_runtime: RuntimeHandle,
     emit_tx: mpsc::UnboundedSender<BreadEvent>,
+    raw_tx: mpsc::Sender<RawEvent>,
     adapter_status: Arc<RwLock<HashMap<String, AdapterStatus>>>,
     subscription_count: Arc<AtomicU64>,
     event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
@@ -61,6 +71,7 @@ impl Server {
         event_tx: broadcast::Sender<BreadEvent>,
         lua_runtime: RuntimeHandle,
         emit_tx: mpsc::UnboundedSender<BreadEvent>,
+        raw_tx: mpsc::Sender<RawEvent>,
         adapter_status: Arc<RwLock<HashMap<String, AdapterStatus>>>,
         subscription_count: Arc<AtomicU64>,
         event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
@@ -71,6 +82,7 @@ impl Server {
             event_tx,
             lua_runtime,
             emit_tx,
+            raw_tx,
             adapter_status,
             subscription_count,
             event_buffer,
@@ -141,9 +153,7 @@ impl Server {
                         error: Some(format!("parse error: {e}")),
                     };
                     write_half
-                        .write_all(
-                            format!("{}\n", serde_json::to_string(&err_resp)?).as_bytes(),
-                        )
+                        .write_all(format!("{}\n", serde_json::to_string(&err_resp)?).as_bytes())
                         .await?;
                     continue;
                 }
@@ -208,6 +218,10 @@ impl Server {
                 let full = self.state_handle.state_dump().await;
                 Ok(full.get("modules").cloned().unwrap_or_else(|| json!([])))
             }
+            "workflows.list" => {
+                let full = self.state_handle.state_dump().await;
+                Ok(full.get("workflows").cloned().unwrap_or_else(|| json!([])))
+            }
             "modules.reload" => {
                 let started = Instant::now();
                 if let Err(err) = self.lua_runtime.reload().await {
@@ -252,18 +266,71 @@ impl Server {
                 Ok(json!({ "active": name }))
             }
             "emit" => {
-                let Some(event) = req.params.get("event").and_then(Value::as_str) else {
-                    return Err((id, "missing event name".to_string()));
-                };
                 let data = req.params.get("data").cloned().unwrap_or_else(|| json!({}));
-                if self
-                    .emit_tx
-                    .send(BreadEvent::new(event, AdapterSource::System, data))
-                    .is_err()
-                {
-                    return Err((id, "emit channel closed".to_string()));
+
+                // Sourced emit: hook-originated events (shell/git/ssh) and
+                // sibling bread* app events both go through the same
+                // RawEvent -> normalizer pipeline as in-process adapters,
+                // instead of being tagged System. `source` is restricted to
+                // the fixed hook-fed set plus registered app ids — allowing
+                // arbitrary sources here would let any socket client spoof
+                // e.g. a power/bluetooth event, or another app's namespace.
+                if let Some(source_str) = req.params.get("source").and_then(Value::as_str) {
+                    let source = match source_str {
+                        "terminal" => AdapterSource::Terminal,
+                        "git" => AdapterSource::Git,
+                        "remote" => AdapterSource::Remote,
+                        other if is_known_app(other) => AdapterSource::App(other.to_string()),
+                        other => {
+                            return Err((
+                                id,
+                                format!("source '{other}' is not externally injectable"),
+                            ));
+                        }
+                    };
+                    let Some(kind) = req.params.get("kind").and_then(Value::as_str) else {
+                        return Err((id, "missing kind for sourced emit".to_string()));
+                    };
+                    // For a sibling-app source, `kind` is the full dotted event
+                    // name (e.g. "bread.clip.copied"), not a bare suffix — it
+                    // must live inside that app's own namespace.
+                    if let AdapterSource::App(app) = &source {
+                        if !validate_app_namespace(app, kind) {
+                            return Err((
+                                id,
+                                format!(
+                                    "event '{kind}' is not in the '{app}' namespace (must start with 'bread.{app}.')"
+                                ),
+                            ));
+                        }
+                    }
+                    if self
+                        .raw_tx
+                        .send(RawEvent {
+                            source,
+                            kind: kind.to_string(),
+                            payload: data,
+                            timestamp: now_unix_ms(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return Err((id, "raw channel closed".to_string()));
+                    }
+                    Ok(json!({ "emitted": true }))
+                } else {
+                    let Some(event) = req.params.get("event").and_then(Value::as_str) else {
+                        return Err((id, "missing event name".to_string()));
+                    };
+                    if self
+                        .emit_tx
+                        .send(BreadEvent::new(event, AdapterSource::System, data))
+                        .is_err()
+                    {
+                        return Err((id, "emit channel closed".to_string()));
+                    }
+                    Ok(json!({ "emitted": true }))
                 }
-                Ok(json!({ "emitted": true }))
             }
             "health" => {
                 let uptime_ms = self.started_at.elapsed().as_millis();
@@ -278,6 +345,7 @@ impl Server {
                     "ok": true,
                     "pid": self.pid,
                     "version": env!("CARGO_PKG_VERSION"),
+                    "api_version": API_VERSION,
                     "uptime_ms": uptime_ms,
                     "socket": self.socket_path.to_string_lossy(),
                     "adapters": adapters,

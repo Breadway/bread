@@ -80,6 +80,7 @@ async fn main() -> Result<()> {
         });
     }
 
+    let ipc_raw_tx = raw_tx.clone();
     let adapter_manager = adapters::Manager::new(raw_tx, config.clone(), shutdown_rx.clone());
     adapter_manager.start_all().await?;
 
@@ -111,6 +112,7 @@ async fn main() -> Result<()> {
         event_stream_tx,
         lua_runtime.clone(),
         normalized_tx,
+        ipc_raw_tx,
         adapter_status,
         subscription_count,
         event_buffer,

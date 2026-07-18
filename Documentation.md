@@ -3,15 +3,19 @@
 ## Contents
 
 - [Overview](#overview)
+- [API Stability & Versioning](#api-stability--versioning)
 - [Getting started](#getting-started)
 - [Your first module](#your-first-module)
 - [Run, reload, and watch](#run-reload-and-watch)
 - [Modules: install and manage](#modules-install-and-manage)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
+  - [Workflows](#workflows-since-v12)
   - [Bluetooth](#bluetooth)
 - [Dictionary: Built-in modules](#dictionary-built-in-modules)
 - [Dictionary: Event reference](#dictionary-event-reference)
+- [Namespaces](#namespaces)
+- [Integrating a bread* app](#integrating-a-bread-app)
 - [Dictionary: Runtime state schema](#dictionary-runtime-state-schema)
 - [Dictionary: IPC protocol](#dictionary-ipc-protocol)
 
@@ -23,9 +27,20 @@ Bread is a reactive automation fabric for Linux desktops. The daemon (`breadd`) 
 - **Lua runtime** — dedicated thread inside the daemon; automation logic lives here
 - **CLI** (`bread`) — talks to the daemon over a Unix socket
 
-Adapters currently supported: Hyprland compositor IPC, Linux udev/netlink, UPower/sysfs power, rtnetlink/sysfs network, and BlueZ Bluetooth.
+Adapters currently supported: Hyprland compositor IPC, Linux udev/netlink, UPower/sysfs power, rtnetlink/sysfs network, BlueZ Bluetooth, shell precmd/preexec hooks (terminal), git hooks + a dirty-state poller, project-root filesystem watches, `systemd --user` unit state, Podman container events, and SSH/remote session detection. Sibling `bread*` applications (breadclip, breadpad, and others across the BOS ecosystem) integrate through the same pipeline under a reserved `bread.<app>.*` namespace — see [Namespaces](#namespaces).
 
 If you are new to Bread, start with the quick walkthrough below, then jump to the full dictionary when you need exact API details.
+
+## API Stability & Versioning
+
+The Lua API surface, the IPC method set, the event-name vocabulary, and the runtime-state schema documented in this file are collectively **Bread Automation API v1**. This is what "locking in the schema" means operationally:
+
+- **Additive-only within a major version.** New bindings, new events, new state fields, and new optional IPC params may be added in a minor release. Existing binding signatures, event names, event `data` shapes, state field meanings, and IPC method contracts do not change or disappear within v1.
+- **Deprecation window.** Anything slated for removal is marked `Deprecated` in this file for at least one minor release cycle and continues to function until the next major version (v2).
+- **Since markers.** Additions made after the v1.0 baseline are marked inline with `*Since: vX.Y*`. Anything documented in this file without a marker is part of the v1.0 baseline.
+- **Version discovery.** The current API version is returned as `api_version` in the `health` IPC response (see [Dictionary: IPC protocol](#dictionary-ipc-protocol)), so a client — the CLI, a Lua module, or a sibling `bread*` app — can assert compatibility at connect time rather than discovering a mismatch mid-session.
+
+This matters because the moment sibling apps and community modules depend on this vocabulary, it becomes a contract that can break people. Treat this file, not `README.md` or `CLAUDE.md`, as the single source of truth — those files intentionally point back here rather than keeping their own copies, after a duplicated Lua API section in `README.md` was found to have already drifted from reality.
 
 ## Getting started
 
@@ -213,6 +228,63 @@ end)
 
 #### `bread.spawn(fn)`
 Spawn a coroutine and surface errors if it fails. Required for using `bread.wait`.
+
+#### `bread.wait_any(patterns, opts) -> event | nil` *(Since: v1.2)*
+Coroutine-only. Like `bread.wait`, but resolves on the first of several patterns to match; returns `nil` after `opts.timeout` if none do.
+
+```lua
+bread.spawn(function()
+    local event = bread.wait_any(
+        { "bread.monitor.connected", "bread.hyprland.event" },
+        { timeout = 5000 }
+    )
+    if event then
+        bread.log("a monitor-related event arrived")
+    end
+end)
+```
+
+#### `bread.wait_all(patterns, opts) -> table` *(Since: v1.2)*
+Coroutine-only. Resolves once every listed pattern has fired at least once, or `opts.timeout` elapses. Returns a table keyed by pattern → event; on timeout, the table additionally has `timed_out = true` and contains whichever patterns had already fired.
+
+### Workflows *(Since: v1.2)*
+
+Multi-step automations built on `bread.spawn`/`bread.wait` (and `wait_any`/`wait_all`), with status introspectable from outside the running coroutine — via Lua (`bread.workflow.status`/`.list`) or over IPC (`workflows.list`). See [Examples.md](Examples.md#example-4-multi-step-automation-workflows) for a full worked example.
+
+#### `bread.workflow.define(name, fn)`
+Register a workflow body under `name`. `fn` receives one argument: whatever `opts.args` was passed to `.start()` (or `nil`).
+
+#### `bread.workflow.start(name, opts)`
+Run the workflow registered as `name` (spawned as a coroutine, same mechanics as `bread.spawn`). `opts` (optional):
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `deadline` | ms | If the workflow hasn't reached a terminal state by then, its status becomes `timed_out`. Independent of any per-`wait` timeout inside the body — a safety net for the whole run, not a replacement for step-level timeouts. |
+| `args` | any | Passed through as the sole argument to the workflow body function. |
+
+Starting a workflow under a name that's already running **replaces** its registry entry — this is a live-status registry, not a run history.
+
+#### `bread.workflow.step(label)`
+Call from inside a running workflow body to record "currently here." Purely observational — it does not affect control flow. Errors if called outside a running workflow body.
+
+#### `bread.workflow.status(name) -> table | nil`
+Returns the current status for `name`, or `nil` if no workflow with that name has ever been started. Shape:
+
+```json
+{
+  "name": "dock-connected",
+  "state": "running",
+  "step": "waiting for monitor",
+  "started_at": 1710000000000,
+  "updated_at": 1710000001500,
+  "error": null
+}
+```
+
+`state` is one of `running`, `done`, `failed`, `timed_out`. `error` is set (the captured Lua error message) only when `state` is `failed`.
+
+#### `bread.workflow.list() -> table`
+Returns an array of every workflow's current status, in the same shape as `bread.workflow.status`.
 
 ### State
 
@@ -744,6 +816,99 @@ Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bre
 | `bread.notify.sent` | `{ title, message, urgency }` |
 | `bread.state.changed.<path>` | emitted by state watches |
 
+#### Terminal (shell precmd/preexec hooks)
+
+Requires `bread hooks install shell` and sourcing the generated script from your shell rc — see the CLI reference. Fires via the `bread-emit` helper, not the daemon reaching out.
+
+| Event | Data |
+|-------|------|
+| `bread.terminal.command.started` | `{ cmd, cwd }` |
+| `bread.terminal.command.finished` | `{ cmd, cwd, exit_code, duration_ms }` |
+| `bread.terminal.cwd.changed` | `{ cwd, prev_cwd }` |
+
+Terminal events are exempt from the daemon's event dedup window (running the same command twice in quick succession is legitimate, not noise).
+
+#### Git (hooks + dirty-state poller)
+
+`bread.git.commit.created`/`bread.git.branch.changed` come from git hooks installed via `bread hooks install git` (current repo only; never overwrites an existing hook). `bread.git.state.*`/`bread.git.ahead_behind.changed` come from an in-daemon poller over configured project roots (`[adapters.git] roots = [...]` in `breadd.toml`) and never fire for the same transition a hook already reported.
+
+| Event | Data |
+|-------|------|
+| `bread.git.commit.created` | `{ repo, sha, branch, message }` |
+| `bread.git.branch.changed` | `{ repo, branch, previous_ref }` |
+| `bread.git.state.dirty` | `{ repo }` |
+| `bread.git.state.clean` | `{ repo }` |
+| `bread.git.ahead_behind.changed` | `{ repo, ahead, behind, branch }` |
+
+#### Filesystem / project detection
+
+Scoped to configured project roots (`[adapters.filesystem] roots = [...]`), not the whole filesystem. `.git`/`node_modules` are always silent; `target`/`dist`/`build` are silent for edits but reported on new-file creation as `build_artifact.created`.
+
+| Event | Data |
+|-------|------|
+| `bread.project.detected` | `{ root, markers }` (markers: any of `.git`, `Cargo.toml`, `package.json`, `go.mod`) |
+| `bread.project.file.changed` | `{ path, project_root }` |
+| `bread.project.build_artifact.created` | `{ path, project_root }` |
+
+#### Systemd (`systemd --user` units)
+
+Only units named in `[adapters.systemd] units = [...]` are watched — subscribing to every user unit is noisy.
+
+| Event | Data |
+|-------|------|
+| `bread.service.started` | `{ unit }` |
+| `bread.service.stopped` | `{ unit }` |
+| `bread.service.failed` | `{ unit, result }` (`result` may be `null`) |
+
+#### Podman (containers)
+
+Degrades to simply not emitting if the `podman` binary isn't installed — no daemon startup dependency on it.
+
+| Event | Data |
+|-------|------|
+| `bread.container.started` | `{ id, name, image }` |
+| `bread.container.stopped` | `{ id, name }` |
+| `bread.container.health.changed` | `{ id, name, health }` |
+
+#### Remote (SSH session detection)
+
+Rides the same shell-hook transport as Terminal events (`bread hooks install shell`).
+
+| Event | Data |
+|-------|------|
+| `bread.remote.session.started` | `{ host }` |
+| `bread.remote.session.ended` | `{ host }` |
+
+---
+
+## Namespaces
+
+*Since: v1.1 — the `AdapterSource::App` variant and the known-apps registry (`bread_shared::apps::KNOWN_APPS`). No sibling app emits through this path yet as of this writing except the breadclip pilot (see its own `EVENTS.md` once that lands); the daemon-side plumbing and the convention itself are what v1.1 adds.*
+
+Two dotted-name segments are reserved, permanent parts of the schema — not one-off conventions:
+
+- **`bread.<app>.*`** — inbound events published *by* a sibling `bread*` application about its own state (e.g. `bread.clip.copied`). An app may only publish within its own segment; the daemon enforces this at the IPC boundary (a socket client claiming a `source` of an app id it doesn't own is rejected the same way spoofing `power`/`hyprland` is rejected today).
+- **`bread.command.<app>.<verb>`** — outbound commands *to* a sibling application (e.g. `bread.command.clip.clear`). Any module or app may publish; only the target app subscribes. This reuses the existing event bus in both directions — there is no separate request/response protocol.
+- The second dotted segment is drawn from a small known-apps registry (`bread_shared::apps::KNOWN_APPS`); daemon-internal domains (`terminal`, `git`, `hyprland`, `device`, `power`, `network`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow`) are reserved and cannot be claimed as app ids.
+- **Commands are best-effort.** Publishing `bread.command.<app>.<verb>` with no subscriber (the app isn't installed or isn't running) is a silent no-op — there is nothing to special-case, and no error is raised. An app that acts on a command *should* emit a corresponding `bread.<app>.<verb>.done` (or `.failed`) confirmation; a module that needs to know a command was actually honored must `bread.wait`/`bread.wait_any` on that confirmation with a timeout rather than assume success. There is no mandatory request/response correlation layer — most commands are legitimately fire-and-forget, and building one would contradict the "no listener, no-op" degradation property.
+- **`bread.exec("<cli> ...")`** remains the zero-infrastructure fallback for triggering a sibling app that has a synchronous CLI and no need for a structured response.
+
+---
+
+## Integrating a bread\* app
+
+This is the checklist for adding a new sibling `bread*` application to the fabric — it's deliberately short, because the whole design goal of the name-based app registry (over one `AdapterSource` enum variant per app) is that this never requires a daemon change beyond step 1. **breadclip is the reference implementation** — see its own `EVENTS.md` for a worked example of every step below.
+
+1. **Register your app id.** Add it to `KNOWN_APPS` in `bread-shared/src/lib.rs` (a one-line, one-word-per-app list) — this is the only change to the `bread` repo itself a new integration needs.
+2. **Depend on `bread-utils` with the `bread-client` feature.** In your app's daemon (the long-running piece, if you have one — a short-lived CLI tool can use `bread-emit` instead, see below), add `bread-utils = { ..., features = ["bread-client"] }` and use `bread_utils::bread_client::BreadClient`:
+   - `BreadClient::connect(app_id)` — cheap, cannot fail (there is no persistent connection to fail at construction time).
+   - `client.emit(event, data)` — publish within your own `bread.<app_id>.*` namespace. Each call is its own short-lived connection (fire-and-forget, like `bread-emit`) — safe to call from a short-lived per-event process invocation, not just from inside a long-running loop.
+   - `client.subscribe("bread.command.<app_id>.**", |event| { ... })` — receive commands addressed to you, on a background thread with its own reconnect/backoff loop.
+3. **If you don't have a persistent daemon at all** (just a CLI tool invoked occasionally), skip `bread-client` entirely and shell out to `bread-emit` instead (see `bread-emit`'s own `--help`) — it's built for exactly that case (occasional callers that can't justify holding a socket open).
+4. **Emit confirmations for commands you honor.** `bread.<app_id>.<verb>.done` or `.failed` after acting on a `bread.command.<app_id>.<verb>` — optional, but it's what lets a Lua workflow `bread.wait`/`bread.wait_any` for the real outcome instead of assuming success the moment it publishes a command.
+5. **Write an `EVENTS.md`** in your app's own repo cataloguing every event you publish and every command verb you honor, with `data` shapes — the per-app companion to this file. Be honest about what's *not* implemented yet rather than stubbing a verb that does nothing (see breadclip's `EVENTS.md` for how it documents `pin`/`select` as deliberately deferred, not silently dropped).
+6. **Make it opt-out, not opt-in-only, and fail silent.** Your app should work exactly the same whether breadd is installed or not — connecting/emitting/subscribing must never block, error, or crash your app just because the daemon is absent. `BreadClient` is built this way already (dropped no-op on a failed `emit`, transparent reconnect on `subscribe`); if you roll your own transport instead, keep that property.
+
 ---
 
 ## Dictionary: Runtime state schema
@@ -794,11 +959,21 @@ Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bre
       "builtin": true,
       "store": {}
     }
+  ],
+  "workflows": [
+    {
+      "name": "dock-connected",
+      "state": "running",
+      "step": "waiting for monitor",
+      "started_at": 1710000000000,
+      "updated_at": 1710000001500,
+      "error": null
+    }
   ]
 }
 ```
 
-`status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`.
+`modules[].status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`. `workflows[].state` values: `running`, `done`, `failed`, `timed_out` *(Since: v1.2 — see [Workflows](#workflows-since-v12))*.
 
 ---
 
@@ -823,7 +998,7 @@ Available methods:
 | Method | Params | Description |
 |--------|--------|-------------|
 | `ping` | — | Connectivity check |
-| `health` | — | Version, uptime, PID, adapter status |
+| `health` | — | Version, uptime, PID, adapter status, `api_version` |
 | `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
 | `state.dump` | — | Return the full `RuntimeState` as JSON |
 | `modules.list` | — | List all loaded modules and their status |
@@ -832,4 +1007,7 @@ Available methods:
 | `profile.activate` | `name` | Switch active profile |
 | `events.subscribe` | — | Upgrade to streaming mode; pushes events line by line |
 | `events.replay` | `since_ms` | Replay buffered events from the last N ms |
-| `emit` | `event`, `data` | Inject a synthetic event into the pipeline |
+| `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly tagged `System` (legacy path). With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. Any other `source` value is rejected — this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
+| `workflows.list` | — | List running/completed workflow instances and their step/status *(Since: v1.2)* |
+
+The `health` response's `api_version` field lets a client — the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app — assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).

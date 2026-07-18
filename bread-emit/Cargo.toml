@@ -1,0 +1,12 @@
+[package]
+name = "bread-emit"
+version = "0.6.6"
+edition = "2021"
+
+[[bin]]
+name = "bread-emit"
+path = "src/main.rs"
+
+[dependencies]
+bread-shared = { path = "../bread-shared" }
+serde_json.workspace = true

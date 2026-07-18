@@ -155,12 +155,18 @@ mod tests {
     #[test]
     fn dot_double_star_does_not_match_sibling_prefix() {
         assert!(!matches_pattern("bread.device.**", "bread.devicex"));
-        assert!(!matches_pattern("bread.device.**", "bread.network.connected"));
+        assert!(!matches_pattern(
+            "bread.device.**",
+            "bread.network.connected"
+        ));
     }
 
     #[test]
     fn mid_pattern_star_does_not_cross_dots() {
-        assert!(matches_pattern("bread.*.connected", "bread.alpha.connected"));
+        assert!(matches_pattern(
+            "bread.*.connected",
+            "bread.alpha.connected"
+        ));
         assert!(!matches_pattern(
             "bread.*.connected",
             "bread.alpha.beta.connected"

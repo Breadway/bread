@@ -100,6 +100,138 @@ async fn emit_without_event_errors() -> Result<()> {
 }
 
 #[tokio::test]
+async fn emit_with_internal_source_is_rejected() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // "power" is a real internal AdapterSource — a socket client must not be
+    // able to spoof it via sourced emit.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "source": "power", "kind": "ac.connected", "data": {} }),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "spoofing an internal source must be rejected"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(msg.contains("not externally injectable"), "got: {msg}");
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_with_unregistered_app_source_is_rejected() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "source": "notanapp", "kind": "bread.notanapp.thing", "data": {} }),
+        )
+        .await;
+    assert!(result.is_err(), "unregistered app id must be rejected");
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_with_known_app_source_routes_through_normalizer() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe = json!({
+        "id": "sub-app",
+        "method": "events.subscribe",
+        "params": { "filter": "bread.clip.**" }
+    });
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+
+    let mut reader = BufReader::new(read_half).lines();
+    reader
+        .next_line()
+        .await?
+        .ok_or_else(|| anyhow!("missing subscribe ack"))?;
+
+    harness
+        .send_request(
+            "emit",
+            json!({
+                "source": "clip",
+                "kind": "bread.clip.copied",
+                "data": { "kind": "url", "len": 42 }
+            }),
+        )
+        .await?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut received: Option<Value> = None;
+    while Instant::now() < deadline {
+        let Some(line) = reader.next_line().await? else {
+            break;
+        };
+        let event: Value = serde_json::from_str(&line)?;
+        if event.get("event").and_then(Value::as_str) == Some("bread.clip.copied") {
+            received = Some(event);
+            break;
+        }
+    }
+
+    let event = received.expect("did not receive bread.clip.copied on the stream");
+    assert_eq!(
+        event
+            .get("source")
+            .and_then(|s| s.get("app"))
+            .and_then(Value::as_str),
+        Some("clip")
+    );
+    assert_eq!(
+        event.get("data").and_then(|d| d.get("len")),
+        Some(&json!(42))
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_with_app_source_rejects_wrong_namespace() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // "clip" is a registered app id, but the event name belongs to "pad" —
+    // an app may only publish within its own namespace segment.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({
+                "source": "clip",
+                "kind": "bread.pad.reminder.due",
+                "data": {}
+            }),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "cross-app namespace claim must be rejected"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(msg.contains("namespace"), "got: {msg}");
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn state_get_returns_specific_subtree() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
@@ -389,6 +521,129 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn workflow_reaches_done_via_wait_any_happy_path() -> Result<()> {
+    let harness = TestHarness::spawn_with_init(
+        r#"
+        bread.workflow.define("test-flow", function()
+            bread.workflow.step("started")
+            local event = bread.wait_any({"bread.test.a", "bread.test.b"}, { timeout = 5000 })
+            bread.workflow.step("waited")
+            if not event then
+                error("did not receive expected event")
+            end
+        end)
+
+        bread.on("bread.test.trigger", function()
+            bread.workflow.start("test-flow")
+        end)
+        "#,
+    )?;
+    harness.wait_until_ready().await?;
+
+    harness
+        .send_request("emit", json!({ "event": "bread.test.trigger", "data": {} }))
+        .await?;
+    // Give the workflow a moment to register and reach the wait_any point
+    // before firing the event it's blocked on.
+    sleep(Duration::from_millis(200)).await;
+    harness
+        .send_request("emit", json!({ "event": "bread.test.a", "data": {} }))
+        .await?;
+
+    let status = poll_workflow_status(&harness, "test-flow", "done").await?;
+    assert_eq!(status.get("step").and_then(Value::as_str), Some("waited"));
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn workflow_times_out_when_deadline_exceeded() -> Result<()> {
+    let harness = TestHarness::spawn_with_init(
+        r#"
+        bread.workflow.define("timeout-flow", function()
+            bread.workflow.step("waiting")
+            bread.wait("bread.test.never")
+            bread.workflow.step("unreachable")
+        end)
+
+        bread.on("bread.test.trigger", function()
+            bread.workflow.start("timeout-flow", { deadline = 300 })
+        end)
+        "#,
+    )?;
+    harness.wait_until_ready().await?;
+
+    harness
+        .send_request("emit", json!({ "event": "bread.test.trigger", "data": {} }))
+        .await?;
+
+    let status = poll_workflow_status(&harness, "timeout-flow", "timed_out").await?;
+    assert_eq!(status.get("step").and_then(Value::as_str), Some("waiting"));
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn workflow_captures_error_on_failure() -> Result<()> {
+    let harness = TestHarness::spawn_with_init(
+        r#"
+        bread.workflow.define("fail-flow", function()
+            bread.workflow.step("about-to-fail")
+            error("boom")
+        end)
+
+        bread.on("bread.test.trigger", function()
+            bread.workflow.start("fail-flow")
+        end)
+        "#,
+    )?;
+    harness.wait_until_ready().await?;
+
+    harness
+        .send_request("emit", json!({ "event": "bread.test.trigger", "data": {} }))
+        .await?;
+
+    let status = poll_workflow_status(&harness, "fail-flow", "failed").await?;
+    let error = status
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(error.contains("boom"), "got error: {error}");
+
+    harness.shutdown();
+    Ok(())
+}
+
+/// Polls `workflows.list` until `name` is present with `expected_state`, or
+/// times out after 5 seconds. Returns the matching entry.
+async fn poll_workflow_status(
+    harness: &TestHarness,
+    name: &str,
+    expected_state: &str,
+) -> Result<Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let list = harness.send_request("workflows.list", json!({})).await?;
+        if let Some(entries) = list.as_array() {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.get("name").and_then(Value::as_str) == Some(name))
+            {
+                if entry.get("state").and_then(Value::as_str) == Some(expected_state) {
+                    return Ok(entry.clone());
+                }
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Err(anyhow!(
+        "workflow '{name}' did not reach state '{expected_state}' in time"
+    ))
+}
+
 struct TestHarness {
     _temp: TempDir,
     child: Child,
@@ -397,6 +652,10 @@ struct TestHarness {
 
 impl TestHarness {
     fn spawn() -> Result<Self> {
+        Self::spawn_with_init("bread.on('bread.system.startup', function() end)\n")
+    }
+
+    fn spawn_with_init(init_lua: &str) -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -408,10 +667,7 @@ impl TestHarness {
         let bread_cfg = config_home.join("bread");
         fs::create_dir_all(bread_cfg.join("modules"))?;
 
-        fs::write(
-            bread_cfg.join("init.lua"),
-            "bread.on('bread.system.startup', function() end)\n",
-        )?;
+        fs::write(bread_cfg.join("init.lua"), init_lua)?;
 
         fs::write(
             bread_cfg.join("breadd.toml"),

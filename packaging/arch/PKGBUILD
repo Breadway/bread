@@ -1,11 +1,11 @@
-# Maintainer: Breadway <rileyhorsham@gmail.com>
+# Maintainer: Breadway <plasticbread849@gmail.com>
 
 pkgname=bread
 pkgver=0.6.6
 pkgrel=1
 pkgdesc="A reactive automation fabric for Linux desktops"
 arch=('x86_64')
-url="https://github.com/Breadway/bread"
+url="https://git.breadway.dev/Breadway/bread"
 license=('MIT')
 # mlua builds Lua from vendored C source. makepkg's default -flto=auto would
 # emit GCC LTO bitcode into liblua5.4.a, which the Rust (lld) link can't read,

@@ -20,7 +20,9 @@ use tracing::{error, info, warn};
 use crate::core::config::{Config, ModulesConfig, NotificationsConfig};
 use crate::core::state_engine::StateHandle;
 use crate::core::subscriptions::SubscriptionId;
-use crate::core::types::{DeviceRule, MatchCondition, ModuleLoadState, RuntimeState};
+use crate::core::types::{
+    DeviceRule, MatchCondition, ModuleLoadState, RuntimeState, WorkflowState, WorkflowStatus,
+};
 use bread_shared::now_unix_ms;
 
 pub enum LuaMessage {
@@ -1006,6 +1008,7 @@ impl LuaEngine {
         globals.set("bread", bread)?;
         self.install_require_loader()?;
         self.install_wait_helper()?;
+        self.install_workflow_helpers()?;
         self.install_log_helpers()?;
         self.install_debounce()?;
         Ok(())
@@ -1135,10 +1138,7 @@ impl LuaEngine {
 
         let (ordered, dep_errors) = order_module_decls(decls);
 
-        let mut decl_map = self
-            .module_decls
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut decl_map = self.module_decls.lock().unwrap_or_else(|e| e.into_inner());
         decl_map.clear();
         for decl in &ordered {
             decl_map.insert(decl.name.clone(), decl.clone());
@@ -1173,10 +1173,7 @@ impl LuaEngine {
             }
         }
 
-        *self
-            .module_order
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = load_order;
+        *self.module_order.lock().unwrap_or_else(|e| e.into_inner()) = load_order;
 
         Ok(())
     }
@@ -1685,6 +1682,359 @@ impl LuaEngine {
             .exec()?;
         Ok(())
     }
+
+    /// `bread.workflow` (define/start/step/status/list) and the multi-condition
+    /// wait helpers `bread.wait_any`/`bread.wait_all`. Composition (spawning,
+    /// yielding, timeouts) is plain Lua built on the existing `bread.spawn`/
+    /// `bread.on`/`bread.once`/`bread.after`/`bread.cancel`/`bread.off`
+    /// primitives from [`install_wait_helper`](Self::install_wait_helper) —
+    /// mirroring how that method itself works. Only the *introspectable
+    /// status* piece needs a Rust host bridge (the `__workflow_*` functions
+    /// below), since `workflows.list` is served over IPC from the async side
+    /// while the workflow body runs as a Lua coroutine on this dedicated Lua
+    /// thread; both sides read/write the same `Arc<RwLock<RuntimeState>>`
+    /// that `module_store_get`/`module_store_set` already use for exactly
+    /// this kind of cross-thread bridging.
+    fn install_workflow_helpers(&self) -> Result<()> {
+        let globals = self.lua.globals();
+        let bread: Table = globals.get("bread")?;
+
+        let state_arc = self.state_handle.state_arc();
+        let register_fn = self.lua.create_function(move |_lua, name: String| {
+            workflow_register(&state_arc, &name);
+            Ok(())
+        })?;
+        bread.set("__workflow_register", register_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let step_fn = self
+            .lua
+            .create_function(move |_lua, (name, label): (String, String)| {
+                workflow_step(&state_arc, &name, &label);
+                Ok(())
+            })?;
+        bread.set("__workflow_step", step_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let finish_fn = self.lua.create_function(move |_lua, name: String| {
+            workflow_finish(&state_arc, &name);
+            Ok(())
+        })?;
+        bread.set("__workflow_finish", finish_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let fail_fn = self
+            .lua
+            .create_function(move |_lua, (name, error): (String, String)| {
+                workflow_fail(&state_arc, &name, &error);
+                Ok(())
+            })?;
+        bread.set("__workflow_fail", fail_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let timeout_fn = self.lua.create_function(move |_lua, name: String| {
+            workflow_timeout(&state_arc, &name);
+            Ok(())
+        })?;
+        bread.set("__workflow_timeout", timeout_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let status_fn = self.lua.create_function(move |lua, name: String| {
+            match workflow_status_json(&state_arc, &name) {
+                Some(json) => lua
+                    .to_value(&json)
+                    .map_err(|e| LuaError::external(e.to_string())),
+                None => Ok(Value::Nil),
+            }
+        })?;
+        bread.set("__workflow_status", status_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let list_fn = self.lua.create_function(move |lua, ()| {
+            let json = workflow_list_json(&state_arc);
+            lua.to_value(&json)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        bread.set("__workflow_list", list_fn)?;
+
+        self.lua
+            .load(
+                r#"
+                bread.wait_any = function(patterns, opts)
+                    if type(patterns) ~= "table" then
+                        error("bread.wait_any requires a table of patterns")
+                    end
+                    opts = opts or {}
+                    local co = coroutine.running()
+                    if not co then
+                        error("bread.wait_any must be called inside a coroutine")
+                    end
+                    local ids = {}
+                    local timer
+                    local resumed = false
+                    local function cleanup()
+                        for _, id in ipairs(ids) do
+                            bread.off(id)
+                        end
+                        if timer then
+                            bread.cancel(timer)
+                        end
+                    end
+                    for _, pattern in ipairs(patterns) do
+                        local id = bread.once(pattern, function(event)
+                            if resumed then return end
+                            resumed = true
+                            cleanup()
+                            coroutine.resume(co, event, pattern)
+                        end)
+                        table.insert(ids, id)
+                    end
+                    if opts.timeout then
+                        timer = bread.after(opts.timeout, function()
+                            if resumed then return end
+                            resumed = true
+                            cleanup()
+                            coroutine.resume(co, nil, nil)
+                        end)
+                    end
+                    return coroutine.yield()
+                end
+
+                bread.wait_all = function(patterns, opts)
+                    if type(patterns) ~= "table" then
+                        error("bread.wait_all requires a table of patterns")
+                    end
+                    opts = opts or {}
+                    local co = coroutine.running()
+                    if not co then
+                        error("bread.wait_all must be called inside a coroutine")
+                    end
+                    local remaining = {}
+                    local count = 0
+                    for _, p in ipairs(patterns) do
+                        if remaining[p] == nil then
+                            remaining[p] = true
+                            count = count + 1
+                        end
+                    end
+                    local results = {}
+                    local got = 0
+                    local timer
+                    local resumed = false
+                    local ids = {}
+                    local function finish(timed_out)
+                        if resumed then return end
+                        resumed = true
+                        for _, id in ipairs(ids) do
+                            bread.off(id)
+                        end
+                        if timer then
+                            bread.cancel(timer)
+                        end
+                        if timed_out then
+                            results.timed_out = true
+                        end
+                        coroutine.resume(co, results)
+                    end
+                    for _, pattern in ipairs(patterns) do
+                        local id = bread.once(pattern, function(event)
+                            if remaining[pattern] then
+                                remaining[pattern] = nil
+                                results[pattern] = event
+                                got = got + 1
+                                if got >= count then
+                                    finish(false)
+                                end
+                            end
+                        end)
+                        table.insert(ids, id)
+                    end
+                    if opts.timeout then
+                        timer = bread.after(opts.timeout, function()
+                            finish(true)
+                        end)
+                    end
+                    return coroutine.yield()
+                end
+
+                bread.workflow = {}
+                local __workflow_bodies = {}
+                local __co_to_workflow = setmetatable({}, { __mode = "k" })
+
+                bread.workflow.define = function(name, fn)
+                    if type(name) ~= "string" then
+                        error("bread.workflow.define requires a name string")
+                    end
+                    __workflow_bodies[name] = fn
+                end
+
+                bread.workflow.start = function(name, opts)
+                    local fn = __workflow_bodies[name]
+                    if not fn then
+                        error("bread.workflow.start: no workflow defined with name '" .. tostring(name) .. "'")
+                    end
+                    opts = opts or {}
+
+                    bread.__workflow_register(name)
+
+                    local deadline_timer
+                    if opts.deadline then
+                        deadline_timer = bread.after(opts.deadline, function()
+                            bread.__workflow_timeout(name)
+                        end)
+                    end
+
+                    local co = coroutine.create(function()
+                        local ok, err = pcall(fn, opts.args)
+                        if deadline_timer then
+                            bread.cancel(deadline_timer)
+                        end
+                        if ok then
+                            bread.__workflow_finish(name)
+                        else
+                            bread.__workflow_fail(name, tostring(err))
+                        end
+                    end)
+                    __co_to_workflow[co] = name
+
+                    local ok, err = coroutine.resume(co)
+                    if not ok then
+                        bread.__workflow_fail(name, tostring(err))
+                    end
+                end
+
+                bread.workflow.step = function(label)
+                    local co = coroutine.running()
+                    local name = co and __co_to_workflow[co]
+                    if not name then
+                        error("bread.workflow.step must be called inside a running workflow body")
+                    end
+                    bread.__workflow_step(name, label)
+                end
+
+                bread.workflow.status = function(name)
+                    return bread.__workflow_status(name)
+                end
+
+                bread.workflow.list = function()
+                    return bread.__workflow_list()
+                end
+                "#,
+            )
+            .exec()?;
+        Ok(())
+    }
+}
+
+fn workflow_register(state_arc: &Arc<RwLock<RuntimeState>>, name: &str) {
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    let now = now_unix_ms();
+    if let Some(entry) = guard.workflows.iter_mut().find(|w| w.name == name) {
+        entry.state = WorkflowState::Running;
+        entry.step = None;
+        entry.started_at = now;
+        entry.updated_at = now;
+        entry.error = None;
+    } else {
+        guard.workflows.push(WorkflowStatus {
+            name: name.to_string(),
+            state: WorkflowState::Running,
+            step: None,
+            started_at: now,
+            updated_at: now,
+            error: None,
+        });
+    }
+}
+
+fn workflow_step(state_arc: &Arc<RwLock<RuntimeState>>, name: &str, label: &str) {
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    if let Some(entry) = guard.workflows.iter_mut().find(|w| w.name == name) {
+        entry.step = Some(label.to_string());
+        entry.updated_at = now_unix_ms();
+    }
+}
+
+fn workflow_finish(state_arc: &Arc<RwLock<RuntimeState>>, name: &str) {
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    if let Some(entry) = guard.workflows.iter_mut().find(|w| w.name == name) {
+        entry.state = WorkflowState::Done;
+        entry.updated_at = now_unix_ms();
+    }
+}
+
+fn workflow_fail(state_arc: &Arc<RwLock<RuntimeState>>, name: &str, error: &str) {
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    if let Some(entry) = guard.workflows.iter_mut().find(|w| w.name == name) {
+        entry.state = WorkflowState::Failed;
+        entry.error = Some(error.to_string());
+        entry.updated_at = now_unix_ms();
+    }
+}
+
+fn workflow_timeout(state_arc: &Arc<RwLock<RuntimeState>>, name: &str) {
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    if let Some(entry) = guard.workflows.iter_mut().find(|w| w.name == name) {
+        // Don't clobber a workflow that already reached a terminal state
+        // between the deadline firing and this callback running.
+        if entry.state == WorkflowState::Running {
+            entry.state = WorkflowState::TimedOut;
+            entry.updated_at = now_unix_ms();
+        }
+    }
+}
+
+fn workflow_status_json(state_arc: &Arc<RwLock<RuntimeState>>, name: &str) -> Option<JsonValue> {
+    let guard = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    let entry = guard.workflows.iter().find(|w| w.name == name)?;
+    serde_json::to_value(entry).ok()
+}
+
+fn workflow_list_json(state_arc: &Arc<RwLock<RuntimeState>>) -> JsonValue {
+    let guard = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    serde_json::to_value(&guard.workflows).unwrap_or_else(|_| JsonValue::Array(vec![]))
 }
 
 fn order_module_decls(decls: Vec<ModuleDecl>) -> (Vec<ModuleDecl>, Vec<(String, String)>) {
@@ -2312,7 +2662,9 @@ where
             .build()
         {
             Ok(rt) => rt.block_on(factory()),
-            Err(e) => Err(anyhow::anyhow!("bluetooth query: failed to build tokio runtime: {e}")),
+            Err(e) => Err(anyhow::anyhow!(
+                "bluetooth query: failed to build tokio runtime: {e}"
+            )),
         };
         let _ = tx.send(result);
     });

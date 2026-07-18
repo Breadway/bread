@@ -1,3 +1,5 @@
+mod hooks_git;
+mod hooks_shell;
 mod modules_mgmt;
 
 use anyhow::Result;
@@ -58,6 +60,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: ModulesCommand,
     },
+    /// Install shell/git hook integrations that feed events into breadd
+    Hooks {
+        #[command(subcommand)]
+        subcommand: HooksCommand,
+    },
     /// List available profiles
     ProfileList,
     /// Activate a profile
@@ -67,6 +74,13 @@ enum Commands {
         event: String,
         #[arg(short, long, default_value = "{}")]
         data: String,
+        /// Source to tag the event with (terminal/git/remote); routes through
+        /// the normalizer instead of being tagged System. Requires --kind.
+        #[arg(long)]
+        source: Option<String>,
+        /// Adapter-specific raw kind (e.g. "command.started"); only used with --source.
+        #[arg(long)]
+        kind: Option<String>,
     },
     /// Health check daemon connectivity
     Ping,
@@ -78,6 +92,19 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum HooksCommand {
+    /// Install shell integration hooks (precmd/preexec/chpwd + SSH session
+    /// detection) for the current or a named shell
+    InstallShell {
+        /// Force bash/zsh/fish instead of auto-detecting from $SHELL
+        shell: Option<String>,
+    },
+    /// Install git hooks (post-commit, post-checkout, post-merge) into the
+    /// current repository
+    InstallGit,
 }
 
 #[derive(Subcommand, Debug)]
@@ -137,6 +164,10 @@ async fn main() -> Result<()> {
         Commands::Modules { subcommand } => {
             handle_modules_cmd(subcommand, &socket).await?;
         }
+        Commands::Hooks { subcommand } => match subcommand {
+            HooksCommand::InstallShell { shell } => hooks_shell::install_shell(shell)?,
+            HooksCommand::InstallGit => hooks_git::install_git()?,
+        },
         Commands::ProfileList => {
             let response = send_request(&socket, "profile.list", json!({})).await?;
             print_json(&response)?;
@@ -146,17 +177,24 @@ async fn main() -> Result<()> {
                 send_request(&socket, "profile.activate", json!({ "name": name })).await?;
             print_json(&response)?;
         }
-        Commands::Emit { event, data } => {
+        Commands::Emit {
+            event,
+            data,
+            source,
+            kind,
+        } => {
             let parsed = serde_json::from_str::<Value>(&data).unwrap_or_else(|_| json!({}));
-            let response = send_request(
-                &socket,
-                "emit",
-                json!({
-                    "event": event,
-                    "data": parsed,
-                }),
-            )
-            .await?;
+            let mut params = json!({
+                "event": event,
+                "data": parsed,
+            });
+            if let Some(source) = source {
+                params["source"] = json!(source);
+            }
+            if let Some(kind) = kind {
+                params["kind"] = json!(kind);
+            }
+            let response = send_request(&socket, "emit", params).await?;
             print_json(&response)?;
         }
         Commands::Ping => {

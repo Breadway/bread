@@ -179,6 +179,65 @@ end
 return M
 ```
 
+## Example 4: Multi-step automation workflows
+
+The examples above are all single-event reactions: one trigger, one handler. `bread.wait`/`bread.spawn` (coroutine-based waits) and the `bread.workflow` table build on those to let a module walk through several ordered steps — with a timeout on any wait, and an overall deadline for the whole thing — rather than each step having to re-derive "am I still in the middle of handling the last event."
+
+Full source: `examples/modules/dock-workflow.lua`.
+
+```lua
+-- ~/.config/bread/modules/dock-workflow.lua
+local M = bread.module({ name = "dock-workflow", version = "1.0.0" })
+
+bread.workflow.define("dock-connected", function()
+    bread.workflow.step("applying layout")
+    bread.hyprland.keyword("monitor", "HDMI-A-1, preferred, 1920x0, 1")
+
+    bread.workflow.step("waiting for monitor")
+    -- wait_any resolves on whichever of these patterns fires first, or
+    -- returns nil after the timeout — it does not block forever.
+    local event = bread.wait_any(
+        { "bread.monitor.connected", "bread.hyprland.event" },
+        { timeout = 5000 }
+    )
+    if not event then
+        error("monitor did not appear in time")
+    end
+
+    bread.workflow.step("activating profile")
+    bread.profile.activate("docked")
+
+    bread.workflow.step("waiting for workspace")
+    bread.wait("bread.workspace.changed", { timeout = 3000 })
+
+    bread.workflow.step("notifying")
+    bread.notify("Dock connected", { title = "bread" })
+end)
+
+function M.on_load()
+    bread.on("bread.device.dock.connected", function()
+        -- The deadline covers the whole run, independent of each step's
+        -- own wait timeout — a safety net against something hanging.
+        bread.workflow.start("dock-connected", { deadline = 15000 })
+    end)
+end
+
+return M
+```
+
+Walking through what each piece buys you over a plain `bread.on` handler:
+
+- **`bread.workflow.define(name, fn)` / `.start(name, opts)`** — registers the body under a name, then runs it as a `bread.spawn`ed coroutine. `opts.deadline` (ms) marks the run `timed_out` in the registry if it hasn't reached a terminal state in time — this is independent of, and layered on top of, any per-step `timeout` inside the body. `opts.args` is passed through as the single argument to the body function, if you need to parameterize a run.
+- **`bread.workflow.step(label)`** — call it from inside the running body to record "currently here." It doesn't change control flow at all; it exists purely so `bread.workflow.status("dock-connected")` (or the CLI/dashboard) can answer "is this stuck, and where?" instead of a black box between start and finish.
+- **`bread.wait_any(patterns, opts)`** — like `bread.wait`, but resolves on the first of several patterns (useful when you're not sure which specific event a compositor/adapter will actually emit for a given transition — see the two candidate patterns above). `bread.wait_all(patterns, opts)` is the complementary primitive: it resolves once every listed pattern has fired at least once (or the timeout elapses), returning a table keyed by pattern.
+- **Errors are captured, not lost.** If the body raises (as it does above when the monitor never appears), the workflow's registry entry moves to `failed` with the message attached — visible via `bread.workflow.status(name)` or the `workflows.list` IPC method — rather than only ever showing up as a one-line log the moment it happened.
+
+Check on a running (or finished) workflow via the IPC method directly (there's no dedicated `bread` subcommand for this yet — see `workflows.list` in the [IPC protocol dictionary](Documentation.md#dictionary-ipc-protocol)):
+
+```bash
+echo '{"id":"1","method":"workflows.list","params":{}}' | nc -U -q0 "$XDG_RUNTIME_DIR/bread/breadd.sock"
+```
+
 ## Tips for porting your own scripts
 
 - Start by logging the event payload: `bread.log(event.data.raw)`

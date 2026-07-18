@@ -57,6 +57,14 @@ pub struct AdaptersConfig {
     pub network: AdapterToggle,
     #[serde(default)]
     pub bluetooth: AdapterToggle,
+    #[serde(default)]
+    pub filesystem: RootsConfig,
+    #[serde(default)]
+    pub systemd: SystemdConfig,
+    #[serde(default)]
+    pub podman: AdapterToggle,
+    #[serde(default)]
+    pub git: RootsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +87,30 @@ pub struct PowerConfig {
     pub enabled: bool,
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
+}
+
+/// Shared shape for adapters scoped to a list of project-root glob patterns
+/// (e.g. `~/Projects/*`) — used by both the filesystem and git adapters.
+/// `roots` defaults to empty: these adapters do nothing until the user opts
+/// in with actual paths, since there's no universally-safe default directory
+/// to watch.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RootsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemdConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Allowlist of `systemd --user` unit names to watch. Empty by default —
+    /// subscribing to every user unit's transitions is noisy, so nothing is
+    /// watched until the user names specific units.
+    #[serde(default)]
+    pub units: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -150,6 +182,24 @@ impl Default for PowerConfig {
     }
 }
 
+impl Default for RootsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            roots: Vec::new(),
+        }
+    }
+}
+
+impl Default for SystemdConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            units: Vec::new(),
+        }
+    }
+}
+
 impl Default for EventsConfig {
     fn default() -> Self {
         Self {
@@ -206,7 +256,20 @@ fn config_path() -> PathBuf {
     expand_home("~/.config/bread/breadd.toml")
 }
 
+/// Expands a leading `~/`. `~/.config/...` paths specifically prefer
+/// `$XDG_CONFIG_HOME` when it's set, consistent with `config_path()`'s own
+/// resolution of `breadd.toml` itself — otherwise the default `lua.entry_point`
+/// / `lua.module_path` values (`"~/.config/bread/init.lua"` and
+/// `"~/.config/bread/modules"`) would silently ignore `XDG_CONFIG_HOME` even
+/// though the config file that sets them was found via that same variable,
+/// which is exactly the kind of inconsistency that made init.lua/module
+/// loading silently no-op for a XDG_CONFIG_HOME-only test setup.
 fn expand_home(input: &str) -> PathBuf {
+    if let Some(stripped) = input.strip_prefix("~/.config/") {
+        if let Ok(xdg_config) = env::var("XDG_CONFIG_HOME") {
+            return Path::new(&xdg_config).join(stripped);
+        }
+    }
     if let Some(stripped) = input.strip_prefix("~/") {
         if let Ok(home) = env::var("HOME") {
             return Path::new(&home).join(stripped);
@@ -451,8 +514,9 @@ log_level = "trace"
 
     #[test]
     fn lua_entry_point_and_module_path_expand_tilde() {
-        let _g = EnvGuard::new(&["HOME"]);
+        let _g = EnvGuard::new(&["HOME", "XDG_CONFIG_HOME"]);
         std::env::set_var("HOME", "/synthetic/home");
+        std::env::remove_var("XDG_CONFIG_HOME");
         let cfg = Config::default();
         assert_eq!(
             cfg.lua_entry_point(),
@@ -461,6 +525,27 @@ log_level = "trace"
         assert_eq!(
             cfg.lua_module_path(),
             PathBuf::from("/synthetic/home/.config/bread/modules")
+        );
+    }
+
+    #[test]
+    fn lua_entry_point_and_module_path_prefer_xdg_config_home_when_set() {
+        // config_path() (finding breadd.toml itself) already prefers
+        // XDG_CONFIG_HOME over HOME; the `~/.config/...` defaults for
+        // entry_point/module_path must resolve consistently with it, or a
+        // XDG_CONFIG_HOME-only setup (no matching $HOME/.config layout)
+        // silently fails to find its own init.lua/modules.
+        let _g = EnvGuard::new(&["HOME", "XDG_CONFIG_HOME"]);
+        std::env::set_var("HOME", "/synthetic/home");
+        std::env::set_var("XDG_CONFIG_HOME", "/synthetic/xdg-config");
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.lua_entry_point(),
+            PathBuf::from("/synthetic/xdg-config/bread/init.lua")
+        );
+        assert_eq!(
+            cfg.lua_module_path(),
+            PathBuf::from("/synthetic/xdg-config/bread/modules")
         );
     }
 
