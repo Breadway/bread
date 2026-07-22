@@ -56,8 +56,14 @@ jobs:
       # spam a release per commit, so dl.breadway.dev/dev/ is the only
       # distribution point for this track.
       - name: regenerate dev index.json
+        env:
+          MINISIGN_SEC_KEY: ${{ secrets.BAKERY_MINISIGN_SEC_KEY_PATH }}
         run: |
           set -euo pipefail
+          if [ -z "${MINISIGN_SEC_KEY:-}" ]; then
+            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set — refusing to regenerate dev index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the dev track)"
+            exit 1
+          fi
           rm -rf /tmp/bread-ecosystem-ci
           git clone https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
           TRACK=dev bash /tmp/bread-ecosystem-ci/scripts/gen-index.sh
