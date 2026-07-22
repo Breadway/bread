@@ -238,6 +238,78 @@ Check on a running (or finished) workflow via the IPC method directly (there's n
 echo '{"id":"1","method":"workflows.list","params":{}}' | nc -U -q0 "$XDG_RUNTIME_DIR/bread/breadd.sock"
 ```
 
+## Example 5: A live widget in breadbar
+
+The examples above all react to something; they don't put anything on
+screen. `bread.widget` *(Since: v1.3)* does — a module declares a small node
+tree and breadbar (or any sibling app that renders `bread.widget.*`) shows
+it in one of five fixed layout slots, live-updated from Lua.
+
+Full source: `examples/modules/cpu-temp-widget.lua`.
+
+```lua
+-- ~/.config/bread/modules/cpu-temp-widget.lua
+local M = bread.module({ name = "cpu-temp-widget", version = "1.0.0" })
+
+local TEMP_PATH = "/sys/class/hwmon/hwmon6/temp1_input"
+local HOT_THRESHOLD_C = 80
+
+local function read_temp_c()
+    local raw = bread.fs.read(TEMP_PATH)
+    return raw and (tonumber(raw) / 1000) or nil
+end
+
+local function widget_root(temp_c)
+    local text = temp_c and string.format("%.0f°C", temp_c) or "—"
+    local hot = temp_c ~= nil and temp_c >= HOT_THRESHOLD_C
+    return {
+        type = "box",
+        children = {
+            {
+                type = "label",
+                text = text,
+                style = hot and { color = "red", weight = "bold" } or { color = "dim" },
+            },
+            {
+                type = "progress",
+                value = temp_c and math.min(temp_c / 100, 1.0) or 0,
+                style = hot and { color = "red" } or nil,
+            },
+        },
+    }
+end
+
+function M.on_load()
+    bread.widget.register({
+        id = "cpu-temp",
+        placement = "left_of_stats",
+        tooltip = "CPU package temperature (Tctl)",
+        root = widget_root(read_temp_c()),
+    })
+
+    bread.every(5000, function()
+        bread.widget.update("cpu-temp", { root = widget_root(read_temp_c()) })
+    end)
+end
+
+return M
+```
+
+Walking through what each piece buys you:
+
+- **`root` is a small typed tree, not markup.** `box`/`label`/`icon`/`progress` map directly onto GTK primitives, so any renderer can draw it without interpreting a DSL — see [Widgets](Documentation.md#widgets-since-v13) for the full node reference and the size/depth caps.
+- **`bread.widget.update(id, { root = ... })` replaces the whole tree.** There's no node-level patching — for something this small, rebuilding the tree on every tick (here, every 5s) is simpler than diffing, and it's cheap enough that it doesn't matter.
+- **`style` is a bounded, typed vocabulary, not a style string.** `color = "red"` here maps to one fixed CSS class the rendering app defines, resolved from the real pywal-derived palette — see [Widgets §style](Documentation.md#style-since-v14) for the full field list. There's also a freeform `class` escape hatch, but a module can't inject arbitrary CSS through either path.
+- **Clicks come back as events, not callbacks.** A node's `on_click` value isn't invoked directly — the rendering app emits `bread.bar.widget_clicked` with `{ widget_id, action }`, and your module reacts with a normal `bread.on` handler. See `examples/modules/bluetooth-toggle-widget.lua` for a widget that uses this to drive a real action (`bread.bluetooth.power`) instead of just displaying something — or `examples/modules/focus-mode-widget.lua` for one that drives `bread.profile.activate` and stays in sync when the profile changes from somewhere else entirely (the CLI, another module), not just from its own click.
+- **Placement is one of five fixed slots** (`tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats`) — see `examples/modules/active-window-widget.lua` for `right_of_workspaces` driven by `bread.state.watch` instead of a timer.
+- **A widget doesn't have to read hardware.** `examples/modules/workflow-status-widget.lua` polls `bread.workflow.list()` instead — the same engine from Example 4 — and sets `visible = false` to disappear entirely when there's nothing to report, rather than showing a stale or empty readout.
+
+Check what's currently registered over IPC (there's no dedicated `bread` subcommand for this yet — see `widgets.list` in the [IPC protocol dictionary](Documentation.md#dictionary-ipc-protocol)):
+
+```bash
+echo '{"id":"1","method":"widgets.list","params":{}}' | nc -U -q0 "$XDG_RUNTIME_DIR/bread/breadd.sock"
+```
+
 ## Tips for porting your own scripts
 
 - Start by logging the event payload: `bread.log(event.data.raw)`

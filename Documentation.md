@@ -11,6 +11,7 @@
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
   - [Workflows](#workflows-since-v12)
+  - [Widgets](#widgets-since-v13)
   - [Bluetooth](#bluetooth)
 - [Dictionary: Built-in modules](#dictionary-built-in-modules)
 - [Dictionary: Event reference](#dictionary-event-reference)
@@ -285,6 +286,105 @@ Returns the current status for `name`, or `nil` if no workflow with that name ha
 
 #### `bread.workflow.list() -> table`
 Returns an array of every workflow's current status, in the same shape as `bread.workflow.status`.
+
+### Widgets *(Since: v1.3)*
+
+Declarative, live-updating widgets rendered by sibling `bread*` apps (breadbar) in their own bar/popover free space. A widget is a small tree of typed nodes — `box`, `label`, `icon`, `progress` — not raw markup: this keeps rendering generic across every consuming app and keeps a node's appearance confined to a bounded, typed `style` vocabulary the renderer already knows about (see `style` below), with no style/CSS injection surface from Lua.
+
+Widgets are registered per-module and are re-registered fresh on every hot reload (the whole registry is cleared right before the Lua VM resets, same as `bread.module`'s per-reload re-execution) — call `bread.widget.register` at module top level or in `on_load`, not somewhere that only runs once ever.
+
+#### `bread.widget.register(spec) -> ok, err`
+Registers (or replaces, if `spec.id` already exists for this module) a widget. `spec`:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `id` | string | Local id, unique within your module. Stored/addressed elsewhere as `"<module>.<id>"`. |
+| `placement` | string | One of `tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats` — which fixed slot in the consuming app's layout this widget renders into. |
+| `order` | number | Optional, default `0`. Sort priority within a placement; lower sorts first. |
+| `visible` | bool | Optional, default `true`. |
+| `tooltip` | string | Optional. |
+| `root` | node | The render tree (see Node types below). |
+
+Returns `true` on success, or `false, err` if `root` fails validation (tree too deep, too many nodes, or an invalid `class`), `root` contains a `style` field with a value outside its enum (a deserialization error, reported the same way), or `bread.widget.register` was called outside a module.
+
+##### Node types
+
+Every node accepts an optional `style` (a bounded, typed vocabulary — see below; this is the primary way to control a node's appearance), an optional `class` (a small freeform escape hatch, see [Style vs. class](#style-vs-class) below), and an optional `on_click` (any Lua value, passed through opaquely — see Click events below).
+
+| `type` | Fields |
+|--------|--------|
+| `box` | `orientation` (`"horizontal"` \| `"vertical"`, default horizontal), `spacing`, `children` (array of nodes) |
+| `label` | `text` |
+| `icon` | `name` (bundled icon) or `path` (arbitrary SVG file) — exactly one; `size` |
+| `progress` | `value` (0.0–1.0) |
+
+A tree is capped at depth 4 (root counts as depth 1) and 50 total nodes — comfortably enough for a status readout, not enough to build a full custom UI.
+
+```lua
+bread.widget.register({
+    id = "weather",
+    placement = "left_of_stats",
+    tooltip = "Sydney: Partly cloudy",
+    root = {
+        type = "box",
+        children = {
+            { type = "icon", name = "cloud" },
+            { type = "label", text = "22°C", style = { color = "dim" }, on_click = "refresh" },
+        },
+    },
+})
+```
+
+##### `style` *(Since: v1.4)*
+
+`style` is a bounded, typed vocabulary for a node's appearance — every field is a small closed enum, not a string, so a typo is a `bread.widget.register` validation failure at registration time, not a silently-ignored CSS class. There is deliberately **no raw CSS/style-string field** anywhere in this API: a module can only ever pick from the fixed set below, never inject arbitrary style.
+
+| Field | Type | Values |
+|-------|------|--------|
+| `color` | string | `fg`, `dim` (muted foreground), `accent`, `red`, `green`, `yellow`, `blue`, `pink`, `teal` |
+| `weight` | string | `normal`, `bold` |
+| `size` | string | `xs`, `sm`, `md`, `lg`, `xl` — text size in px (10/12/14/16/20); `sm`/`md` match the bread design system's own secondary/base font sizes |
+| `align` | string | `start`, `center`, `end` |
+| `background` | string | `none`, `surface`, `card` (surface + rounded corners + padding) |
+| `radius` | string | `none`, `sm`, `md`, `full` (pill) |
+| `padding` | string | `none`, `xs`, `sm`, `md` |
+
+Every field is optional and independent — set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when pywal's palette changes instead of drifting out of sync.
+
+```lua
+{ type = "label", text = "LOW BATTERY", style = { color = "yellow", weight = "bold" } }
+```
+
+##### Style vs. `class`
+
+`class` still exists as an escape hatch for a CSS class the *consuming app's own stylesheet* happens to define (restricted to `^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`) — useful if you're targeting a specific app you know the internals of, but undiscoverable and app-specific otherwise. As of this writing, breadbar's stylesheet only gives real meaning to `dim` this way (fades a node to 60% opacity) — everything else a module needs (color, weight, size, alignment, background, radius, padding) should go through `style` instead, which every renderer is expected to understand identically.
+
+#### `bread.widget.update(id, patch) -> ok, err`
+Patches an already-registered widget (local `id`, not the fully-qualified form). Any of `root`, `tooltip`, `visible`, `order` may be given; omitted fields are left as-is. `root`, when given, replaces the whole tree — there is no node-level patching. Returns `false, "no such widget"` if `id` isn't registered.
+
+```lua
+bread.widget.update("weather", {
+    root = { type = "box", children = { { type = "label", text = "23°C" } } },
+})
+```
+
+#### `bread.widget.remove(id) -> bool`
+Removes a widget registered by the calling module. Returns whether anything was removed.
+
+#### `bread.widget.list() -> table`
+Returns an array of every widget the calling module currently has registered.
+
+##### Click events
+
+A clicked node's `on_click` value doesn't travel back through `breadd` directly — the rendering app (breadbar) emits `bread.bar.widget_clicked` with `{ widget_id, action }` (`action` being whatever you put in `on_click`), because a rendering app may only publish inside its own `bread.<app_id>.*` namespace (see [Namespaces](#namespaces)). React to it like any other event, filtering on `widget_id`:
+
+```lua
+bread.on("bread.bar.widget_clicked", function(e)
+    if e.data.widget_id == "weather.weather" then
+        -- e.data.action == "refresh"
+    end
+end)
+```
 
 ### State
 
@@ -816,6 +916,17 @@ Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bre
 | `bread.notify.sent` | `{ title, message, urgency }` |
 | `bread.state.changed.<path>` | emitted by state watches |
 
+#### Widgets *(Since: v1.3)*
+
+Emitted by `breadd` itself on every `bread.widget.*` mutation — see [Widgets](#widgets-since-v13). `data` is the full `WidgetSpec` for `registered`/`updated`; just `{ id }` for `removed`.
+
+| Event | Data |
+|-------|------|
+| `bread.widget.registered` | `{ id, module, placement, order, visible, tooltip, root, updated_at }` |
+| `bread.widget.updated` | same shape as `registered` |
+| `bread.widget.removed` | `{ id }` |
+| `bread.widget.cleared` | `{}` — fired once at the end of every module reload (`bread reload`), whether or not the widget set actually changed. The registry itself is wiped and re-populated as modules re-run; this is a "go re-fetch" signal for consumers that only react to `bread.widget.*` events, so a module that stops registering widgets (e.g. gets disabled) is noticed even though nothing else fires. |
+
 #### Terminal (shell precmd/preexec hooks)
 
 Requires `bread hooks install shell` and sourcing the generated script from your shell rc — see the CLI reference. Fires via the `bread-emit` helper, not the daemon reaching out.
@@ -884,6 +995,8 @@ Rides the same shell-hook transport as Terminal events (`bread hooks install she
 ## Namespaces
 
 *Since: v1.1 — the `AdapterSource::App` variant and the known-apps registry (`bread_shared::apps::KNOWN_APPS`). No sibling app emits through this path yet as of this writing except the breadclip pilot (see its own `EVENTS.md` once that lands); the daemon-side plumbing and the convention itself are what v1.1 adds.*
+
+*Since: v1.3 — breadbar is now an active `bread-client` consumer under the `bar` app id (already present in `KNOWN_APPS`): it emits `bread.bar.widget_clicked` for widget clicks (see [Widgets](#widgets-since-v13)) and reads `bread.widget.*` to render the [Dictionary: Runtime state schema](#dictionary-runtime-state-schema)'s `widgets` field.*
 
 Two dotted-name segments are reserved, permanent parts of the schema — not one-off conventions:
 
@@ -969,11 +1082,30 @@ This is the checklist for adding a new sibling `bread*` application to the fabri
       "updated_at": 1710000001500,
       "error": null
     }
+  ],
+  "widgets": [
+    {
+      "id": "weather.weather",
+      "module": "weather",
+      "placement": "left_of_stats",
+      "order": 0,
+      "visible": true,
+      "tooltip": "Sydney: Partly cloudy",
+      "root": {
+        "type": "box",
+        "orientation": "horizontal",
+        "children": [
+          { "type": "icon", "name": "cloud" },
+          { "type": "label", "text": "22°C" }
+        ]
+      },
+      "updated_at": 1710000001500
+    }
   ]
 }
 ```
 
-`modules[].status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`. `workflows[].state` values: `running`, `done`, `failed`, `timed_out` *(Since: v1.2 — see [Workflows](#workflows-since-v12))*.
+`modules[].status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`. `workflows[].state` values: `running`, `done`, `failed`, `timed_out` *(Since: v1.2 — see [Workflows](#workflows-since-v12))*. `widgets[].placement` values: `tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats` *(Since: v1.3 — see [Widgets](#widgets-since-v13))*.
 
 ---
 
@@ -1009,5 +1141,6 @@ Available methods:
 | `events.replay` | `since_ms` | Replay buffered events from the last N ms |
 | `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly tagged `System` (legacy path). With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. Any other `source` value is rejected — this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
 | `workflows.list` | — | List running/completed workflow instances and their step/status *(Since: v1.2)* |
+| `widgets.list` | — | List all registered widgets across every module *(Since: v1.3)* |
 
 The `health` response's `api_version` field lets a client — the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app — assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).

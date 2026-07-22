@@ -38,6 +38,7 @@ pub enum StateCommand {
     },
     ClearSubscriptions,
     ClearModules,
+    ClearWidgets,
     SetModuleStatus {
         name: String,
         status: ModuleLoadState,
@@ -115,6 +116,10 @@ impl StateHandle {
 
     pub fn clear_modules(&self) {
         let _ = self.command_tx.send(StateCommand::ClearModules);
+    }
+
+    pub fn clear_widgets(&self) {
+        let _ = self.command_tx.send(StateCommand::ClearWidgets);
     }
 
     pub fn set_module_status(
@@ -289,6 +294,9 @@ async fn handle_command(
         }
         StateCommand::ClearModules => {
             state.write().await.modules.clear();
+        }
+        StateCommand::ClearWidgets => {
+            state.write().await.widgets.clear();
         }
         StateCommand::SetModuleStatus {
             name,

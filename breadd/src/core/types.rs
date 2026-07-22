@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
+use bread_shared::widget::WidgetSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -15,6 +16,10 @@ pub struct RuntimeState {
     pub profile: ProfileState,
     pub modules: Vec<ModuleStatus>,
     pub workflows: Vec<WorkflowStatus>,
+    /// Widgets registered via `bread.widget.register` from any Lua module,
+    /// keyed implicitly by `WidgetSpec.id` (fully-qualified `<module>.<local_id>`).
+    /// Surfaced via the `widgets.list` IPC method for breadbar to render.
+    pub widgets: Vec<WidgetSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -27,7 +27,7 @@ use crate::lua::RuntimeHandle;
 /// something new-but-additive (a binding, an event, an IPC param); bump the
 /// major version only for a breaking change, which should not happen inside
 /// this daemon's v1 lifetime per that section's stated policy.
-const API_VERSION: &str = "1.2.0";
+const API_VERSION: &str = "1.4.0";
 
 #[derive(Clone)]
 pub struct Server {
@@ -221,6 +221,10 @@ impl Server {
             "workflows.list" => {
                 let full = self.state_handle.state_dump().await;
                 Ok(full.get("workflows").cloned().unwrap_or_else(|| json!([])))
+            }
+            "widgets.list" => {
+                let full = self.state_handle.state_dump().await;
+                Ok(full.get("widgets").cloned().unwrap_or_else(|| json!([])))
             }
             "modules.reload" => {
                 let started = Instant::now();

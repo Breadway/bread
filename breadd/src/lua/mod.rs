@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use bread_shared::widget::{WidgetNode, WidgetPlacement, WidgetSpec};
 use bread_shared::{AdapterSource, BreadEvent};
 use mlua::{Error as LuaError, Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 use tokio::task;
@@ -181,6 +182,11 @@ struct TimerEntry {
     callback: RegistryKey,
     repeating: bool,
     cancel_tx: watch::Sender<bool>,
+    /// The module active when `bread.after`/`bread.every` registered this
+    /// timer, so `handle_timer` can restore module context for the callback
+    /// (needed by module-scoped APIs like `bread.widget.*`) — same
+    /// `current_module` capture used for `bread.on`'s `HandlerEntry.module`.
+    module: Option<String>,
 }
 
 #[derive(Clone)]
@@ -253,6 +259,7 @@ impl LuaEngine {
         self.cancel_all_timers();
         self.state_handle.clear_subscriptions();
         self.state_handle.clear_modules();
+        self.state_handle.clear_widgets();
         self.lua = Lua::new();
         self.handlers
             .lock()
@@ -280,6 +287,21 @@ impl LuaEngine {
         self.load_profiles()?;
         self.load_init_and_modules()?;
         self.run_on_reload();
+
+        // clear_widgets() above is silent (no event) since it's just a state
+        // wipe ahead of modules re-registering. That's a problem when a
+        // module goes from "registered some widgets" to "disabled and
+        // skipped" across this reload: nothing re-registers, so no
+        // bread.widget.registered fires, and a renderer that only refetches
+        // on bread.widget.* events (see breadbar's widgets::client) never
+        // learns the registry emptied out. One definitive signal per reload,
+        // regardless of whether anything actually changed, closes that gap.
+        let _ = self.emit_tx.send(BreadEvent::new(
+            "bread.widget.cleared",
+            AdapterSource::System,
+            serde_json::json!({}),
+        ));
+
         info!("lua runtime reloaded");
         Ok(())
     }
@@ -618,12 +640,17 @@ impl LuaEngine {
         let timers = self.timers.clone();
         let next_timer_id = self.next_timer_id.clone();
         let lua_tx = self.lua_tx.clone();
+        let current_module = self.current_module.clone();
         let after_fn =
             self.lua
                 .create_function(move |lua, (delay_ms, callback): (u64, Function)| {
                     let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
                     let key = lua.create_registry_value(callback)?;
                     let (cancel_tx, mut cancel_rx) = watch::channel(false);
+                    let module = current_module
+                        .lock()
+                        .map_err(|_| LuaError::external("module context lock poisoned"))?
+                        .clone();
                     timers
                         .lock()
                         .map_err(|_| LuaError::external("timer lock poisoned"))?
@@ -633,6 +660,7 @@ impl LuaEngine {
                                 callback: key,
                                 repeating: false,
                                 cancel_tx,
+                                module,
                             },
                         );
                     let lua_tx = lua_tx.clone();
@@ -653,12 +681,17 @@ impl LuaEngine {
         let timers = self.timers.clone();
         let next_timer_id = self.next_timer_id.clone();
         let lua_tx = self.lua_tx.clone();
+        let current_module = self.current_module.clone();
         let every_fn =
             self.lua
                 .create_function(move |lua, (interval_ms, callback): (u64, Function)| {
                     let id = TimerId(next_timer_id.fetch_add(1, Ordering::Relaxed));
                     let key = lua.create_registry_value(callback)?;
                     let (cancel_tx, mut cancel_rx) = watch::channel(false);
+                    let module = current_module
+                        .lock()
+                        .map_err(|_| LuaError::external("module context lock poisoned"))?
+                        .clone();
                     timers
                         .lock()
                         .map_err(|_| LuaError::external("timer lock poisoned"))?
@@ -668,6 +701,7 @@ impl LuaEngine {
                                 callback: key,
                                 repeating: true,
                                 cancel_tx,
+                                module,
                             },
                         );
                     let lua_tx = lua_tx.clone();
@@ -737,7 +771,7 @@ impl LuaEngine {
                 .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            lua.to_value(&json)
+            json_to_lua(lua, &json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("active_window", active_window_fn)?;
@@ -747,7 +781,7 @@ impl LuaEngine {
                 hyprland_request("j/monitors").map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            lua.to_value(&json)
+            json_to_lua(lua, &json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("monitors", monitors_fn)?;
@@ -757,7 +791,7 @@ impl LuaEngine {
                 hyprland_request("j/workspaces").map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            lua.to_value(&json)
+            json_to_lua(lua, &json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("workspaces", workspaces_fn)?;
@@ -767,7 +801,7 @@ impl LuaEngine {
                 hyprland_request("j/clients").map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            lua.to_value(&json)
+            json_to_lua(lua, &json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("clients", clients_fn)?;
@@ -840,9 +874,7 @@ impl LuaEngine {
             let state_arc_get = state_arc.clone();
             let get_fn = lua.create_function(move |lua, key: String| {
                 if let Some(value) = module_store_get(&state_arc_get, &module_name, &key) {
-                    return lua
-                        .to_value(&value)
-                        .map_err(|e| LuaError::external(e.to_string()));
+                    return json_to_lua(lua, &value).map_err(|e| LuaError::external(e.to_string()));
                 }
                 Ok(Value::Nil)
             })?;
@@ -874,6 +906,122 @@ impl LuaEngine {
             Ok(module_tbl)
         })?;
         bread.set("module", module_fn)?;
+
+        // bread.widget — declarative, live-updating widgets rendered by
+        // sibling bread* apps (breadbar) in their bar/popover free space.
+        // Follows the same Rust-backed-registry pattern as bread.workflow
+        // (see install_workflow_helpers / workflow_register below):
+        // mutate RuntimeState.widgets via the try_write spin-lock, then
+        // emit a bread.widget.* event so subscribers (and, indirectly,
+        // breadbar's events.subscribe stream) observe the change.
+        let widget_tbl = self.lua.create_table()?;
+
+        let state_arc = self.state_handle.state_arc();
+        let current_module = self.current_module.clone();
+        let emit_tx = self.emit_tx.clone();
+        let widget_register_fn = self.lua.create_function(
+            move |lua, spec_table: Table| -> mlua::Result<(bool, Option<String>)> {
+                let module = current_module
+                    .lock()
+                    .map_err(|_| LuaError::external("module context lock poisoned"))?
+                    .clone()
+                    .ok_or_else(|| {
+                        LuaError::external("bread.widget.register must be called from within a module")
+                    })?;
+                let args: WidgetRegisterArgs = match lua.from_value(Value::Table(spec_table)) {
+                    Ok(a) => a,
+                    Err(e) => return Ok((false, Some(e.to_string()))),
+                };
+                Ok(match widget_register(&state_arc, &module, args) {
+                    Ok(spec) => {
+                        let data = serde_json::to_value(&spec).unwrap_or_default();
+                        let _ = emit_tx.send(BreadEvent::new(
+                            "bread.widget.registered",
+                            AdapterSource::System,
+                            data,
+                        ));
+                        (true, None)
+                    }
+                    Err(e) => (false, Some(e.to_string())),
+                })
+            },
+        )?;
+        widget_tbl.set("register", widget_register_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let current_module = self.current_module.clone();
+        let emit_tx = self.emit_tx.clone();
+        let widget_update_fn = self.lua.create_function(
+            move |lua, (local_id, patch): (String, Table)| -> mlua::Result<(bool, Option<String>)> {
+                let module = current_module
+                    .lock()
+                    .map_err(|_| LuaError::external("module context lock poisoned"))?
+                    .clone()
+                    .ok_or_else(|| {
+                        LuaError::external("bread.widget.update must be called from within a module")
+                    })?;
+                let args: WidgetUpdateArgs = match lua.from_value(Value::Table(patch)) {
+                    Ok(a) => a,
+                    Err(e) => return Ok((false, Some(e.to_string()))),
+                };
+                Ok(match widget_update(&state_arc, &module, &local_id, args) {
+                    Ok(Some(spec)) => {
+                        let data = serde_json::to_value(&spec).unwrap_or_default();
+                        let _ = emit_tx.send(BreadEvent::new(
+                            "bread.widget.updated",
+                            AdapterSource::System,
+                            data,
+                        ));
+                        (true, None)
+                    }
+                    Ok(None) => (false, Some("no such widget".to_string())),
+                    Err(e) => (false, Some(e.to_string())),
+                })
+            },
+        )?;
+        widget_tbl.set("update", widget_update_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let current_module = self.current_module.clone();
+        let emit_tx = self.emit_tx.clone();
+        let widget_remove_fn = self.lua.create_function(move |_lua, local_id: String| {
+            let module = current_module
+                .lock()
+                .map_err(|_| LuaError::external("module context lock poisoned"))?
+                .clone()
+                .ok_or_else(|| {
+                    LuaError::external("bread.widget.remove must be called from within a module")
+                })?;
+            let full_id = format!("{module}.{local_id}");
+            let removed = widget_remove(&state_arc, &module, &local_id);
+            if removed {
+                let _ = emit_tx.send(BreadEvent::new(
+                    "bread.widget.removed",
+                    AdapterSource::System,
+                    serde_json::json!({ "id": full_id }),
+                ));
+            }
+            Ok(removed)
+        })?;
+        widget_tbl.set("remove", widget_remove_fn)?;
+
+        let state_arc = self.state_handle.state_arc();
+        let current_module = self.current_module.clone();
+        let widget_list_fn = self.lua.create_function(move |lua, ()| {
+            let module = current_module
+                .lock()
+                .map_err(|_| LuaError::external("module context lock poisoned"))?
+                .clone()
+                .ok_or_else(|| {
+                    LuaError::external("bread.widget.list must be called from within a module")
+                })?;
+            let json = widget_list_json(&state_arc, &module);
+            json_to_lua(lua, &json)
+                .map_err(|e| LuaError::external(e.to_string()))
+        })?;
+        widget_tbl.set("list", widget_list_fn)?;
+
+        bread.set("widget", widget_tbl)?;
 
         // bread.machine — hostname/tags; reads an optional, externally-managed
         // ~/.config/bread/sync.toml if present (bread does not create it)
@@ -1122,10 +1270,22 @@ impl LuaEngine {
             .into_iter()
             .filter(|p| !is_lib_path(&self.module_path, p))
         {
+            let name = module_name_from_path(&self.module_path, &path);
+            // bos-settings' module picker writes filenames (e.g.
+            // "widget.lua") into `disable`, not the bare module name a file
+            // registers under via bread.module({name=...}) — match either
+            // form so both conventions work rather than requiring the UI
+            // and the daemon to agree on one exact string.
+            let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+            if disabled.contains(&name) || disabled.contains(filename) {
+                self.state_handle
+                    .set_module_status(name, ModuleLoadState::Disabled, None, false);
+                continue;
+            }
+
             match self.scan_module_decl(&path) {
                 Ok(decl) => decls.push(decl),
                 Err(err) => {
-                    let name = module_name_from_path(&self.module_path, &path);
                     self.state_handle.set_module_status(
                         name,
                         ModuleLoadState::LoadError,
@@ -1192,8 +1352,7 @@ impl LuaEngine {
             return Err(anyhow!("module did not call bread.module"));
         }
 
-        self.run_on_load(&decl.name);
-        Ok(())
+        self.run_on_load(&decl.name)
     }
 
     fn load_lua_file(&self, path: &Path, module_name: &str, builtin: bool) -> Result<()> {
@@ -1257,26 +1416,28 @@ impl LuaEngine {
         }
 
         if let Some(filter) = filter {
-            let event_value = self.lua.to_value(&event)?;
+            let event_value = json_to_lua(&self.lua, &event)?;
             let allowed = filter.call::<_, bool>(event_value).unwrap_or(false);
             if !allowed {
                 return Ok(());
             }
         }
 
+        self.set_current_module(module.clone());
         let result = match kind {
             HandlerKind::Event => {
-                let event_value = self.lua.to_value(&event)?;
+                let event_value = json_to_lua(&self.lua, &event)?;
                 callback.call::<_, ()>(event_value)
             }
             HandlerKind::StateWatch => {
                 let new_val = event.data.get("new").cloned().unwrap_or(JsonValue::Null);
                 let old_val = event.data.get("old").cloned().unwrap_or(JsonValue::Null);
-                let new_lua = self.lua.to_value(&new_val)?;
-                let old_lua = self.lua.to_value(&old_val)?;
+                let new_lua = json_to_lua(&self.lua, &new_val)?;
+                let old_lua = json_to_lua(&self.lua, &old_val)?;
                 callback.call::<_, ()>((new_lua, old_lua))
             }
         };
+        self.set_current_module(None);
 
         if let Err(err) = result {
             error!(subscription = id.0, error = %err, "lua callback failed");
@@ -1286,15 +1447,18 @@ impl LuaEngine {
     }
 
     fn handle_timer(&self, id: TimerId) -> Result<()> {
-        let (callback, repeating) = {
+        let (callback, repeating, module) = {
             let timers = self.timers.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = timers.get(&id) else {
                 return Ok(());
             };
             let callback: Function = self.lua.registry_value(&entry.callback)?;
-            (callback, entry.repeating)
+            (callback, entry.repeating, entry.module.clone())
         };
-        if let Err(err) = callback.call::<_, ()>(()) {
+        self.set_current_module(module);
+        let result = callback.call::<_, ()>(());
+        self.set_current_module(None);
+        if let Err(err) = result {
             error!(timer = id.0, error = %err, "lua timer callback failed");
         }
 
@@ -1312,19 +1476,24 @@ impl LuaEngine {
         }
     }
 
-    fn run_on_load(&self, name: &str) {
+    fn run_on_load(&self, name: &str) -> Result<()> {
         if let Some(hook) = self.get_module_hook(name, "on_load") {
-            if let Err(err) = hook.call::<_, ()>(()) {
+            self.set_current_module(Some(name.to_string()));
+            let result = hook.call::<_, ()>(());
+            self.set_current_module(None);
+            if let Err(err) = result {
                 error!(module = %name, error = %err, "module on_load failed");
-                let builtin = self.module_is_builtin(name);
-                self.state_handle.set_module_status(
-                    name.to_string(),
-                    ModuleLoadState::LoadError,
-                    Some(err.to_string()),
-                    builtin,
-                );
+                // Propagate rather than setting LoadError here directly: the
+                // caller (load_module, via load_init_and_modules) is the
+                // single place that decides Loaded vs LoadError for a
+                // module, so this failure isn't immediately clobbered back
+                // to Loaded by that outer Ok(()) branch — which is exactly
+                // what used to happen when this function swallowed the
+                // error and always returned successfully.
+                return Err(anyhow!(err.to_string()));
             }
         }
+        Ok(())
     }
 
     fn run_on_reload(&self) {
@@ -1335,7 +1504,10 @@ impl LuaEngine {
             .clone();
         for name in order {
             if let Some(hook) = self.get_module_hook(&name, "on_reload") {
-                if let Err(err) = hook.call::<_, ()>(()) {
+                self.set_current_module(Some(name.clone()));
+                let result = hook.call::<_, ()>(());
+                self.set_current_module(None);
+                if let Err(err) = result {
                     error!(module = %name, error = %err, "module on_reload failed");
                     let builtin = self.module_is_builtin(&name);
                     self.state_handle.set_module_status(
@@ -1357,7 +1529,10 @@ impl LuaEngine {
             .clone();
         for name in order.into_iter().rev() {
             if let Some(hook) = self.get_module_hook(&name, "on_unload") {
-                if let Err(err) = hook.call::<_, ()>(()) {
+                self.set_current_module(Some(name.clone()));
+                let result = hook.call::<_, ()>(());
+                self.set_current_module(None);
+                if let Err(err) = result {
                     error!(module = %name, error = %err, "module on_unload failed");
                     let builtin = self.module_is_builtin(&name);
                     self.state_handle.set_module_status(
@@ -1741,9 +1916,7 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let status_fn = self.lua.create_function(move |lua, name: String| {
             match workflow_status_json(&state_arc, &name) {
-                Some(json) => lua
-                    .to_value(&json)
-                    .map_err(|e| LuaError::external(e.to_string())),
+                Some(json) => json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string())),
                 None => Ok(Value::Nil),
             }
         })?;
@@ -1752,7 +1925,7 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let list_fn = self.lua.create_function(move |lua, ()| {
             let json = workflow_list_json(&state_arc);
-            lua.to_value(&json)
+            json_to_lua(lua, &json)
                 .map_err(|e| LuaError::external(e.to_string()))
         })?;
         bread.set("__workflow_list", list_fn)?;
@@ -2037,6 +2210,133 @@ fn workflow_list_json(state_arc: &Arc<RwLock<RuntimeState>>) -> JsonValue {
     serde_json::to_value(&guard.workflows).unwrap_or_else(|_| JsonValue::Array(vec![]))
 }
 
+/// Table shape accepted by `bread.widget.register`. Parsed directly from the
+/// Lua table via mlua's serde bridge, so `root`'s nested `children` tables
+/// deserialize straight into a `WidgetNode` tree without a manual walker.
+#[derive(Debug, Deserialize)]
+struct WidgetRegisterArgs {
+    id: String,
+    placement: WidgetPlacement,
+    #[serde(default)]
+    order: i32,
+    #[serde(default = "default_widget_visible")]
+    visible: bool,
+    #[serde(default)]
+    tooltip: Option<String>,
+    root: WidgetNode,
+}
+
+/// Table shape accepted by `bread.widget.update` — every field optional, so
+/// a caller can patch just what changed (typically just `root` on a timer).
+#[derive(Debug, Default, Deserialize)]
+struct WidgetUpdateArgs {
+    #[serde(default)]
+    root: Option<WidgetNode>,
+    #[serde(default)]
+    tooltip: Option<String>,
+    #[serde(default)]
+    visible: Option<bool>,
+    #[serde(default)]
+    order: Option<i32>,
+}
+
+fn default_widget_visible() -> bool {
+    true
+}
+
+fn widget_register(
+    state_arc: &Arc<RwLock<RuntimeState>>,
+    module: &str,
+    args: WidgetRegisterArgs,
+) -> std::result::Result<WidgetSpec, bread_shared::widget::WidgetValidationError> {
+    args.root.validate()?;
+    let spec = WidgetSpec {
+        id: format!("{module}.{}", args.id),
+        module: module.to_string(),
+        placement: args.placement,
+        order: args.order,
+        visible: args.visible,
+        tooltip: args.tooltip,
+        root: args.root,
+        updated_at: now_unix_ms(),
+    };
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    if let Some(existing) = guard.widgets.iter_mut().find(|w| w.id == spec.id) {
+        *existing = spec.clone();
+    } else {
+        guard.widgets.push(spec.clone());
+    }
+    Ok(spec)
+}
+
+fn widget_update(
+    state_arc: &Arc<RwLock<RuntimeState>>,
+    module: &str,
+    local_id: &str,
+    args: WidgetUpdateArgs,
+) -> std::result::Result<Option<WidgetSpec>, bread_shared::widget::WidgetValidationError> {
+    if let Some(root) = &args.root {
+        root.validate()?;
+    }
+    let full_id = format!("{module}.{local_id}");
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    let Some(entry) = guard.widgets.iter_mut().find(|w| w.id == full_id) else {
+        return Ok(None);
+    };
+    if let Some(root) = args.root {
+        entry.root = root;
+    }
+    if let Some(tooltip) = args.tooltip {
+        entry.tooltip = Some(tooltip);
+    }
+    if let Some(visible) = args.visible {
+        entry.visible = visible;
+    }
+    if let Some(order) = args.order {
+        entry.order = order;
+    }
+    entry.updated_at = now_unix_ms();
+    Ok(Some(entry.clone()))
+}
+
+fn widget_remove(state_arc: &Arc<RwLock<RuntimeState>>, module: &str, local_id: &str) -> bool {
+    let full_id = format!("{module}.{local_id}");
+    let mut guard = loop {
+        if let Ok(g) = state_arc.try_write() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    let before = guard.widgets.len();
+    guard.widgets.retain(|w| w.id != full_id);
+    before != guard.widgets.len()
+}
+
+fn widget_list_json(state_arc: &Arc<RwLock<RuntimeState>>, module: &str) -> JsonValue {
+    let guard = loop {
+        if let Ok(g) = state_arc.try_read() {
+            break g;
+        }
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    };
+    let mine: Vec<&WidgetSpec> = guard.widgets.iter().filter(|w| w.module == module).collect();
+    serde_json::to_value(&mine).unwrap_or_else(|_| JsonValue::Array(vec![]))
+}
+
 fn order_module_decls(decls: Vec<ModuleDecl>) -> (Vec<ModuleDecl>, Vec<(String, String)>) {
     let mut errors = Vec::new();
     let mut map: HashMap<String, ModuleDecl> = HashMap::new();
@@ -2129,6 +2429,27 @@ fn is_lib_path(module_root: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// `lua.to_value()`'s default `Options` map JSON null / Rust `Option::None`
+/// to a distinct `lua.null()` sentinel rather than real Lua `nil`, to
+/// preserve JSON round-trip fidelity — but bread never round-trips a Lua
+/// value back into JSON through mlua, so that distinction buys nothing here
+/// and only sets a trap for the ordinary Lua idiom `if not value then ...`,
+/// which silently doesn't catch the sentinel (found via a module crashing
+/// on `#value` when `active_window` was null: `not <sentinel>` is `false`,
+/// same as any other non-nil value). Every JSON/state value handed to Lua
+/// goes through this instead of a bare `to_value` call.
+fn json_to_lua<'lua, T>(lua: &'lua Lua, value: &T) -> mlua::Result<Value<'lua>>
+where
+    T: Serialize + ?Sized,
+{
+    lua.to_value_with(
+        value,
+        mlua::SerializeOptions::new()
+            .serialize_none_to_null(false)
+            .serialize_unit_to_null(false),
+    )
+}
+
 fn state_value_to_lua<'lua>(
     lua: &'lua Lua,
     state_arc: &Arc<RwLock<RuntimeState>>,
@@ -2147,9 +2468,7 @@ fn state_value_to_lua<'lua>(
     let mut value =
         serde_json::to_value(&*snapshot).map_err(|e| LuaError::external(e.to_string()))?;
     if path.is_empty() {
-        return lua
-            .to_value(&value)
-            .map_err(|e| LuaError::external(e.to_string()));
+        return json_to_lua(lua, &value).map_err(|e| LuaError::external(e.to_string()));
     }
     for part in path.split('.') {
         value = value
@@ -2157,8 +2476,7 @@ fn state_value_to_lua<'lua>(
             .cloned()
             .ok_or_else(|| LuaError::external("state path not found"))?;
     }
-    lua.to_value(&value)
-        .map_err(|e| LuaError::external(e.to_string()))
+    json_to_lua(lua, &value).map_err(|e| LuaError::external(e.to_string()))
 }
 
 fn module_store_get(

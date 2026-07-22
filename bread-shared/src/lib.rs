@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod apps;
 pub mod glob;
+pub mod widget;
 
 /// Identifies which adapter produced an event.
 ///
