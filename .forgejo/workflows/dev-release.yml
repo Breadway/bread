@@ -1,0 +1,63 @@
+name: dev release
+
+# Publishes a dev-track build on every push to `dev` — separate from
+# release.yml's tag-triggered stable releases. See bread-ecosystem's
+# docs/release-channels.md for the three-track policy this is part of.
+on:
+  push:
+    branches: ['dev']
+
+jobs:
+  build:
+    runs-on: [self-hosted, hestia]
+    steps:
+      - name: checkout
+        run: |
+          set -euo pipefail
+          rm -rf src && mkdir src
+          git clone --branch dev --depth 1 \
+            "https://git.breadway.dev/${GITHUB_REPOSITORY}.git" src
+
+      - name: build
+        run: cd src && cargo build --release --locked
+
+      - name: test
+        run: cd src && cargo test --release --locked --workspace
+
+      # breadd/Cargo.toml is the canonical version source (this workspace has
+      # no shared workspace.package.version — breadd and bread-cli are kept
+      # in lockstep manually).
+      - name: compute dev version
+        run: |
+          set -euo pipefail
+          cd src
+          CUR="$(grep -m1 '^version' breadd/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          IFS='.' read -r MA MI PA <<< "${CUR}"
+          SHA="$(git rev-parse --short HEAD)"
+          TS="$(date -u +%Y%m%d%H%M%S)"
+          echo "VERSION=${MA}.${MI}.$((PA + 1))-dev.${TS}+${SHA}" >> "$GITHUB_ENV"
+
+      - name: prepare artifacts
+        run: |
+          set -euo pipefail
+          PKG_DIR="/srv/breadway-dl/dev/bread/${VERSION}"
+          mkdir -p "${PKG_DIR}"
+          for bin in breadd bread; do
+            cp "src/target/release/${bin}" "${PKG_DIR}/${bin}-x86_64"
+            strip "${PKG_DIR}/${bin}-x86_64"
+            sha256sum "${PKG_DIR}/${bin}-x86_64" | awk '{print $1}' \
+              > "${PKG_DIR}/${bin}-x86_64.sha256"
+          done
+          cp src/packaging/systemd/breadd.service "${PKG_DIR}/"
+          cp src/bakery.toml "${PKG_DIR}/bakery.toml"
+          ln -sfn "${VERSION}" "/srv/breadway-dl/dev/bread/latest"
+
+      # No GitHub Release upload — dev builds happen on every push and would
+      # spam a release per commit, so dl.breadway.dev/dev/ is the only
+      # distribution point for this track.
+      - name: regenerate dev index.json
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/bread-ecosystem-ci
+          git clone https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
+          TRACK=dev bash /tmp/bread-ecosystem-ci/scripts/gen-index.sh
