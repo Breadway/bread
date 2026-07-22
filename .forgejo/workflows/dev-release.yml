@@ -65,5 +65,9 @@ jobs:
             exit 1
           fi
           rm -rf /tmp/bread-ecosystem-ci
-          git clone https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
+          # --branch dev: the TRACK-aware gen-index.sh isn't merged to
+          # bread-ecosystem's main yet, so a default clone would silently
+          # run the old track-blind script against the stable index instead
+          # of writing dl.breadway.dev/dev/index.json at all.
+          git clone --branch dev https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
           TRACK=dev bash /tmp/bread-ecosystem-ci/scripts/gen-index.sh

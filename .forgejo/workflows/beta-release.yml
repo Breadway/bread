@@ -51,5 +51,7 @@ jobs:
             exit 1
           fi
           rm -rf /tmp/bread-ecosystem-ci
-          git clone https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
+          # --branch dev: see dev-release.yml — the TRACK-aware gen-index.sh
+          # isn't merged to bread-ecosystem's main yet.
+          git clone --branch dev https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
           TRACK=beta bash /tmp/bread-ecosystem-ci/scripts/gen-index.sh
