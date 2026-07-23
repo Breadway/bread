@@ -34,6 +34,7 @@ jobs:
               > "${PKG_DIR}/${bin}-x86_64.sha256"
           done
           cp src/packaging/systemd/breadd.service "${PKG_DIR}/"
+          cp src/LICENSE "${PKG_DIR}/"
           cp src/bakery.toml "${PKG_DIR}/bakery.toml"
           ln -sfn "${VERSION}" "/srv/breadway-dl/bread/latest"
 

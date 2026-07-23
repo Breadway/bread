@@ -5,22 +5,14 @@ This directory contains distribution packaging for Bread.
 
 ```
 packaging/
-├── arch/
-│   └── PKGBUILD          ← Arch Linux package build script
 └── systemd/
     └── breadd.service    ← systemd user service unit
 ```
 
-## Arch Linux
-
-```bash
-cd packaging/arch
-makepkg -si
-```
-
-The PKGBUILD builds both `breadd` and `bread` from source and installs them to `/usr/bin`. It also installs the systemd user service unit to `/usr/lib/systemd/user/`.
-
-Before publishing to the AUR, update `pkgver`, `source`, and `sha256sums` to point at a tagged release tarball.
+Prebuilt binaries are distributed exclusively via `bakery` (see the main
+README) — there is no Arch/pacman package for `bread` anymore. `bakery`
+installs the systemd user service unit itself, matching the `packaging/systemd/breadd.service`
+file here.
 
 ## systemd user service
 

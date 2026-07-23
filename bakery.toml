@@ -4,6 +4,7 @@ binaries = ["breadd", "bread"]
 system_deps = ["systemd-libs", "openssl", "zlib"]
 optional_system_deps = ["bluez", "hyprland"]
 bread_deps = []
+license_file = "LICENSE"
 
 [[service]]
 unit = "breadd.service"
