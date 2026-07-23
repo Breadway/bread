@@ -429,6 +429,29 @@ Activate a named profile. Emits `bread.profile.activated` over IPC.
 #### `bread.exec(cmd)`
 Run a shell command. Fire-and-forget (async, does not block Lua).
 
+#### `bread.exec_capture(cmd, opts) -> ok, stdout`
+Run a shell command and return its result: `ok` is whether it exited zero,
+`stdout` is its captured standard output. Unlike `bread.exec`, this blocks
+the calling Lua callback until the command exits (or the timeout below
+elapses), so it's only appropriate for fast, local commands — e.g.
+`git -C <dir> rev-parse --abbrev-ref HEAD`, not anything that hits the
+network or waits on user input.
+
+```lua
+local ok, branch = bread.exec_capture("git -C " .. dir .. " rev-parse --abbrev-ref HEAD")
+if ok then
+    branch = branch:gsub("%s+$", "")  -- trailing newline
+end
+```
+
+Options:
+
+| Key | Type | Default |
+|-----|------|---------|
+| `timeout_ms` | number | `2000` |
+
+On timeout or spawn failure, returns `false, ""`.
+
 ### Notifications
 
 #### `bread.notify(message, opts)`
@@ -494,8 +517,19 @@ Read a file. Returns `nil` if the file does not exist. `~` is expanded.
 #### `bread.fs.exists(path) -> bool`
 Returns true if the path exists. `~` is expanded.
 
+#### `bread.fs.readlink(path) -> string | nil`
+Read a symlink's target. Returns `nil` if the path doesn't exist or isn't a
+symlink. Distinct from `bread.fs.read`, which opens and reads file
+*contents* — for something like `/proc/<pid>/cwd`, the payload is the link
+target itself, not a file to read.
+
 #### `bread.fs.expand(path) -> string`
 Expand `~` to the home directory.
+
+#### `bread.json.decode(str) -> table | nil`
+Parse a JSON string into a Lua table. Returns `nil` on malformed input.
+Pairs naturally with `bread.exec_capture` for consuming JSON output from a
+CLI (e.g. `kitty @ ls`).
 
 ### Hyprland
 

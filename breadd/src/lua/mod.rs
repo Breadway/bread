@@ -582,6 +582,43 @@ impl LuaEngine {
         })?;
         bread.set("exec", exec_fn)?;
 
+        // `bread.exec` is deliberately fire-and-forget (spawn_blocking, no
+        // result). This is the capturing counterpart for the common "run a
+        // fast local command and read its stdout back into Lua" case (e.g.
+        // `git -C <dir> rev-parse --abbrev-ref HEAD`). It blocks the calling
+        // Lua callback for real, so it's only appropriate for quick
+        // commands — hence the timeout. The subprocess itself runs on a
+        // plain std::thread (not spawn_blocking) so the Lua thread can wait
+        // on a channel with a deadline; `Command::output()` drains stdout
+        // internally as it reads, so a chatty command can't deadlock this by
+        // filling a pipe buffer while nobody's reading it. On timeout the
+        // spawned thread and its child are left to finish/exit on their own
+        // rather than force-killed — acceptable for the fast-command case
+        // this exists for, not worth the extra complexity for a rare hang.
+        let exec_capture_fn =
+            self.lua
+                .create_function(|_lua, (cmd, opts): (String, Option<Table>)| {
+                    let timeout_ms: u64 = opts
+                        .as_ref()
+                        .and_then(|o| o.get("timeout_ms").ok())
+                        .unwrap_or(2000);
+
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    std::thread::spawn(move || {
+                        let result = std::process::Command::new("sh").arg("-c").arg(&cmd).output();
+                        let _ = tx.send(result);
+                    });
+
+                    match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+                        Ok(Ok(output)) => Ok((
+                            output.status.success(),
+                            String::from_utf8_lossy(&output.stdout).to_string(),
+                        )),
+                        Ok(Err(_)) | Err(_) => Ok((false, String::new())),
+                    }
+                })?;
+        bread.set("exec_capture", exec_capture_fn)?;
+
         let notify_path = self.notifications_config.notify_send_path.clone();
         let default_urgency = self.notifications_config.default_urgency.clone();
         let default_timeout = self.notifications_config.default_timeout_ms;
@@ -1078,12 +1115,40 @@ impl LuaEngine {
             .create_function(|_lua, path: String| Ok(lua_expand_path(&path).exists()))?;
         fs_tbl.set("exists", exists_fn)?;
 
+        // Distinct from `read`: `/proc/<pid>/cwd` and friends are symlinks
+        // whose *target path* is the payload, not a file to open and read —
+        // `std::fs::read_to_string` on one of those fails with "Is a
+        // directory" (or reads the wrong thing for a symlink-to-file).
+        let readlink_fn = self.lua.create_function(|_lua, path: String| {
+            let expanded = lua_expand_path(&path);
+            match std::fs::read_link(&expanded) {
+                Ok(target) => Ok(Some(target.to_string_lossy().to_string())),
+                Err(_) => Ok(None),
+            }
+        })?;
+        fs_tbl.set("readlink", readlink_fn)?;
+
         let expand_fn = self.lua.create_function(|_lua, path: String| {
             Ok(lua_expand_path(&path).to_string_lossy().to_string())
         })?;
         fs_tbl.set("expand", expand_fn)?;
 
         bread.set("fs", fs_tbl)?;
+
+        // bread.json — for parsing output from things like `kitty @ ls` or
+        // any other JSON-emitting CLI invoked via bread.exec_capture. Uses
+        // the same null-handling as every other JSON entry point into Lua
+        // (json_to_lua, not a bare to_value) so `nil` behaves as Lua nil,
+        // not a sentinel.
+        let json_tbl = self.lua.create_table()?;
+        let decode_fn = self.lua.create_function(|lua, s: String| {
+            match serde_json::from_str::<JsonValue>(&s) {
+                Ok(v) => json_to_lua(lua, &v).map(Some).or(Ok(None)),
+                Err(_) => Ok(None),
+            }
+        })?;
+        json_tbl.set("decode", decode_fn)?;
+        bread.set("json", json_tbl)?;
 
         // bread.bluetooth — BlueZ control
         let bluetooth_tbl = self.lua.create_table()?;

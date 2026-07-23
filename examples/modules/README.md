@@ -26,6 +26,7 @@ bread reload
 | `bluetooth-toggle-widget.lua` | One-click Bluetooth power toggle in breadbar's tray, via `bread.widget` + a click handler. | none |
 | `focus-mode-widget.lua` | Click-to-toggle "Focus" profile that mutes audio; a widget as an action launcher, not just a readout, and stays in sync with profile changes triggered elsewhere. | none (needs `wpctl`) |
 | `workflow-status-widget.lua` | Surfaces `bread.workflow.list()` in breadbar's tray — shows whichever workflow (e.g. `dock-workflow.lua`, below) is currently running or failed, hidden otherwise. | none |
+| `git-branch-widget.lua` | Shows the repo + branch of whichever git repo the focused kitty tab is sitting in; yellow when dirty. Entirely self-contained in Lua — no adapter behind it. | kitty remote control (see the module's header comment) |
 
 Each module is the standard skeleton — `bread.module{...}`, an `on_load` that
 registers subscriptions, `return M` — so they double as references for writing
