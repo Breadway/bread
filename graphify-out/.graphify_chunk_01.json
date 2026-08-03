@@ -1,0 +1,1441 @@
+{
+  "nodes": [
+    {
+      "id": "bread-daemon",
+      "label": "Bread Daemon (breadd)",
+      "type": "tool",
+      "description": "Long-running Rust process that ingests signals, maintains runtime state, and dispatches events to Lua modules.",
+      "source_location": "README.md:17"
+    },
+    {
+      "id": "bread-cli",
+      "label": "Bread CLI",
+      "type": "tool",
+      "description": "Command-line interface that communicates with the daemon over a Unix socket.",
+      "source_location": "README.md:29"
+    },
+    {
+      "id": "bread-lua-runtime",
+      "label": "Lua Runtime",
+      "type": "tool",
+      "description": "Dedicated thread inside the daemon that executes automation logic and loads user modules.",
+      "source_location": "Documentation.md:28"
+    },
+    {
+      "id": "bread-automation-api-v1",
+      "label": "Bread Automation API v1",
+      "type": "documentation",
+      "description": "The versioned, stable contract covering Lua API, IPC methods, event vocabulary, and runtime-state schema.",
+      "source_location": "Documentation.md:36"
+    },
+    {
+      "id": "adapter-hyprland",
+      "label": "Hyprland Adapter",
+      "type": "tool",
+      "description": "Adapter that interfaces with Hyprland compositor IPC to deliver compositor events and state.",
+      "source_location": "Documentation.md:31"
+    },
+    {
+      "id": "adapter-udev",
+      "label": "Udev Adapter",
+      "type": "tool",
+      "description": "Adapter that interfaces with Linux udev to deliver hardware hotplug and device events.",
+      "source_location": "Documentation.md:31"
+    },
+    {
+      "id": "adapter-power",
+      "label": "Power Adapter",
+      "type": "tool",
+      "description": "Adapter that monitors power state via UPower and sysfs.",
+      "source_location": "Documentation.md:31"
+    },
+    {
+      "id": "adapter-network",
+      "label": "Network Adapter",
+      "type": "tool",
+      "description": "Adapter that monitors network state via rtnetlink and sysfs.",
+      "source_location": "Documentation.md:31"
+    },
+    {
+      "id": "adapter-bluetooth",
+      "label": "Bluetooth Adapter",
+      "type": "tool",
+      "description": "Adapter that interfaces with BlueZ to manage Bluetooth devices and events.",
+      "source_location": "Documentation.md:31"
+    },
+    {
+      "id": "bread-module",
+      "label": "Bread Module",
+      "type": "concept",
+      "description": "A Lua script that implements automation logic, loaded from ~/.config/bread/modules/.",
+      "source_location": "Documentation.md:84"
+    },
+    {
+      "id": "bread-module-manifest",
+      "label": "bread.module.toml",
+      "type": "configuration",
+      "description": "Manifest file that declares a module's name, version, description, author, and installation metadata.",
+      "source_location": "Documentation.md:141"
+    },
+    {
+      "id": "event-subscription",
+      "label": "Event Subscription (bread.on)",
+      "type": "function",
+      "description": "Core API to subscribe to matching events with a callback function.",
+      "source_location": "Documentation.md:184"
+    },
+    {
+      "id": "event-once",
+      "label": "One-time Event (bread.once)",
+      "type": "function",
+      "description": "Subscribe to an event once; the handler is removed after the first match.",
+      "source_location": "Documentation.md:196"
+    },
+    {
+      "id": "event-pattern-matching",
+      "label": "Event Pattern Matching",
+      "type": "concept",
+      "description": "Wildcard matching for events using *, **, and ? in dot-separated event names.",
+      "source_location": "Documentation.md:862"
+    },
+    {
+      "id": "bread-wait",
+      "label": "Coroutine Wait (bread.wait)",
+      "type": "function",
+      "description": "Coroutine-only helper that suspends until a matching event arrives, with optional timeout.",
+      "source_location": "Documentation.md:218"
+    },
+    {
+      "id": "bread-wait-any",
+      "label": "Wait Any (bread.wait_any)",
+      "type": "function",
+      "description": "Coroutine-only wait that resolves on the first of several event patterns to match.",
+      "source_location": "Documentation.md:233"
+    },
+    {
+      "id": "bread-wait-all",
+      "label": "Wait All (bread.wait_all)",
+      "type": "function",
+      "description": "Coroutine-only wait that resolves once every listed pattern has fired at least once.",
+      "source_location": "Documentation.md:248"
+    },
+    {
+      "id": "bread-spawn",
+      "label": "Spawn Coroutine (bread.spawn)",
+      "type": "function",
+      "description": "Spawn a coroutine and surface errors if it fails, required for using bread.wait.",
+      "source_location": "Documentation.md:230"
+    },
+    {
+      "id": "bread-workflow-define",
+      "label": "Workflow Definition (bread.workflow.define)",
+      "type": "function",
+      "description": "Register a multi-step automation workflow body under a name.",
+      "source_location": "Documentation.md:255"
+    },
+    {
+      "id": "bread-workflow-start",
+      "label": "Start Workflow (bread.workflow.start)",
+      "type": "function",
+      "description": "Run a registered workflow as a coroutine with optional deadline and arguments.",
+      "source_location": "Documentation.md:258"
+    },
+    {
+      "id": "bread-workflow-step",
+      "label": "Workflow Step (bread.workflow.step)",
+      "type": "function",
+      "description": "Record current step label in a running workflow for observability.",
+      "source_location": "Documentation.md:268"
+    },
+    {
+      "id": "bread-workflow-status",
+      "label": "Workflow Status (bread.workflow.status)",
+      "type": "function",
+      "description": "Query the current status of a named workflow including state, step, and error information.",
+      "source_location": "Documentation.md:271"
+    },
+    {
+      "id": "bread-widget-register",
+      "label": "Register Widget (bread.widget.register)",
+      "type": "function",
+      "description": "Register a declarative widget with a typed node tree for rendering in sibling apps like breadbar.",
+      "source_location": "Documentation.md:296"
+    },
+    {
+      "id": "bread-widget-update",
+      "label": "Update Widget (bread.widget.update)",
+      "type": "function",
+      "description": "Patch an already-registered widget, replacing the root tree or updating metadata.",
+      "source_location": "Documentation.md:362"
+    },
+    {
+      "id": "bread-widget-remove",
+      "label": "Remove Widget (bread.widget.remove)",
+      "type": "function",
+      "description": "Remove a widget registered by the calling module.",
+      "source_location": "Documentation.md:371"
+    },
+    {
+      "id": "bread-widget-node-types",
+      "label": "Widget Node Types",
+      "type": "concept",
+      "description": "Typed node vocabulary for widgets: box, label, icon, progress with style and click handlers.",
+      "source_location": "Documentation.md:310"
+    },
+    {
+      "id": "bread-widget-style",
+      "label": "Widget Style Vocabulary",
+      "type": "configuration",
+      "description": "Bounded, typed vocabulary for node appearance: color, weight, size, align, background, radius, padding.",
+      "source_location": "Documentation.md:342"
+    },
+    {
+      "id": "bread-state-get",
+      "label": "Read State (bread.state.get)",
+      "type": "function",
+      "description": "Read a state subtree by dotted path from the runtime state.",
+      "source_location": "Documentation.md:391"
+    },
+    {
+      "id": "bread-state-watch",
+      "label": "Watch State (bread.state.watch)",
+      "type": "function",
+      "description": "Watch a state path for changes and receive (new_value, old_value) on each change.",
+      "source_location": "Documentation.md:411"
+    },
+    {
+      "id": "bread-state-typed-shorthands",
+      "label": "State Typed Shorthands",
+      "type": "function",
+      "description": "Convenience functions like bread.state.monitors(), power(), network(), etc.",
+      "source_location": "Documentation.md:399"
+    },
+    {
+      "id": "bread-profile-activate",
+      "label": "Activate Profile (bread.profile.activate)",
+      "type": "function",
+      "description": "Activate a named profile and emit a profile.activated event.",
+      "source_location": "Documentation.md:424"
+    },
+    {
+      "id": "bread-exec",
+      "label": "Execute Command (bread.exec)",
+      "type": "function",
+      "description": "Run a shell command asynchronously (fire-and-forget, does not block Lua).",
+      "source_location": "Documentation.md:429"
+    },
+    {
+      "id": "bread-exec-capture",
+      "label": "Execute and Capture (bread.exec_capture)",
+      "type": "function",
+      "description": "Run a shell command and return its exit status and captured stdout, blocks Lua.",
+      "source_location": "Documentation.md:432"
+    },
+    {
+      "id": "bread-notify",
+      "label": "Send Notification (bread.notify)",
+      "type": "function",
+      "description": "Send a desktop notification via notify-send with optional title, urgency, timeout, and icon.",
+      "source_location": "Documentation.md:457"
+    },
+    {
+      "id": "bread-timer-after",
+      "label": "Timer After (bread.after)",
+      "type": "function",
+      "description": "Run a callback once after a specified delay in milliseconds.",
+      "source_location": "Documentation.md:473"
+    },
+    {
+      "id": "bread-timer-every",
+      "label": "Timer Every (bread.every)",
+      "type": "function",
+      "description": "Run a callback on a repeating interval in milliseconds.",
+      "source_location": "Documentation.md:476"
+    },
+    {
+      "id": "bread-debounce",
+      "label": "Debounce Function (bread.debounce)",
+      "type": "function",
+      "description": "Return a wrapper function that fires only after specified milliseconds of quiet time.",
+      "source_location": "Documentation.md:484"
+    },
+    {
+      "id": "bread-logging",
+      "label": "Logging Functions",
+      "type": "function",
+      "description": "bread.log(), bread.warn(), and bread.error() for outputting to daemon logs.",
+      "source_location": "Documentation.md:494"
+    },
+    {
+      "id": "bread-machine-name",
+      "label": "Machine Name (bread.machine.name)",
+      "type": "function",
+      "description": "Get the system hostname, with optional override from ~/.config/bread/sync.toml.",
+      "source_location": "Documentation.md:499"
+    },
+    {
+      "id": "bread-machine-tags",
+      "label": "Machine Tags (bread.machine.tags)",
+      "type": "function",
+      "description": "Get machine tags from sync.toml for conditional behavior across multiple systems.",
+      "source_location": "Documentation.md:504"
+    },
+    {
+      "id": "bread-fs-operations",
+      "label": "Filesystem Operations",
+      "type": "function",
+      "description": "bread.fs functions: write, read, exists, readlink, expand for file operations.",
+      "source_location": "Documentation.md:511"
+    },
+    {
+      "id": "bread-json-decode",
+      "label": "JSON Decode (bread.json.decode)",
+      "type": "function",
+      "description": "Parse a JSON string into a Lua table, returns nil on malformed input.",
+      "source_location": "Documentation.md:529"
+    },
+    {
+      "id": "bread-hyprland-api",
+      "label": "Hyprland API (bread.hyprland.*)",
+      "type": "tool",
+      "description": "Namespace providing compositor bindings: dispatch, keyword, state queries, and raw event subscription.",
+      "source_location": "Documentation.md:536"
+    },
+    {
+      "id": "bread-bluetooth-api",
+      "label": "Bluetooth API (bread.bluetooth.*)",
+      "type": "tool",
+      "description": "Control local Bluetooth adapter and paired devices via BlueZ D-Bus with graceful degradation.",
+      "source_location": "Documentation.md:560"
+    },
+    {
+      "id": "bread-module-lifecycle-hooks",
+      "label": "Module Lifecycle Hooks",
+      "type": "concept",
+      "description": "Optional callbacks: on_load, on_reload, on_unload, on_error for module behavior control.",
+      "source_location": "Documentation.md:635"
+    },
+    {
+      "id": "bread-module-storage",
+      "label": "Module Storage (M.store)",
+      "type": "function",
+      "description": "Per-module key-value storage that survives hot reload but not daemon restart.",
+      "source_location": "Documentation.md:659"
+    },
+    {
+      "id": "builtin-monitors-module",
+      "label": "Built-in: monitors Module",
+      "type": "tool",
+      "description": "High-level declarative monitor event handlers with layout registration and application.",
+      "source_location": "Documentation.md:676"
+    },
+    {
+      "id": "builtin-devices-module",
+      "label": "Built-in: devices Module",
+      "type": "tool",
+      "description": "Device connection rules with name-based matching from devices.lua.",
+      "source_location": "Documentation.md:702"
+    },
+    {
+      "id": "builtin-workspaces-module",
+      "label": "Built-in: workspaces Module",
+      "type": "tool",
+      "description": "Workspace-to-monitor assignment and app pinning for Hyprland.",
+      "source_location": "Documentation.md:809"
+    },
+    {
+      "id": "builtin-binds-module",
+      "label": "Built-in: binds Module",
+      "type": "tool",
+      "description": "Runtime keybind management via Hyprland dispatch with add, remove, replace operations.",
+      "source_location": "Documentation.md:826"
+    },
+    {
+      "id": "event-system-startup",
+      "label": "System Startup Event",
+      "type": "concept",
+      "description": "bread.system.startup event fired when Bread starts up.",
+      "source_location": "Documentation.md:873"
+    },
+    {
+      "id": "event-device-connection",
+      "label": "Device Connection Events",
+      "type": "concept",
+      "description": "bread.device.connected/disconnected events for USB and Bluetooth devices with full metadata.",
+      "source_location": "Documentation.md:880"
+    },
+    {
+      "id": "event-monitor-connection",
+      "label": "Monitor Connection Events",
+      "type": "concept",
+      "description": "bread.monitor.connected/disconnected events for display connections.",
+      "source_location": "Documentation.md:917"
+    },
+    {
+      "id": "event-window-management",
+      "label": "Window Management Events",
+      "type": "concept",
+      "description": "bread.window events for focus, open, close, and move operations.",
+      "source_location": "Documentation.md:920"
+    },
+    {
+      "id": "event-power-management",
+      "label": "Power Events",
+      "type": "concept",
+      "description": "bread.power events for AC connection, battery state, and low battery warnings.",
+      "source_location": "Documentation.md:927"
+    },
+    {
+      "id": "event-network-status",
+      "label": "Network Events",
+      "type": "concept",
+      "description": "bread.network.connected/disconnected events with online status and interface info.",
+      "source_location": "Documentation.md:939"
+    },
+    {
+      "id": "event-system-events",
+      "label": "System Events",
+      "type": "concept",
+      "description": "bread.profile.activated, bread.notify.sent, and bread.state.changed.* events.",
+      "source_location": "Documentation.md:945"
+    },
+    {
+      "id": "event-widget-events",
+      "label": "Widget Events",
+      "type": "concept",
+      "description": "bread.widget.* events for registered, updated, removed, and cleared widgets.",
+      "source_location": "Documentation.md:953"
+    },
+    {
+      "id": "event-terminal-events",
+      "label": "Terminal Events",
+      "type": "concept",
+      "description": "bread.terminal.command.* and bread.terminal.cwd.* events from shell precmd/preexec hooks.",
+      "source_location": "Documentation.md:964"
+    },
+    {
+      "id": "event-git-events",
+      "label": "Git Events",
+      "type": "concept",
+      "description": "bread.git.commit.created, bread.git.state.*, and ahead_behind changes from git hooks and polling.",
+      "source_location": "Documentation.md:976"
+    },
+    {
+      "id": "event-container-events",
+      "label": "Container Events",
+      "type": "concept",
+      "description": "bread.container events for Podman container lifecycle and health changes.",
+      "source_location": "Documentation.md:1012"
+    },
+    {
+      "id": "bread-namespace-convention",
+      "label": "Namespace Convention (bread.<app>.*)",
+      "type": "concept",
+      "description": "Reserved naming convention for events published by sibling bread* applications.",
+      "source_location": "Documentation.md:1037"
+    },
+    {
+      "id": "bread-command-convention",
+      "label": "Command Convention (bread.command.<app>.<verb>)",
+      "type": "concept",
+      "description": "Convention for outbound commands to sibling applications, best-effort delivery.",
+      "source_location": "Documentation.md:1038"
+    },
+    {
+      "id": "bread-runtime-state-schema",
+      "label": "Runtime State Schema",
+      "type": "configuration",
+      "description": "The complete JSON schema for RuntimeState including monitors, workspaces, devices, network, power, and more.",
+      "source_location": "Documentation.md:1061"
+    },
+    {
+      "id": "bread-ipc-protocol",
+      "label": "IPC Protocol",
+      "type": "tool",
+      "description": "JSON-RPC over Unix socket at $XDG_RUNTIME_DIR/bread/breadd.sock with methods for state, modules, profiles, events.",
+      "source_location": "Documentation.md:1146"
+    },
+    {
+      "id": "bread-ipc-methods",
+      "label": "IPC Methods",
+      "type": "concept",
+      "description": "Available IPC methods: ping, health, state.get, state.dump, modules.list, profile.activate, events.subscribe, emit, workflows.list, widgets.list.",
+      "source_location": "Documentation.md:1162"
+    },
+    {
+      "id": "config-breadd-toml",
+      "label": "breadd.toml Configuration",
+      "type": "configuration",
+      "description": "Daemon configuration file at ~/.config/bread/breadd.toml with optional settings for adapters, events, modules.",
+      "source_location": "README.md:117"
+    },
+    {
+      "id": "config-init-lua",
+      "label": "init.lua Entry Point",
+      "type": "configuration",
+      "description": "Lua entry point at ~/.config/bread/init.lua loaded first before modules.",
+      "source_location": "Documentation.md:51"
+    },
+    {
+      "id": "config-devices-lua",
+      "label": "devices.lua Device Mapping",
+      "type": "configuration",
+      "description": "User-defined device name to hardware mapping for stable device identification.",
+      "source_location": "Documentation.md:706"
+    },
+    {
+      "id": "config-modules-directory",
+      "label": "modules/ Directory",
+      "type": "configuration",
+      "description": "Directory at ~/.config/bread/modules/ where modules are auto-discovered and loaded.",
+      "source_location": "Documentation.md:52"
+    },
+    {
+      "id": "workflow-example-dock-connected",
+      "label": "Example: Dock Connected Workflow",
+      "type": "documentation",
+      "description": "Multi-step automation workflow for dock connection with monitor setup, profile activation, and notifications.",
+      "source_location": "Examples.md:182"
+    },
+    {
+      "id": "example-keyboard-display-watcher",
+      "label": "Example 1: Keyboard and Display Watcher",
+      "type": "documentation",
+      "description": "Port of shell script for Redox keyboard detection and external monitor handling.",
+      "source_location": "Examples.md:7"
+    },
+    {
+      "id": "example-autostart",
+      "label": "Example 2: Autostart",
+      "type": "documentation",
+      "description": "System startup sequence with multiple commands executed on bread.system.startup.",
+      "source_location": "Examples.md:93"
+    },
+    {
+      "id": "example-monitors",
+      "label": "Example 3: Display Monitors",
+      "type": "documentation",
+      "description": "Monitor layout management using Hyprland keywords and monitor connection events.",
+      "source_location": "Examples.md:130"
+    },
+    {
+      "id": "example-widget-cpu-temp",
+      "label": "Example 5: CPU Temperature Widget",
+      "type": "documentation",
+      "description": "Live widget in breadbar showing CPU temperature with color styling and progress visualization.",
+      "source_location": "Examples.md:241"
+    },
+    {
+      "id": "example-module-low-battery",
+      "label": "Module: Low Battery Warning",
+      "type": "documentation",
+      "description": "Critical notification when battery runs low, resets on AC power.",
+      "source_location": "examples/modules/README.md:21"
+    },
+    {
+      "id": "example-module-pause-media",
+      "label": "Module: Pause Media on Headphone Unplug",
+      "type": "documentation",
+      "description": "Runs playerctl pause when headphone/earbud device disconnects.",
+      "source_location": "examples/modules/README.md:22"
+    },
+    {
+      "id": "example-module-dock-monitors",
+      "label": "Module: Dock Monitors Layout",
+      "type": "documentation",
+      "description": "Applies multi-monitor layout when external display connects, reverts when removed.",
+      "source_location": "examples/modules/README.md:23"
+    },
+    {
+      "id": "example-module-active-window-widget",
+      "label": "Module: Active Window Widget",
+      "type": "documentation",
+      "description": "Shows focused window next to workspace pills in breadbar using bread.widget and bread.state.watch.",
+      "source_location": "examples/modules/README.md:24"
+    },
+    {
+      "id": "example-module-cpu-temp-widget",
+      "label": "Module: CPU Temp Widget",
+      "type": "documentation",
+      "description": "Live CPU temperature readout in breadbar's stats area with hwmon file reading.",
+      "source_location": "examples/modules/README.md:25"
+    },
+    {
+      "id": "example-module-bluetooth-toggle",
+      "label": "Module: Bluetooth Toggle Widget",
+      "type": "documentation",
+      "description": "One-click Bluetooth power toggle in breadbar's tray with click event handling.",
+      "source_location": "examples/modules/README.md:26"
+    },
+    {
+      "id": "example-module-focus-mode",
+      "label": "Module: Focus Mode Widget",
+      "type": "documentation",
+      "description": "Click-to-toggle Focus profile that mutes audio, syncs with profile changes.",
+      "source_location": "examples/modules/README.md:27"
+    },
+    {
+      "id": "example-module-workflow-status",
+      "label": "Module: Workflow Status Widget",
+      "type": "documentation",
+      "description": "Surfaces bread.workflow.list() in breadbar tray showing running or failed workflows.",
+      "source_location": "examples/modules/README.md:28"
+    },
+    {
+      "id": "example-module-git-branch",
+      "label": "Module: Git Branch Widget",
+      "type": "documentation",
+      "description": "Shows repo and branch of focused kitty tab with dirty state indicator.",
+      "source_location": "examples/modules/README.md:29"
+    },
+    {
+      "id": "ci-dev-release-workflow",
+      "label": "CI: dev-release Workflow",
+      "type": "workflow",
+      "description": "Triggered on push to main; builds, tests, and publishes dev-track build with auto-computed version.",
+      "source_location": ".forgejo/workflows/dev-release.yml:1"
+    },
+    {
+      "id": "ci-rc-release-workflow",
+      "label": "CI: rc-release Workflow",
+      "type": "workflow",
+      "description": "Triggered on vX.Y.Z-rc.N tag push; builds and publishes beta-track RC build.",
+      "source_location": ".forgejo/workflows/rc-release.yml:1"
+    },
+    {
+      "id": "ci-release-workflow",
+      "label": "CI: release Workflow",
+      "type": "workflow",
+      "description": "Triggered on vX.Y.Z tag push; builds, tests, publishes stable release, and uploads to GitHub.",
+      "source_location": ".forgejo/workflows/release.yml:1"
+    },
+    {
+      "id": "release-track-dev",
+      "label": "Release Track: dev",
+      "type": "configuration",
+      "description": "Bleeding-edge track published on every push to main with auto-computed version.",
+      "source_location": "CONTRIBUTING.md:55"
+    },
+    {
+      "id": "release-track-beta",
+      "label": "Release Track: beta",
+      "type": "configuration",
+      "description": "Latest release candidate track published from vX.Y.Z-rc.N tags.",
+      "source_location": "CONTRIBUTING.md:54"
+    },
+    {
+      "id": "release-track-stable",
+      "label": "Release Track: stable",
+      "type": "configuration",
+      "description": "Latest stable release published from vX.Y.Z tags.",
+      "source_location": "CONTRIBUTING.md:53"
+    },
+    {
+      "id": "bakery-package-manager",
+      "label": "Bakery Package Manager",
+      "type": "tool",
+      "description": "Distribution and package management system for bread releases across multiple channels.",
+      "source_location": "CONTRIBUTING.md:32"
+    },
+    {
+      "id": "version-semver",
+      "label": "Semantic Versioning",
+      "type": "concept",
+      "description": "Version format vX.Y.Z for stable, vX.Y.Z-rc.N for release candidates, X.Y.Z-dev.TIMESTAMP+SHA for dev builds.",
+      "source_location": "CONTRIBUTING.md:59"
+    },
+    {
+      "id": "branch-main",
+      "label": "Main Branch",
+      "type": "configuration",
+      "description": "Single long-lived branch where all day-to-day work lands; every push publishes dev-track build.",
+      "source_location": "CONTRIBUTING.md:10"
+    },
+    {
+      "id": "branch-feature-pattern",
+      "label": "Feature Branch Pattern",
+      "type": "configuration",
+      "description": "Short-lived feature/ branches for new features, merged to main via PR and deleted.",
+      "source_location": "CONTRIBUTING.md:18"
+    },
+    {
+      "id": "branch-fix-pattern",
+      "label": "Fix Branch Pattern",
+      "type": "configuration",
+      "description": "Short-lived fix/ branches for bug fixes, merged to main via PR and deleted.",
+      "source_location": "CONTRIBUTING.md:19"
+    },
+    {
+      "id": "ci-self-hosted-runner",
+      "label": "Self-hosted Runner (hestia)",
+      "type": "tool",
+      "description": "Custom runner used for all CI jobs to avoid unnecessary external build overhead.",
+      "source_location": ".forgejo/workflows/dev-release.yml:12"
+    },
+    {
+      "id": "distribution-dl-breadway-dev",
+      "label": "Distribution Point: dl.breadway.dev",
+      "type": "tool",
+      "description": "Central distribution server for all bread release tracks (dev, beta, stable).",
+      "source_location": ".forgejo/workflows/dev-release.yml:55"
+    },
+    {
+      "id": "distribution-github-release",
+      "label": "GitHub Release Upload",
+      "type": "tool",
+      "description": "Optional GitHub release mirror for stable releases, requires GH_RELEASE_TOKEN.",
+      "source_location": ".forgejo/workflows/release.yml:55"
+    },
+    {
+      "id": "breadd-service-unit",
+      "label": "systemd User Service (breadd.service)",
+      "type": "tool",
+      "description": "systemd user service unit that starts breadd after graphical session is available.",
+      "source_location": "packaging/README.md:9"
+    },
+    {
+      "id": "breadd-service-installation",
+      "label": "systemd Service Installation",
+      "type": "process",
+      "description": "Manual installation and enablement of breadd service with optional debug configuration.",
+      "source_location": "packaging/README.md:17"
+    },
+    {
+      "id": "bread-ecosystem-repository",
+      "label": "bread-ecosystem Repository",
+      "type": "tool",
+      "description": "Central ecosystem repository containing shared scripts, docs, and release infrastructure.",
+      "source_location": "CONTRIBUTING.md:79"
+    },
+    {
+      "id": "bread-shared-crate",
+      "label": "bread-shared Crate",
+      "type": "tool",
+      "description": "Shared Rust types and definitions: RawEvent, BreadEvent, AdapterSource, KNOWN_APPS.",
+      "source_location": "README.md:47"
+    },
+    {
+      "id": "bread-utils-crate",
+      "label": "bread-utils Crate",
+      "type": "tool",
+      "description": "Utilities crate with bread-client feature for IPC communication from sibling apps.",
+      "source_location": "Documentation.md:1050"
+    },
+    {
+      "id": "breadclip-integration",
+      "label": "Breadclip Integration Reference",
+      "type": "documentation",
+      "description": "Reference implementation for integrating a bread* app with EVENTS.md documenting published events and commands.",
+      "source_location": "Documentation.md:1047"
+    },
+    {
+      "id": "api-stability-policy",
+      "label": "API Stability Policy",
+      "type": "documentation",
+      "description": "Additive-only within v1, deprecation window, since-markers, and version discovery via api_version.",
+      "source_location": "Documentation.md:38"
+    },
+    {
+      "id": "hyprland-compositor",
+      "label": "Hyprland Compositor",
+      "type": "tool",
+      "description": "Wayland compositor used as primary target for Bread desktop automation.",
+      "source_location": "README.md:61"
+    },
+    {
+      "id": "wayland-protocol",
+      "label": "Wayland Protocol",
+      "type": "tool",
+      "description": "Modern display server protocol underlying Hyprland and other Linux desktop environments.",
+      "source_location": "README.md:61"
+    },
+    {
+      "id": "linux-system",
+      "label": "Linux System",
+      "type": "tool",
+      "description": "Primary platform for Bread automation with Arch Linux recommended.",
+      "source_location": "README.md:62"
+    },
+    {
+      "id": "rust-toolchain",
+      "label": "Rust Toolchain",
+      "type": "tool",
+      "description": "Required stable Rust toolchain (2021 edition) for building Bread.",
+      "source_location": "README.md:64"
+    },
+    {
+      "id": "udev-system",
+      "label": "udev System",
+      "type": "tool",
+      "description": "Device event system required on systemd-based Linux distributions.",
+      "source_location": "README.md:65"
+    },
+    {
+      "id": "upower-service",
+      "label": "UPower Service",
+      "type": "tool",
+      "description": "Optional D-Bus service for battery and power events, falls back to sysfs without it.",
+      "source_location": "README.md:68"
+    },
+    {
+      "id": "rtnetlink-socket",
+      "label": "rtnetlink Socket",
+      "type": "tool",
+      "description": "Optional netlink socket for network events, falls back to sysfs polling without it.",
+      "source_location": "README.md:69"
+    },
+    {
+      "id": "bluez-service",
+      "label": "BlueZ Service",
+      "type": "tool",
+      "description": "Optional Bluetooth daemon for device events and Bluetooth control.",
+      "source_location": "README.md:70"
+    },
+    {
+      "id": "cli-command-ping",
+      "label": "CLI: ping",
+      "type": "tool",
+      "description": "Check daemon connectivity.",
+      "source_location": "README.md:175"
+    },
+    {
+      "id": "cli-command-health",
+      "label": "CLI: health",
+      "type": "tool",
+      "description": "Show daemon version, uptime, and PID.",
+      "source_location": "README.md:176"
+    },
+    {
+      "id": "cli-command-doctor",
+      "label": "CLI: doctor",
+      "type": "tool",
+      "description": "Diagnose daemon and module health with JSON output option.",
+      "source_location": "README.md:177"
+    },
+    {
+      "id": "cli-command-reload",
+      "label": "CLI: reload",
+      "type": "tool",
+      "description": "Hot-reload Lua modules with optional --watch for auto-reload.",
+      "source_location": "README.md:181"
+    },
+    {
+      "id": "cli-command-state",
+      "label": "CLI: state",
+      "type": "tool",
+      "description": "Dump or query full runtime state as JSON with optional path filtering.",
+      "source_location": "README.md:185"
+    },
+    {
+      "id": "cli-command-events",
+      "label": "CLI: events",
+      "type": "tool",
+      "description": "Stream live events with filtering, replay, and field selection options.",
+      "source_location": "README.md:188"
+    },
+    {
+      "id": "cli-command-emit",
+      "label": "CLI: emit",
+      "type": "tool",
+      "description": "Manually fire an event for testing purposes.",
+      "source_location": "README.md:193"
+    },
+    {
+      "id": "cli-command-profile-list",
+      "label": "CLI: profile-list",
+      "type": "tool",
+      "description": "List defined profiles.",
+      "source_location": "README.md:196"
+    },
+    {
+      "id": "cli-command-profile-activate",
+      "label": "CLI: profile-activate",
+      "type": "tool",
+      "description": "Activate a named profile.",
+      "source_location": "README.md:197"
+    },
+    {
+      "id": "cli-command-modules-list",
+      "label": "CLI: modules list",
+      "type": "tool",
+      "description": "List installed modules and their daemon status.",
+      "source_location": "README.md:200"
+    },
+    {
+      "id": "cli-command-modules-install",
+      "label": "CLI: modules install",
+      "type": "tool",
+      "description": "Install a module from a local directory.",
+      "source_location": "README.md:201"
+    },
+    {
+      "id": "cli-command-modules-remove",
+      "label": "CLI: modules remove",
+      "type": "tool",
+      "description": "Remove an installed module with optional --yes confirmation skip.",
+      "source_location": "README.md:202"
+    },
+    {
+      "id": "cli-command-modules-info",
+      "label": "CLI: modules info",
+      "type": "tool",
+      "description": "Show full manifest and daemon status for a module.",
+      "source_location": "README.md:203"
+    }
+  ],
+  "edges": [
+    {
+      "source": "bread-daemon",
+      "target": "bread-lua-runtime",
+      "relationship": "contains",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "adapter-hyprland",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "adapter-udev",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "adapter-power",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "adapter-network",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "adapter-bluetooth",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "bread-ipc-protocol",
+      "relationship": "implements",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-cli",
+      "target": "bread-daemon",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-cli",
+      "target": "bread-ipc-protocol",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-lua-runtime",
+      "target": "bread-module",
+      "relationship": "contains",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-lua-runtime",
+      "target": "event-subscription",
+      "relationship": "implements",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-module",
+      "target": "bread-module-manifest",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-module",
+      "target": "bread-module-lifecycle-hooks",
+      "relationship": "implements",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-module",
+      "target": "bread-module-storage",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "event-subscription",
+      "target": "event-pattern-matching",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-wait",
+      "target": "bread-spawn",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-wait-any",
+      "target": "bread-spawn",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-wait-all",
+      "target": "bread-spawn",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-workflow-define",
+      "target": "bread-workflow-start",
+      "relationship": "relates-to",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-workflow-start",
+      "target": "bread-spawn",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-workflow-step",
+      "target": "bread-workflow-status",
+      "relationship": "relates-to",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-widget-register",
+      "target": "bread-widget-node-types",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-widget-node-types",
+      "target": "bread-widget-style",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-widget-update",
+      "target": "bread-widget-register",
+      "relationship": "relates-to",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-state-watch",
+      "target": "bread-state-get",
+      "relationship": "relates-to",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-hyprland-api",
+      "target": "adapter-hyprland",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-bluetooth-api",
+      "target": "adapter-bluetooth",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "builtin-monitors-module",
+      "target": "adapter-hyprland",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "builtin-devices-module",
+      "target": "adapter-udev",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "builtin-workspaces-module",
+      "target": "adapter-hyprland",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "builtin-binds-module",
+      "target": "adapter-hyprland",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-automation-api-v1",
+      "target": "api-stability-policy",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-automation-api-v1",
+      "target": "bread-ipc-methods",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-automation-api-v1",
+      "target": "bread-runtime-state-schema",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "config-breadd-toml",
+      "target": "adapter-hyprland",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "config-breadd-toml",
+      "target": "adapter-udev",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "config-breadd-toml",
+      "target": "adapter-power",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "config-breadd-toml",
+      "target": "adapter-network",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "config-init-lua",
+      "target": "bread-lua-runtime",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "config-devices-lua",
+      "target": "adapter-udev",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "config-modules-directory",
+      "target": "bread-module",
+      "relationship": "contains",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-dev-release-workflow",
+      "target": "release-track-dev",
+      "relationship": "triggers",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-rc-release-workflow",
+      "target": "release-track-beta",
+      "relationship": "triggers",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-release-workflow",
+      "target": "release-track-stable",
+      "relationship": "triggers",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-dev-release-workflow",
+      "target": "ci-self-hosted-runner",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-rc-release-workflow",
+      "target": "ci-self-hosted-runner",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-release-workflow",
+      "target": "ci-self-hosted-runner",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-dev-release-workflow",
+      "target": "distribution-dl-breadway-dev",
+      "relationship": "publishes-to",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-rc-release-workflow",
+      "target": "distribution-dl-breadway-dev",
+      "relationship": "publishes-to",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-release-workflow",
+      "target": "distribution-dl-breadway-dev",
+      "relationship": "publishes-to",
+      "confidence": "high"
+    },
+    {
+      "source": "ci-release-workflow",
+      "target": "distribution-github-release",
+      "relationship": "publishes-to",
+      "confidence": "high"
+    },
+    {
+      "source": "release-track-dev",
+      "target": "version-semver",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "release-track-beta",
+      "target": "version-semver",
+      "relationship": "uses",
+      "confidence": "high"
+    },
+    {
+      "source": "release-track-stable",
+      "target": "version-semver",
+      "confidence": "high"
+    },
+    {
+      "source": "branch-main",
+      "target": "ci-dev-release-workflow",
+      "relationship": "triggers",
+      "confidence": "high"
+    },
+    {
+      "source": "branch-feature-pattern",
+      "target": "branch-main",
+      "relationship": "merges-into",
+      "confidence": "high"
+    },
+    {
+      "source": "branch-fix-pattern",
+      "target": "branch-main",
+      "relationship": "merges-into",
+      "confidence": "high"
+    },
+    {
+      "source": "bakery-package-manager",
+      "target": "release-track-dev",
+      "relationship": "distributes",
+      "confidence": "high"
+    },
+    {
+      "source": "bakery-package-manager",
+      "target": "release-track-beta",
+      "relationship": "distributes",
+      "confidence": "high"
+    },
+    {
+      "source": "bakery-package-manager",
+      "target": "release-track-stable",
+      "relationship": "distributes",
+      "confidence": "high"
+    },
+    {
+      "source": "breadd-service-unit",
+      "target": "bread-daemon",
+      "relationship": "manages",
+      "confidence": "high"
+    },
+    {
+      "source": "breadd-service-installation",
+      "target": "breadd-service-unit",
+      "relationship": "configures",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-ecosystem-repository",
+      "target": "ci-dev-release-workflow",
+      "relationship": "supports",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-ecosystem-repository",
+      "target": "ci-rc-release-workflow",
+      "relationship": "supports",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-ecosystem-repository",
+      "target": "ci-release-workflow",
+      "relationship": "supports",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-shared-crate",
+      "target": "bread-daemon",
+      "relationship": "used-by",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-utils-crate",
+      "target": "bread-daemon",
+      "relationship": "used-by",
+      "confidence": "high"
+    },
+    {
+      "source": "breadclip-integration",
+      "target": "bread-namespace-convention",
+      "relationship": "implements",
+      "confidence": "high"
+    },
+    {
+      "source": "breadclip-integration",
+      "target": "bread-command-convention",
+      "relationship": "implements",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "hyprland-compositor",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "hyprland-compositor",
+      "target": "wayland-protocol",
+      "relationship": "implements",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "linux-system",
+      "relationship": "runs-on",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "rust-toolchain",
+      "relationship": "built-with",
+      "confidence": "high"
+    },
+    {
+      "source": "bread-daemon",
+      "target": "udev-system",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "adapter-power",
+      "target": "upower-service",
+      "relationship": "depends-on",
+      "confidence": "medium"
+    },
+    {
+      "source": "adapter-network",
+      "target": "rtnetlink-socket",
+      "relationship": "depends-on",
+      "confidence": "medium"
+    },
+    {
+      "source": "adapter-bluetooth",
+      "target": "bluez-service",
+      "relationship": "depends-on",
+      "confidence": "high"
+    },
+    {
+      "source": "workflow-example-dock-connected",
+      "target": "bread-workflow-define",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "workflow-example-dock-connected",
+      "target": "bread-workflow-start",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-keyboard-display-watcher",
+      "target": "adapter-udev",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-autostart",
+      "target": "event-system-startup",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-monitors",
+      "target": "event-monitor-connection",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-widget-cpu-temp",
+      "target": "bread-widget-register",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-low-battery",
+      "target": "event-power-management",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-pause-media",
+      "target": "event-device-connection",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-dock-monitors",
+      "target": "event-monitor-connection",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-active-window-widget",
+      "target": "bread-widget-register",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-cpu-temp-widget",
+      "target": "bread-widget-register",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-bluetooth-toggle",
+      "target": "bread-widget-register",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-focus-mode",
+      "target": "bread-profile-activate",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-workflow-status",
+      "target": "bread-workflow-status",
+      "relationship": "documents",
+      "confidence": "high"
+    },
+    {
+      "source": "example-module-git-branch",
+      "target": "bread-exec-capture",
+      "relationship": "documents",
+      "confidence": "high"
+    }
+  ],
+  "input_tokens": 0,
+  "output_tokens": 0
+}

@@ -11,7 +11,7 @@
 /// (commands) namespaces.
 pub const KNOWN_APPS: &[&str] = &[
     "clip", "pad", "bar", "box", "lock", "mon", "paper", "search", "shot", "arr", "crumbs", "help",
-    "bakery",
+    "bakery", "cast",
 ];
 
 /// Daemon-internal domains that are reserved and can never be claimed as an
