@@ -1448,6 +1448,9 @@ enabled = false
 
 [adapters.network]
 enabled = false
+
+[adapters.podman]
+enabled = false
 "#,
         )?;
 
@@ -1523,6 +1526,9 @@ enabled = false
 enabled = false
 
 [adapters.network]
+enabled = false
+
+[adapters.podman]
 enabled = false
 "#,
         )?;
@@ -1678,6 +1684,34 @@ impl Drop for TestHarness {
     /// failure into cascading slowdowns/timeouts across the whole suite
     /// (observed directly while developing Workstream G's tests).
     fn drop(&mut self) {
+        // SIGTERM first, not straight to SIGKILL: `breadd`'s own
+        // `wait_for_shutdown()` (src/main.rs) listens for SIGTERM and runs
+        // a graceful shutdown path — `lua_runtime.shutdown()`,
+        // `module_host_registry.shutdown_all()`, and, as `main()` returns,
+        // every adapter task getting dropped, which is what actually fires
+        // `kill_on_drop` on a still-running child process like
+        // `PodmanAdapter`'s `podman events` watcher. SIGKILL bypasses all of
+        // that — the process is torn down before any of its own code, Drop
+        // impls included, ever runs. That gap is exactly how a single day
+        // of repeated `cargo test --workspace` runs left 1,559 orphaned
+        // `podman events` processes system-wide (found and cleaned up
+        // separately; see also the `[adapters.podman] enabled = false`
+        // fixtures this file now sets, which close the same hole from the
+        // other side). Bounded wait, then SIGKILL as a fallback so a
+        // genuinely wedged `breadd` doesn't hang the test suite.
+        unsafe {
+            libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

@@ -106,6 +106,9 @@ enabled = false
 
 [adapters.network]
 enabled = false
+
+[adapters.podman]
+enabled = false
 "#,
         )?;
 
@@ -255,6 +258,28 @@ impl Drop for TestHarness {
     /// `shutdown()`, is what keeps a failed test run from leaving orphaned
     /// sandboxed processes behind for the next run to trip over.
     fn drop(&mut self) {
+        // SIGTERM first, not straight to SIGKILL — see the matching comment
+        // in `ipc_integration.rs`'s `TestHarness::drop`. SIGKILL prevents
+        // `breadd` from ever running its own graceful shutdown path, which
+        // is what actually fires `kill_on_drop` on adapter-spawned child
+        // processes (e.g. `PodmanAdapter`'s `podman events` watcher) —
+        // exactly how a day of repeated `cargo test --workspace` runs left
+        // 1,559 orphaned `podman events` processes system-wide. Bounded
+        // wait, then SIGKILL as a fallback so a genuinely wedged `breadd`
+        // doesn't hang the test suite.
+        unsafe {
+            libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
