@@ -58,6 +58,8 @@ impl EventNormalizer {
                 event: raw.kind.clone(),
                 timestamp: raw.timestamp,
                 source: raw.source.clone(),
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             }],
         };
