@@ -656,6 +656,8 @@ mod tests {
             timestamp: 0,
             source: AdapterSource::System,
             data,
+            id: bread_shared::new_event_id(),
+            caused_by: None,
         }
     }
 

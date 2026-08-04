@@ -43,6 +43,8 @@ impl EventNormalizer {
                 event: raw.kind.clone(),
                 timestamp: raw.timestamp,
                 source: raw.source.clone(),
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             }],
             // `Manual` is never constructed as a `RawEvent::source` in this
@@ -156,6 +158,8 @@ impl EventNormalizer {
             event: format!("bread.device.{}", verb),
             timestamp: raw.timestamp,
             source: AdapterSource::Udev,
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: json!({
                 "id": id,
                 "device": "unknown",
@@ -186,36 +190,48 @@ impl EventNormalizer {
                 event: "bread.workspace.changed".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             }],
             "createworkspace" => vec![BreadEvent {
                 event: "bread.workspace.created".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({ "workspace": data }),
             }],
             "destroyworkspace" => vec![BreadEvent {
                 event: "bread.workspace.destroyed".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({ "workspace": data }),
             }],
             "monitoradded" => vec![BreadEvent {
                 event: "bread.monitor.connected".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({ "name": data }),
             }],
             "monitorremoved" => vec![BreadEvent {
                 event: "bread.monitor.disconnected".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({ "name": data }),
             }],
             "activewindow" => vec![BreadEvent {
                 event: "bread.window.focus.changed".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             }],
             "activewindowv2" => {
@@ -224,6 +240,8 @@ impl EventNormalizer {
                     event: "bread.window.focused".to_string(),
                     timestamp: raw.timestamp,
                     source: AdapterSource::Hyprland,
+                    id: bread_shared::new_event_id(),
+                    caused_by: None,
                     data: json!({
                         "address": fields.first().unwrap_or(&"")
                     }),
@@ -235,6 +253,8 @@ impl EventNormalizer {
                     event: "bread.window.opened".to_string(),
                     timestamp: raw.timestamp,
                     source: AdapterSource::Hyprland,
+                    id: bread_shared::new_event_id(),
+                    caused_by: None,
                     data: json!({
                         "address": fields.first().unwrap_or(&""),
                         "workspace": fields.get(1).unwrap_or(&""),
@@ -249,6 +269,8 @@ impl EventNormalizer {
                     event: "bread.window.closed".to_string(),
                     timestamp: raw.timestamp,
                     source: AdapterSource::Hyprland,
+                    id: bread_shared::new_event_id(),
+                    caused_by: None,
                     data: json!({ "address": fields.first().unwrap_or(&"") }),
                 }]
             }
@@ -258,6 +280,8 @@ impl EventNormalizer {
                     event: "bread.window.moved".to_string(),
                     timestamp: raw.timestamp,
                     source: AdapterSource::Hyprland,
+                    id: bread_shared::new_event_id(),
+                    caused_by: None,
                     data: json!({
                         "address": fields.first().unwrap_or(&""),
                         "workspace": fields.get(1).unwrap_or(&""),
@@ -268,6 +292,8 @@ impl EventNormalizer {
                 event: "bread.hyprland.event".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             }],
         }
@@ -285,6 +311,8 @@ impl EventNormalizer {
                 },
                 timestamp: raw.timestamp,
                 source: AdapterSource::Power,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             });
         }
@@ -307,6 +335,8 @@ impl EventNormalizer {
                     event: event.to_string(),
                     timestamp: raw.timestamp,
                     source: AdapterSource::Power,
+                    id: bread_shared::new_event_id(),
+                    caused_by: None,
                     data: raw.payload.clone(),
                 });
             }
@@ -317,6 +347,8 @@ impl EventNormalizer {
                 event: "bread.power.changed".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Power,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: raw.payload.clone(),
             });
         }
@@ -352,6 +384,8 @@ impl EventNormalizer {
                 event: "bread.device.connected".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Bluetooth,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({
                     "id": path,
                     "device": "unknown",
@@ -365,6 +399,8 @@ impl EventNormalizer {
                 event: "bread.device.disconnected".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Bluetooth,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({
                     "id": path,
                     "device": "unknown",
@@ -378,6 +414,8 @@ impl EventNormalizer {
                 event: "bread.bluetooth.device.paired".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Bluetooth,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({
                     "id": path,
                     "name": name,
@@ -390,6 +428,8 @@ impl EventNormalizer {
                 event: "bread.bluetooth.device.unpaired".to_string(),
                 timestamp: raw.timestamp,
                 source: AdapterSource::Bluetooth,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
                 data: json!({
                     "id": path,
                     "address": address,
@@ -434,6 +474,8 @@ impl EventNormalizer {
             event: name.to_string(),
             timestamp: raw.timestamp,
             source: AdapterSource::Network,
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data,
         }]
     }
@@ -448,6 +490,8 @@ impl EventNormalizer {
             event: format!("bread.terminal.{}", raw.kind),
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }
@@ -457,6 +501,8 @@ impl EventNormalizer {
             event: format!("bread.remote.{}", raw.kind),
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }
@@ -466,6 +512,8 @@ impl EventNormalizer {
             event: format!("bread.git.{}", raw.kind),
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }
@@ -475,6 +523,8 @@ impl EventNormalizer {
             event: format!("bread.project.{}", raw.kind),
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }
@@ -487,6 +537,8 @@ impl EventNormalizer {
             event: format!("bread.service.{suffix}"),
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }
@@ -503,6 +555,8 @@ impl EventNormalizer {
             event,
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }
@@ -525,6 +579,8 @@ impl EventNormalizer {
             event: raw.kind.clone(),
             timestamp: raw.timestamp,
             source: raw.source.clone(),
+            id: bread_shared::new_event_id(),
+            caused_by: None,
             data: raw.payload.clone(),
         }]
     }

@@ -211,6 +211,19 @@ struct LuaEngine {
     next_sub_id: Arc<AtomicU64>,
     next_timer_id: Arc<AtomicU64>,
     current_module: Arc<Mutex<Option<String>>>,
+    /// The `id` of the `BreadEvent` whose subscriber callback is currently
+    /// executing, if any. Set immediately before invoking a handler in
+    /// `handle_event` and restored (not merely cleared) immediately after,
+    /// so nested/reentrant dispatch and a single event fan-out to multiple
+    /// subscriptions both see the correct parent id. Read synchronously by
+    /// `bread.emit()`'s binding to populate the outgoing event's
+    /// `caused_by`. The Lua engine runs single-threaded/cooperatively (one
+    /// engine instance processes `LuaMessage`s serially on a dedicated
+    /// thread), so a callback invocation and any `bread.emit()` inside it
+    /// happen synchronously within one `handle_event` call — no additional
+    /// synchronization beyond the existing `Mutex` (mirroring
+    /// `current_module` above) is needed.
+    current_dispatch_id: Arc<Mutex<Option<String>>>,
     modules: Arc<Mutex<HashMap<String, ModuleInfo>>>,
     module_decls: Arc<Mutex<HashMap<String, ModuleDecl>>>,
     module_order: Arc<Mutex<Vec<String>>>,
@@ -240,6 +253,7 @@ impl LuaEngine {
             next_sub_id: Arc::new(AtomicU64::new(1)),
             next_timer_id: Arc::new(AtomicU64::new(1)),
             current_module: Arc::new(Mutex::new(None)),
+            current_dispatch_id: Arc::new(Mutex::new(None)),
             modules: Arc::new(Mutex::new(HashMap::new())),
             module_decls: Arc::new(Mutex::new(HashMap::new())),
             module_order: Arc::new(Mutex::new(Vec::new())),
@@ -438,6 +452,7 @@ impl LuaEngine {
         bread.set("off", off_fn)?;
 
         let emit_tx = self.emit_tx.clone();
+        let current_dispatch_id = self.current_dispatch_id.clone();
         let emit_fn =
             self.lua
                 .create_function(move |lua, (event_name, payload): (String, Value)| {
@@ -447,8 +462,19 @@ impl LuaEngine {
                             .from_value::<serde_json::Value>(other)
                             .unwrap_or_else(|_| serde_json::json!({})),
                     };
+                    // Daemon-internal emit — same trusted path as adapter/IPC
+                    // construction, tagged System. If this runs synchronously
+                    // inside a subscriber callback (see `handle_event`), thread
+                    // the currently-dispatching event's id through as
+                    // `caused_by` so the causality chain can be reconstructed.
+                    let caused_by = current_dispatch_id
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    let mut event = BreadEvent::new(event_name, AdapterSource::System, data);
+                    event.caused_by = caused_by;
                     emit_tx
-                        .send(BreadEvent::new(event_name, AdapterSource::System, data))
+                        .send(event)
                         .map_err(|_| LuaError::external("event channel closed"))?;
                     Ok(())
                 })?;
@@ -1489,6 +1515,11 @@ impl LuaEngine {
         }
 
         self.set_current_module(module.clone());
+        // Every subscriber invocation triggered by this event should see the
+        // same parent id, and a `bread.emit()` call made synchronously
+        // inside the callback should attribute its `caused_by` to *this*
+        // event, not whatever was dispatching (if anything) before it.
+        let previous_dispatch_id = self.set_current_dispatch_id(Some(event.id.clone()));
         let result = match kind {
             HandlerKind::Event => {
                 let event_value = json_to_lua(&self.lua, &event)?;
@@ -1502,6 +1533,9 @@ impl LuaEngine {
                 callback.call::<_, ()>((new_lua, old_lua))
             }
         };
+        // Restore rather than clear, so this correctly unwinds if dispatch
+        // is ever reentrant (e.g. a callback that pumps messages itself).
+        self.set_current_dispatch_id(previous_dispatch_id);
         self.set_current_module(None);
 
         if let Err(err) = result {
@@ -1675,6 +1709,18 @@ impl LuaEngine {
     fn set_current_module(&self, name: Option<String>) {
         if let Ok(mut guard) = self.current_module.lock() {
             *guard = name;
+        }
+    }
+
+    /// Set the "currently dispatching" event id, returning whatever id was
+    /// there before. Callers restore the previous value (rather than
+    /// clearing to `None`) when the handler invocation finishes, so nested/
+    /// reentrant dispatch unwinds correctly — see `current_dispatch_id`'s
+    /// doc comment on the struct definition.
+    fn set_current_dispatch_id(&self, id: Option<String>) -> Option<String> {
+        match self.current_dispatch_id.lock() {
+            Ok(mut guard) => std::mem::replace(&mut *guard, id),
+            Err(poisoned) => std::mem::replace(&mut *poisoned.into_inner(), id),
         }
     }
 

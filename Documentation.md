@@ -152,6 +152,7 @@ installed_at = "2026-01-01T00:00:00Z"
 ## Debugging tips
 
 - Run `bread events` to see live normalized events.
+- Run `bread events --tree` *(Since: v1.5)* to render events as a causality tree instead of a flat stream — events that a Lua handler emitted via `bread.emit()` in reaction to another event are nested underneath it, following the `caused_by` chain (see [Dictionary: Event reference](#dictionary-event-reference)). Useful for untangling "why did this event fire" when several modules chain-react to each other.
 - Run `bread state` to see full runtime state as JSON.
 - Run `bread doctor` to check adapter and module health.
 - Log event payloads with `bread.log(tostring(event.data))`.
@@ -213,7 +214,7 @@ end, {
 Unsubscribe an event handler or state watch by ID.
 
 #### `bread.emit(event, data)`
-Emit a custom event into the system pipeline. Useful for cross-module communication.
+Emit a custom event into the system pipeline. Useful for cross-module communication. If called synchronously from inside a `bread.on` subscriber callback (i.e. in reaction to a matched event), the emitted event's `caused_by` *(Since: v1.5)* is set to the id of the event that triggered the callback, threading causality across chains of modules that react to each other — see [Dictionary: Event reference](#dictionary-event-reference).
 
 #### `bread.wait(pattern, opts) -> event | nil`
 Coroutine-only helper that suspends until a matching event arrives.
@@ -855,9 +856,14 @@ Events are delivered as a `BreadEvent`:
   "event": "bread.device.dock.connected",
   "timestamp": 1710000000000,
   "source": "Udev",
-  "data": {}
+  "data": {},
+  "id": "b3f2c9a0-4e6d-4b8a-9c1e-7a2f5d8e0c11",
+  "caused_by": null
 }
 ```
+
+- **`id`** *(Since: v1.5)* — a unique id assigned to this specific event instance at construction. Every `BreadEvent`, regardless of origin (adapter-normalized, IPC `emit`, Lua `bread.emit()`, or a daemon-internal send like `bread.system.startup`), gets one.
+- **`caused_by`** *(Since: v1.5)* — the `id` of the event whose Lua subscriber handler emitted this event via `bread.emit()`, or `null` if this event did not originate from inside a running handler (adapter events, IPC `emit`, daemon-internal sends). This lets you reconstruct causality chains across modules that react to each other's events: if module A's handler for event X calls `bread.emit("Y", ...)`, then Y's `caused_by` is X's `id`. See `bread events --tree` below for a rendering of these chains.
 
 ### Pattern matching
 
