@@ -45,6 +45,19 @@ impl EventNormalizer {
                 source: raw.source.clone(),
                 data: raw.payload.clone(),
             }],
+            // `Manual` is never constructed as a `RawEvent::source` in this
+            // codebase — the IPC boundary's unsourced `emit` path builds a
+            // `BreadEvent` directly (see `breadd/src/ipc/mod.rs`), bypassing
+            // this normalizer entirely, exactly as `System` did before it.
+            // This arm exists only so the match stays exhaustive; if that
+            // ever changes, pass-through (like `System`) is the sane default
+            // rather than silently dropping the event.
+            AdapterSource::Manual => vec![BreadEvent {
+                event: raw.kind.clone(),
+                timestamp: raw.timestamp,
+                source: raw.source.clone(),
+                data: raw.payload.clone(),
+            }],
         };
 
         out.retain(|ev| self.accept(ev));

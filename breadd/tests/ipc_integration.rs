@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 #[tokio::test]
 async fn ping_and_state_dump_work() -> Result<()> {
@@ -94,6 +94,155 @@ async fn emit_without_event_errors() -> Result<()> {
 
     let result = harness.send_request("emit", json!({})).await;
     assert!(result.is_err());
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_without_source_rejects_adapter_owned_event_name() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // A no-`source` emit must not be able to impersonate a real adapter
+    // event by event name alone — "power" is a reserved, adapter-owned
+    // domain (see `bread_shared::apps::RESERVED_DOMAINS`).
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "event": "bread.power.ac.connected", "data": { "ac_connected": true } }),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "manual emit must not be able to claim an adapter-owned event name"
+    );
+    let msg = result.err().unwrap().to_string();
+    assert!(msg.contains("reserved"), "got: {msg}");
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_without_source_rejects_every_adapter_owned_domain() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // Every namespace a real adapter (or the daemon itself) publishes
+    // under must be closed to the unsourced emit path, not just "power".
+    for event in [
+        "bread.power.ac.connected",
+        "bread.network.connected",
+        "bread.device.connected",
+        "bread.bluetooth.device.paired",
+        "bread.hyprland.event",
+        "bread.workspace.changed",
+        "bread.monitor.connected",
+        "bread.window.opened",
+        "bread.system.startup",
+    ] {
+        let result = harness
+            .send_request("emit", json!({ "event": event, "data": {} }))
+            .await;
+        assert!(
+            result.is_err(),
+            "expected '{event}' to be rejected on the unsourced emit path"
+        );
+    }
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_without_source_still_allows_custom_event_names() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // The documented `bread emit <custom-name>` debug use case (testing Lua
+    // handlers without unplugging cables) must keep working for any event
+    // name that isn't a reserved, adapter-owned domain.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "event": "bread.mymodule.custom_thing", "data": { "n": 1 } }),
+        )
+        .await;
+    assert!(result.is_ok(), "custom event name must still be emittable");
+    assert_eq!(
+        result.unwrap().get("emitted").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_without_source_is_tagged_manual_not_system() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe = json!({
+        "id": "sub-manual",
+        "method": "events.subscribe",
+        "params": { "filter": "bread.mymodule.*" }
+    });
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+
+    let mut reader = BufReader::new(read_half).lines();
+    reader
+        .next_line()
+        .await?
+        .ok_or_else(|| anyhow!("missing subscribe ack"))?;
+
+    // The subscribe ack is written to the client before the server task
+    // actually registers on the broadcast channel (see `handle_connection`'s
+    // "events.subscribe" arm — ack first, `stream_events`/`event_tx.subscribe()`
+    // second). A brief settle delay avoids racing that registration under
+    // full-suite parallel load, same as the settle delay already used in
+    // `workflow_reaches_done_via_wait_any_happy_path` above for the same
+    // class of subscribe-then-fire race.
+    sleep(Duration::from_millis(100)).await;
+
+    harness
+        .send_request(
+            "emit",
+            json!({ "event": "bread.mymodule.poked", "data": {} }),
+        )
+        .await?;
+
+    // Bounded by an explicit timeout (not just the `Instant`-deadline-checked
+    // loop used elsewhere in this file) so a real regression here fails the
+    // test in 5s instead of hanging this test binary — and therefore the
+    // whole `cargo test --workspace` run — forever.
+    let event = timeout(Duration::from_secs(5), async {
+        loop {
+            let line = reader
+                .next_line()
+                .await?
+                .ok_or_else(|| anyhow!("event stream closed before match"))?;
+            let event: Value = serde_json::from_str(&line)?;
+            if event.get("event").and_then(Value::as_str) == Some("bread.mymodule.poked") {
+                return Ok::<Value, anyhow::Error>(event);
+            }
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("timed out waiting for bread.mymodule.poked on the stream"))??;
+    // A wire-triggered no-source emit must never be indistinguishable from
+    // a daemon-internal `System` event (e.g. `bread.system.startup`,
+    // `bread.profile.activated`) — it must carry the distinct `Manual` tag.
+    assert_eq!(
+        event.get("source").and_then(Value::as_str),
+        Some("manual"),
+        "no-source emit must be tagged 'manual', not 'system': {event:?}"
+    );
 
     harness.shutdown();
     Ok(())
@@ -471,7 +620,12 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
         "id": "sub-1",
         "method": "events.subscribe",
         "params": {
-            "filter": "bread.system.*"
+            // "system" is a reserved, adapter/daemon-owned domain (see
+            // `emit_without_source_rejects_reserved_domain` below) — a
+            // manual emit can no longer use it, so this test's custom
+            // event lives under "custom" instead, same as it always did
+            // for "match"/"nomatch"/"replay"/etc. elsewhere in this file.
+            "filter": "bread.custom.*"
         }
     });
     write_half
@@ -497,7 +651,7 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
         .send_request(
             "emit",
             json!({
-                "event": "bread.system.test",
+                "event": "bread.custom.test",
                 "data": { "ok": true }
             }),
         )
@@ -510,7 +664,7 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
             break;
         };
         let event: Value = serde_json::from_str(&line)?;
-        if event.get("event").and_then(Value::as_str) == Some("bread.system.test") {
+        if event.get("event").and_then(Value::as_str) == Some("bread.custom.test") {
             got = true;
             break;
         }

@@ -32,9 +32,25 @@ pub enum AdapterSource {
     Power,
     /// Network state (rtnetlink / NetworkManager).
     Network,
-    /// Internal events synthesized by the daemon itself
-    /// (e.g. `bread.profile.activated`, `bread.state.changed.*`).
+    /// Internal events synthesized by the daemon itself, i.e. trusted,
+    /// Rust-code-originated sends via `emit_tx` (e.g. `bread.system.startup`,
+    /// `bread.profile.activated`, `bread.state.changed.*`, and Lua's
+    /// `bread.emit()` binding). Never assignable from data that arrived
+    /// over the IPC socket — see [`Manual`](AdapterSource::Manual) for that
+    /// case. *Since: v1.5 — this constraint is now enforced; previously the
+    /// IPC `emit` method's no-`source` path could also tag events `System`.*
     System,
+    /// A manual `emit` IPC request with no `source` param — a human or
+    /// script poked the daemon's Unix socket directly (e.g. `bread emit
+    /// <event>` for testing Lua handlers without unplugging cables).
+    /// Distinct from [`System`](AdapterSource::System) so downstream Lua
+    /// modules and tooling can tell "someone manually injected this event"
+    /// apart from "a real adapter observed this" or "the daemon itself
+    /// produced this." The IPC boundary restricts which event names may be
+    /// tagged this way — it may not claim an adapter-owned namespace (see
+    /// `apps::is_reserved_domain`), but is otherwise free for custom/test
+    /// event names. *Since: v1.5*
+    Manual,
     /// BlueZ Bluetooth stack via D-Bus.
     Bluetooth,
     /// Shell precmd/preexec hooks (terminal command lifecycle, cwd changes).
@@ -223,6 +239,10 @@ mod tests {
             "\"system\""
         );
         assert_eq!(
+            serde_json::to_string(&AdapterSource::Manual).unwrap(),
+            "\"manual\""
+        );
+        assert_eq!(
             serde_json::to_string(&AdapterSource::Bluetooth).unwrap(),
             "\"bluetooth\""
         );
@@ -268,6 +288,7 @@ mod tests {
             AdapterSource::Power,
             AdapterSource::Network,
             AdapterSource::System,
+            AdapterSource::Manual,
             AdapterSource::Bluetooth,
             AdapterSource::Terminal,
             AdapterSource::Git,

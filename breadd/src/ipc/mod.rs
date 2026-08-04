@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use bread_shared::apps::{is_known_app, validate_app_namespace};
+use bread_shared::apps::{event_domain, is_known_app, is_reserved_domain, validate_app_namespace};
 use bread_shared::{now_unix_ms, AdapterSource, BreadEvent, RawEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,7 +27,7 @@ use crate::lua::RuntimeHandle;
 /// something new-but-additive (a binding, an event, an IPC param); bump the
 /// major version only for a breaking change, which should not happen inside
 /// this daemon's v1 lifetime per that section's stated policy.
-const API_VERSION: &str = "1.4.0";
+const API_VERSION: &str = "1.5.0";
 
 #[derive(Clone)]
 pub struct Server {
@@ -323,12 +323,35 @@ impl Server {
                     }
                     Ok(json!({ "emitted": true }))
                 } else {
+                    // Unsourced emit: the manual-testing path ("bread emit
+                    // <event>", used to poke Lua handlers without unplugging
+                    // cables). Tagged `Manual`, never `System` — `System` is
+                    // reserved for events the daemon originates itself in
+                    // Rust code (e.g. `bread.system.startup` in `serve()`
+                    // above), not for anything that arrived over the wire.
+                    // A socket client can still name any custom/test event
+                    // it likes, but not one whose top-level segment is a
+                    // reserved, adapter-owned domain (`bread.power.*`,
+                    // `bread.hyprland.*`, ...) — otherwise this path would
+                    // let any same-UID process impersonate a real adapter
+                    // event with nothing downstream able to tell the
+                    // difference.
                     let Some(event) = req.params.get("event").and_then(Value::as_str) else {
                         return Err((id, "missing event name".to_string()));
                     };
+                    if let Some(domain) = event_domain(event) {
+                        if is_reserved_domain(domain) {
+                            return Err((
+                                id,
+                                format!(
+                                    "event '{event}' claims the reserved '{domain}' domain — manual emit cannot impersonate an adapter-owned event; use a custom event name, or a sourced emit if this should go through the normalizer"
+                                ),
+                            ));
+                        }
+                    }
                     if self
                         .emit_tx
-                        .send(BreadEvent::new(event, AdapterSource::System, data))
+                        .send(BreadEvent::new(event, AdapterSource::Manual, data))
                         .is_err()
                     {
                         return Err((id, "emit channel closed".to_string()));
