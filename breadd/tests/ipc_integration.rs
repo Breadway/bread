@@ -438,6 +438,21 @@ async fn modules_list_returns_array() -> Result<()> {
 /// `bread.state.get(...)`, but `bread.fs` and `bread.exec` must be
 /// genuinely *absent* from the `bread` table it sees — `nil`, not merely
 /// permission-denied when called.
+///
+/// *Since Workstream G*: a module that declares `[[permissions]]` (any,
+/// including an explicit empty list — see
+/// `explicit_empty_permissions_is_scoped_but_not_flagged_ungated` below)
+/// now runs out-of-process in a real `bread-module-host` child instead of
+/// in-process with a scoped Lua `_ENV` (see `breadd/src/lua/mod.rs`'s
+/// `load_module`) — the presence/absence check this test exists for still
+/// holds, just enforced by what `bread-module-host`'s own `ModuleHostLua`
+/// constructs the `bread` table from (see `bread-module-host/src/
+/// lua_env.rs`) instead of `build_scoped_env`. `M.store.set(...)` no
+/// longer works as the result-reporting channel here, since an
+/// out-of-process module's `bread.module().store` is process-local (not
+/// synced back to `breadd`'s `RuntimeState` — a documented gap, see
+/// `Documentation.md`'s Workstream G section) — `bread.emit(...)` is used
+/// instead, which *does* cross the process boundary via the RPC bridge.
 #[tokio::test]
 async fn scoped_module_sees_only_granted_state_read_permission() -> Result<()> {
     let manifest = r#"
@@ -455,23 +470,26 @@ path = "monitors"
     let module_lua = r#"
 local M = bread.module({ name = "scoped-test", version = "1.0.0" })
 
-function M.on_load()
+bread.on("test.trigger", function()
     local ok = pcall(bread.state.get, "monitors")
-    M.store.set("state_get_ok", ok)
-    M.store.set("fs_present", bread.fs ~= nil)
-    M.store.set("exec_present", bread.exec ~= nil)
-    M.store.set("exec_capture_present", bread.exec_capture ~= nil)
-    M.store.set("bluetooth_present", bread.bluetooth ~= nil)
-    -- Baseline must still work from inside a scoped module.
-    M.store.set("json_present", bread.json ~= nil)
-    M.store.set("log_present", bread.log ~= nil)
-end
+    bread.emit("test.scoped_result", {
+        state_get_ok = ok,
+        fs_present = bread.fs ~= nil,
+        exec_present = bread.exec ~= nil,
+        exec_capture_present = bread.exec_capture ~= nil,
+        bluetooth_present = bread.bluetooth ~= nil,
+        -- Baseline must still work from inside a scoped module.
+        json_present = bread.json ~= nil,
+        log_present = bread.log ~= nil,
+    })
+end)
 
 return M
 "#;
 
     let harness = TestHarness::spawn_with_module("scoped-test", Some(manifest), module_lua)?;
     harness.wait_until_ready().await?;
+    harness.wait_for_module_loaded("scoped-test").await?;
 
     let modules = harness
         .send_request("state.get", json!({"key": "modules"}))
@@ -487,10 +505,13 @@ return M
         Some("loaded"),
         "module failed to load: {entry}"
     );
+    assert_eq!(
+        entry.get("ungated"),
+        Some(&json!(false)),
+        "a module with a manifest that declares permissions must not be flagged ungated"
+    );
 
-    let store = entry
-        .get("store")
-        .ok_or_else(|| anyhow!("no store on module status: {entry}"))?;
+    let store = harness.trigger_and_await_result("test.scoped_result").await?;
     assert_eq!(store.get("state_get_ok"), Some(&json!(true)));
     assert_eq!(
         store.get("fs_present"),
@@ -506,12 +527,6 @@ return M
     assert_eq!(store.get("bluetooth_present"), Some(&json!(false)));
     assert_eq!(store.get("json_present"), Some(&json!(true)), "baseline bread.json must still be present");
     assert_eq!(store.get("log_present"), Some(&json!(true)), "baseline bread.log must still be present");
-
-    assert_eq!(
-        entry.get("ungated"),
-        Some(&json!(false)),
-        "a module with a manifest that declares permissions must not be flagged ungated"
-    );
 
     harness.shutdown();
     Ok(())
@@ -538,6 +553,15 @@ return M
 
     let harness = TestHarness::spawn_with_module("legacy-test", None, module_lua)?;
     harness.wait_until_ready().await?;
+    // `wait_until_ready` only proves the IPC socket is accepting
+    // connections — module loading runs concurrently on the Lua engine's
+    // own thread (see `lua::spawn_runtime`), so without this the check
+    // below races module load completion even for an in-process module.
+    // Usually fast enough not to matter, but flaky under this suite's
+    // heavier concurrent process load (see Workstream G's
+    // `module_host_sandbox.rs` tests, which run real sandboxed child
+    // processes alongside this one).
+    harness.wait_for_module_loaded("legacy-test").await?;
 
     let modules = harness
         .send_request("state.get", json!({"key": "modules"}))
@@ -579,6 +603,12 @@ return M
 /// "baseline only" declaration, distinct from no manifest at all: it must
 /// scope the module down for real (no fs/exec/etc.) but must *not* trip the
 /// `ungated` doctor warning, since the author made a conscious choice.
+///
+/// *Since Workstream G*: `Some(vec![])` also opts this module into the
+/// out-of-process sandboxed path (same as any other declared
+/// `[[permissions]]`), and — as in the test above — results come back via
+/// `bread.emit` on a `test.trigger` handler rather than `M.store`. See that
+/// test's doc comment for the full explanation.
 #[tokio::test]
 async fn explicit_empty_permissions_is_scoped_but_not_flagged_ungated() -> Result<()> {
     let manifest = r#"
@@ -593,16 +623,19 @@ permissions = []
     let module_lua = r#"
 local M = bread.module({ name = "empty-perms-test", version = "1.0.0" })
 
-function M.on_load()
-    M.store.set("fs_present", bread.fs ~= nil)
-    M.store.set("state_present", bread.state ~= nil)
-end
+bread.on("test.trigger", function()
+    bread.emit("test.empty_perms_result", {
+        fs_present = bread.fs ~= nil,
+        state_present = bread.state ~= nil,
+    })
+end)
 
 return M
 "#;
 
     let harness = TestHarness::spawn_with_module("empty-perms-test", Some(manifest), module_lua)?;
     harness.wait_until_ready().await?;
+    harness.wait_for_module_loaded("empty-perms-test").await?;
 
     let modules = harness
         .send_request("state.get", json!({"key": "modules"}))
@@ -617,14 +650,15 @@ return M
         .ok_or_else(|| anyhow!("empty-perms-test module not found in modules state; dump: {modules}"))?;
 
     assert_eq!(entry.get("status").and_then(Value::as_str), Some("loaded"));
-    let store = entry.get("store").unwrap();
-    assert_eq!(store.get("fs_present"), Some(&json!(false)));
-    assert_eq!(store.get("state_present"), Some(&json!(false)));
     assert_eq!(
         entry.get("ungated"),
         Some(&json!(false)),
         "an explicit empty permissions list is a deliberate declaration, not 'undeclared'"
     );
+
+    let store = harness.trigger_and_await_result("test.empty_perms_result").await?;
+    assert_eq!(store.get("fs_present"), Some(&json!(false)));
+    assert_eq!(store.get("state_present"), Some(&json!(false)));
 
     harness.shutdown();
     Ok(())
@@ -1556,7 +1590,94 @@ enabled = false
         Ok(parsed.get("result").cloned().unwrap_or_else(|| json!({})))
     }
 
-    fn shutdown(mut self) {
+    /// Poll `modules.list`/`state.get "modules"`-equivalent status until
+    /// `name` reaches `Loaded` (or `LoadError`, which is treated as a test
+    /// failure). Out-of-process modules (Workstream G:
+    /// `decl.permissions.is_some()`, see `breadd/src/lua/mod.rs`) report
+    /// their load outcome asynchronously — a passing `wait_until_ready`
+    /// only proves the daemon's IPC socket itself is up, not that any
+    /// particular module has finished spawning/connecting/authenticating/
+    /// running its `init.lua` yet.
+    async fn wait_for_module_loaded(&self, name: &str) -> Result<()> {
+        // Comfortably exceeds module_host::READY_TIMEOUT (breadd's own
+        // spawn-side wait) so this test-side poll doesn't give up before
+        // breadd itself would.
+        let deadline = Instant::now() + Duration::from_secs(55);
+        while Instant::now() < deadline {
+            let modules = self.send_request("state.get", json!({"key": "modules"})).await?;
+            if let Some(arr) = modules.as_array() {
+                for m in arr {
+                    if m.get("name").and_then(Value::as_str) == Some(name) {
+                        match m.get("status").and_then(Value::as_str) {
+                            Some("loaded") => return Ok(()),
+                            Some("load_error") => {
+                                return Err(anyhow!("module '{name}' failed to load: {m}"))
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(anyhow!("module '{name}' did not reach Loaded within timeout"))
+    }
+
+    /// Subscribe to `result_event`, send a `test.trigger` manual emit to
+    /// kick off whatever Lua handler is waiting on it, and return the
+    /// triggered event's `data`. See `breadd/tests/module_host_sandbox.rs`'s
+    /// module doc comment for why this trigger-based pattern exists at all:
+    /// a module reporting its result from `on_load` directly would race the
+    /// daemon's own startup sequence, since `tokio::sync::broadcast` (what
+    /// `events.subscribe` reads from) never replays history to a subscriber
+    /// that joins after a send already happened.
+    async fn trigger_and_await_result(&self, result_event: &str) -> Result<Value> {
+        let stream = UnixStream::connect(self.socket_path()).await?;
+        let (read_half, mut write_half) = stream.into_split();
+        let subscribe = json!({
+            "id": "sub-1",
+            "method": "events.subscribe",
+            "params": { "filter": result_event },
+        });
+        write_half
+            .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+            .await?;
+        let mut reader = BufReader::new(read_half).lines();
+        let _ack = reader.next_line().await?;
+
+        self.send_request("emit", json!({ "event": "test.trigger", "data": {} }))
+            .await?;
+
+        let line = timeout(Duration::from_secs(10), reader.next_line())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for {result_event}"))??
+            .ok_or_else(|| anyhow!("connection closed before {result_event} arrived"))?;
+        let event: Value = serde_json::from_str(&line)?;
+        event
+            .get("data")
+            .cloned()
+            .ok_or_else(|| anyhow!("{result_event} missing data"))
+    }
+
+    fn shutdown(self) {
+        // Drop (below) does the actual killing.
+        drop(self);
+    }
+}
+
+impl Drop for TestHarness {
+    /// A test that fails partway through (an `?`-propagated error, a
+    /// failed `assert!` unwinding) must not leak a live `breadd` process —
+    /// worse, since Workstream G, a leaked `breadd` can itself have spawned
+    /// `bread-module-host` children under a real Landlock sandbox, which
+    /// don't exit on their own once the parent socket's other end goes
+    /// away instantly (they notice on their next read and exit, but that's
+    /// not instant). Without this, a single failing test in this file
+    /// leaves orphaned processes for every *other* concurrently-running
+    /// test to contend with for CPU/scheduler time — turning one flaky
+    /// failure into cascading slowdowns/timeouts across the whole suite
+    /// (observed directly while developing Workstream G's tests).
+    fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

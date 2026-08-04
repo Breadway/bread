@@ -9,6 +9,7 @@
 - [Run, reload, and watch](#run-reload-and-watch)
 - [Modules: install and manage](#modules-install-and-manage)
 - [Capability-scoped modules](#capability-scoped-modules-since-v15)
+- [Out-of-process module sandboxing](#out-of-process-module-sandboxing-since-v16)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
   - [Workflows](#workflows-since-v12)
@@ -230,6 +231,13 @@ Anything not granted is genuinely **absent** — `bread.fs == nil`, not
 defensively (`if bread.fs then ... end`) degrades exactly the way it would
 if, say, Bluetooth hardware weren't present.
 
+*Since: v1.6* — declaring `[[permissions]]` at all (even an empty list)
+also determines **where** the module runs: see [Out-of-process module
+sandboxing](#out-of-process-module-sandboxing-since-v16) below. The
+`bread` table shape described in this section is what such a module sees
+either way; what changed is what backs it and what happens if the module
+ignores it entirely and reaches for `os`/`io` directly.
+
 ### Baseline (always available, no manifest entry needed)
 
 Event subscription and timers are how a module does anything at all, so
@@ -285,25 +293,26 @@ module down for real but is *not* flagged by `bread doctor`, since the
 author made a conscious choice rather than just not knowing about this
 feature yet.
 
-### `path`/`bin` are not enforced yet — by design
+### `path`/`bin` enforcement depends on where the module runs
 
-The scoping mechanism above only gates *presence* of a `bread.*` binding.
-The `path`/`bin` fields on each permission are recorded in the manifest but
-not checked against the actual arguments a module passes at runtime — a
-module with `fs.read` scoped to `~/Wallpapers` can currently call
-`bread.fs.read("/etc/shadow")` and it will attempt the read (and fail or
-succeed based on normal OS permissions, same as today). Real per-call
-argument enforcement needs a hard security boundary this in-process Lua
-mechanism can't provide on its own — `os.execute`/`io.open`/`debug.*`
-remain reachable from Lua's standard library regardless of what a module's
-`bread` table contains, so a deliberately malicious script can already
-route around `bread.exec`/`bread.fs` entirely. Closing that gap for real is
-the planned **out-of-process module sandboxing** workstream, which this
-manifest schema exists to feed: recording `path`/`bin` now means modules
-declared today won't need a second migration once that lands. Until then,
-treat this mechanism as making accidental over-reach visible and giving
-well-behaved modules a way to advertise (and be held to) a minimal surface
-— not as a hard boundary against hostile code.
+This section describes the **in-process** scoping mechanism
+(`build_scoped_env` in `breadd/src/lua/mod.rs`), which only ever gated
+*presence* of a `bread.*` binding — the `path`/`bin` fields on each
+permission were recorded in the manifest but never checked against the
+actual arguments a module passed at runtime, and `os.execute`/`io.open`/
+`debug.*` remained fully reachable from Lua's standard library regardless
+of what a module's `bread` table contained. That's still exactly true for
+a module with **no manifest at all** (the legacy/backward-compat path,
+`ungated: true` in `modules.list`) — see [Out-of-process module
+sandboxing](#out-of-process-module-sandboxing-since-v16) below.
+
+*Since: v1.6* — a module that declares `[[permissions]]` (any, including
+an explicit empty list) no longer runs in-process at all. It's spawned as
+a separate, OS-sandboxed `bread-module-host` process instead, and for that
+process `path`/`bin` *are* enforced for real, at the kernel level, via a
+Landlock ruleset — independent of whether the module even uses the
+documented `bread.*` API or goes straight for `os.execute`/`io.open`. See
+the linked section for exactly what's covered and what's still deferred.
 
 ### `require("bread.devices")` still works from a scoped module
 
@@ -338,6 +347,293 @@ permission the module doesn't strictly need) are expected and fine; false
 negatives on a plain `bread.exec("...")`-style call site should be rare,
 but dynamic/computed call sites (`bread[method_name](...)`) won't be
 detected.
+
+## Out-of-process module sandboxing *(Since: v1.6)*
+
+### The gap this closes
+
+Capability-scoped modules (above) gate the *documented* `bread.*` API
+surface — a module without `fs.read` sees `bread.fs == nil`. They never
+gated Lua's own standard library: `os.execute`, `io.open`, `debug.*`
+remained fully reachable from a scoped module's chunk regardless of what
+its `bread` table contained, because that chunk still ran as ordinary Lua
+code inside `breadd`'s own OS process, sharing its real filesystem/exec
+access at the kernel level. A well-behaved module degrades correctly when
+a permission is missing; a deliberately adversarial one just calls
+`os.execute("cat /etc/shadow")` directly and the in-process mechanism has
+nothing left to say about it.
+
+This workstream closes that gap for any module that declares
+`[[permissions]]` in `bread.module.toml` — including an explicit empty
+list — by running it in a **separate OS process**, sandboxed at the kernel
+level via [Landlock](https://docs.kernel.org/userspace-api/landlock.html),
+instead of inside `breadd`'s own process.
+
+### What still runs in-process
+
+A module with **no manifest at all** (no `bread.module.toml`, or one with
+no `permissions` key) keeps today's pre-v1.6 behavior unchanged: loaded
+in-process, full ungated `bread` table, `os`/`io`/`debug` reachable —
+surfaced as `"ungated": true` in `modules.list`/`state.get "modules"`,
+which is exactly what `bread doctor` reads to warn about it. This is a
+deliberate scope decision, not an oversight: Landlock needs concrete rules
+to build a ruleset from, and "no manifest at all" carries no information
+to build one. A module author who wants real OS-level isolation writes a
+manifest — that's the whole point of the capability system this reuses.
+Built-in modules (`bread.devices`/`monitors`/`workspaces`/`binds`) are
+completely unaffected either way; they never go through manifest-based
+scoping.
+
+### Architecture
+
+```
+breadd (trusted)                    bread-module-host (sandboxed, per module)
+  │                                        │
+  ├─ spawns child, applies a Landlock ──►  │ (restriction applied by the
+  │  ruleset via Command::pre_exec         │  PARENT before the child's
+  │  BEFORE execve()                       │  own main() ever runs)
+  │                                        │
+  ├─ hands it a one-time token via         │
+  │  $BREAD_MODULE_TOKEN (env, not argv)   │
+  │                                        │
+  │◄── connects to breadd's existing ──────┤
+  │    IPC socket, presents the token      │
+  │    via module_host.hello               │
+  │                                        │
+  ├─ looks up which module/permissions ──► │ learns its own identity +
+  │  the token was issued for, replies     │ granted permissions from
+  │                                        │ breadd's answer (never
+  │                                        │ trusted from self-assertion)
+  │                                        │
+  │◄── module_host.on/off/emit/after/ ─────┤ loads init.lua into a fresh
+  │    every/cancel/fs_read/fs_write/      │ Lua VM; bread.* functions
+  │    exec/exec_capture/state_get/status  │ are RPC-backed proxies, not
+  │    (RPC bridge, belt)                  │ direct bindings
+  │                                        │
+  │  Landlock ruleset (suspenders,         │ os.execute/io.open/debug.*
+  │  enforced by the kernel independent    │ still exist in this Lua VM
+  │  of whether the RPC bridge is used) ──►│ but are bounded by the
+                                            │ kernel regardless
+```
+
+One `bread-module-host` process per out-of-process module. Its own
+dependency footprint is deliberately minimal (`mlua`, `tokio`,
+`serde_json`, `bread-shared`) — it's reviewable attack surface in its own
+right, running one module's untrusted Lua.
+
+### The token/identity handshake
+
+Workstream A deliberately did not build a generic IPC connection-identity
+system — it closed a narrower spoofing gap instead — so there was no
+`module:<name>` identity concept to reuse. `breadd` generates a random
+one-time token (a v4 UUID) when spawning a module-host child and passes it
+via the `$BREAD_MODULE_TOKEN` **environment variable**, not argv — argv is
+visible to any process on the system via `/proc/<pid>/cmdline`, env vars
+are not without `/proc/<pid>/environ` and matching privileges. The child's
+first message on the IPC socket, `module_host.hello {token}`, presents
+that token; `breadd` looks up which module name/permission set the token
+was issued for (`ModuleHostRegistry::take_pending`, a one-time,
+consume-on-read lookup) and replies with that identity. The child never
+asserts its own name and has that trusted — an adversarial process holding
+a *stolen or guessed* token still can't claim to be a different module
+than the one `breadd` actually spawned that token for, and a token is
+consumed on first use so it can't be replayed.
+
+Other env vars passed to the child: `$BREAD_MODULE_ENTRY` (absolute path
+to the module's `init.lua`) and `$BREAD_MODULE_SOCKET` (breadd's socket
+path, for test harnesses that override it — production defaults to the
+same `bread_shared::resolve_socket_path()` every other client uses).
+`$BREAD_MODULE_NAME` is also passed, but purely informational (early log
+lines before the hello handshake completes) — never trusted for identity
+or permission lookup.
+
+### The Landlock sandbox
+
+[Landlock](https://docs.kernel.org/userspace-api/landlock.html) (Linux
+5.13+) was chosen over wrapping every spawn in `bubblewrap`/`firejail`:
+it's a pure-Rust crate calling the LSM's syscalls directly
+(`landlock_create_ruleset`/`landlock_restrict_self`), unprivileged (no
+setuid helper, no `CAP_SYS_ADMIN`), and fits this workspace's existing
+preference for native Rust crates over shelling out to external tools
+(same reasoning as `udev`/`zbus`/`rtnetlink` instead of CLI wrappers).
+`bubblewrap`-wrapping remains a documented fallback for a target kernel
+that lacks Landlock (pre-5.13, or compiled out) — not implemented, since
+Landlock covers this project's actual target.
+
+The ruleset is built in `breadd` (the parent) and applied via
+`Command::pre_exec` — the closure runs in the forked child, after
+`fork()` but before `execve()`, so the restriction covers the module-host
+binary's own startup, not just the Lua that runs after. Because of that,
+`bread-module-host` itself needs **zero** Landlock-related code or
+dependency — by the time its `main()` runs, the restriction is already
+active and inherited across the `execve()` that started it.
+
+What the ruleset grants, from `breadd/src/module_host.rs`'s
+`apply_sandbox`:
+
+| Grant | Access | Why |
+|-------|--------|-----|
+| System library directories (`/usr/lib`, `/lib`, ...) + `/etc/ld.so.cache`/`.preload` | Read + **Execute** | The dynamic linker needs this to start *any* dynamically-linked binary at all — see the note below on why `Execute` is required here, not just `Read`. |
+| The `bread-module-host` binary's own resolved path | Read + Execute | The one `execve()` this process is expected to have already performed. |
+| The module's own directory (`init.lua`'s parent) | Read | So the bootstrap process can load the module's Lua at all — distinct from any `fs.read` grant, which governs the module's *own* runtime file I/O, not breadd's ability to hand it its own source. |
+| `fs.read` with a `path` hint | Read, scoped to that (`~`-expanded) path prefix | Direct mapping from the manifest. |
+| `fs.write` with a `path` hint | Read + Write + create, scoped to that path prefix | Matches `bread.fs.write`'s own `create_dir_all` + `write` behavior. |
+| `exec` with a `bin` hint | Read + Execute, scoped to that binary's resolved path | Absolute paths used as-is; bare names resolved via a `$PATH` search, `which`-style. |
+
+**No `fs.read`/`fs.write`/`exec` granted at all means no corresponding
+Landlock rule exists, full stop** — the sandboxed process cannot read,
+write, or execute anything outside the fixed baseline above, regardless
+of what it tries via `os`/`io` directly.
+
+**A note on `Execute` and shared libraries**: an earlier version of this
+mechanism assumed Landlock's `Execute` right only gates `execve()`, and
+that plain `Read` would be enough for the dynamic linker's `mmap(...,
+PROT_EXEC, ...)` of `.so` files. That assumption was wrong — verified
+empirically (not just reasoned about) by spawning a real sandboxed child:
+with library directories restricted to `Read`-only, even `/bin/sh -c
+"true"` failed to start at all (`EACCES` on `execve` before a single line
+of script ran); granting `Execute` on those directories too fixed it. The
+practical consequence: a module-host child's direct `os.execute`/`io.open`
+escape hatch, if it names a path under a system library directory
+specifically, is not denied the way an arbitrary path elsewhere is — the
+baseline necessarily grants real `Execute` there. This is a materially
+smaller exposure than no sandbox at all (bounded to files already shipped
+in the system's own library directories, not the whole filesystem), but
+it's a real, known trade-off, not swept under the rug. See
+`breadd/src/module_host.rs`'s `apply_sandbox` doc comment for the full
+reasoning, including why a fully static (`x86_64-unknown-linux-musl`)
+build of `bread-module-host` — confirmed available on this project's dev
+machine — would remove the need for this baseline entirely, and why that
+wasn't attempted in this pass (a build/packaging change, not a sandbox
+logic change).
+
+**fs.read/fs.write with no `path` hint**: the RPC bridge's own
+belt-and-suspenders permission check still applies, but no Landlock rule
+is added — Landlock scoping needs a concrete path, and a hint-less grant
+carries none. A module author who wants the direct `os`/`io` escape hatch
+mediated at the kernel level too needs to declare a `path`.
+
+**Network access is explicitly out of scope for this pass** (P2). Landlock
+gained TCP bind/connect mediation in ABI v4+ (kernel 6.7+), but wiring a
+`network` permission kind through the manifest schema and the sandbox
+builder wasn't attempted here.
+
+### RPC bridge coverage
+
+`bread-module-host`'s `bread` table is built entirely from RPC-backed
+proxies to `breadd` (`breadd/src/ipc/module_host_bridge.rs`), not direct
+in-process bindings. Covered:
+
+- **Baseline**, always present: `bread.on`/`.once`/`.off`/`.emit`,
+  `bread.after`/`.every`/`.cancel`, `bread.json.decode`, `bread.module`
+  (with a process-local `.store` — see the note below), `bread.log`/
+  `.warn`/`.error`. Also `bread.spawn`/`bread.wait` — the same pure-Lua
+  coroutine sugar `breadd`'s own `install_wait_helper` uses, since it's
+  built entirely on top of `on`/`once`/`after`/`cancel`, all of which are
+  bridged; the source is currently duplicated between `breadd` and
+  `bread-module-host` rather than extracted to `bread-shared` (flagged as
+  follow-up below).
+- **Gated**, mirroring the permission table above: `bread.fs.read`/
+  `.write` (`fs.read`/`fs.write`), `bread.exec`/`.exec_capture` (`exec`),
+  `bread.state.get` (`state.read`).
+
+Events/timers are delivered as unsolicited, tagged push messages
+interleaved with ordinary request/response lines on the same connection
+(`bread_shared::module_host_ipc::ModuleHostPush`) — a subscription
+registered via `module_host.on`/`.once` is matched server-side against the
+same event broadcast every other IPC subscriber reads from.
+
+**Not yet bridged** (P1/P2 — see below): `bread.state.monitors`/
+`.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/
+`.profile` shorthands, `bread.state.watch`, `bread.fs.exists`/`.readlink`/
+`.expand`, `bread.profile.activate`, `bread.notify`, `bread.machine.*`,
+`bread.hyprland.*`, `bread.widget.*`, `bread.bluetooth.*`,
+`bread.wait_any`/`.wait_all`/`bread.workflow.*`. These namespaces are
+simply absent (`nil`) from an out-of-process module's `bread` table
+regardless of what the manifest grants — a real coverage gap versus the
+in-process mechanism, not a permission-check bug.
+
+**`bread.module().store` is process-local**, not synced back to `breadd`'s
+`RuntimeState` — a real, known limitation versus the in-process mechanism
+(where `M.store.set`/`.get` persists in daemon state and is visible to
+`bread modules info`/other tooling). Fine for a module's own private
+scratch state; not fine yet for anything expecting cross-process
+visibility. Modules that need to report results/state externally should
+use `bread.emit(...)` instead, which does cross the process boundary.
+
+### Crash isolation
+
+Each spawned `bread-module-host` child is reaped by a dedicated thread in
+`breadd` (`std::process::Child::wait()`, blocking on that thread only —
+never blocking the IPC server or the Lua engine). On exit for any reason —
+clean shutdown, a Lua panic, `kill -9` — `breadd` emits
+`bread.module.crashed` with `{ module, pid, reason, exit_code, signal }`
+and updates that module's status. Verified end-to-end
+(`breadd/tests/module_host_sandbox.rs`): killing a module-host child with
+`SIGKILL` leaves `breadd` itself and every other module (in-process or
+out-of-process) fully responsive, and the crash event fires with the
+correct module name and `signal: 9`.
+
+This is deliberately **detection and reporting**, not a restart/backoff
+policy — a crashed module-host stays down until the next `bread reload`
+(or daemon restart) respawns it. Richer supervision (auto-restart,
+backoff, a circuit breaker) is flagged as follow-up work, not attempted
+here.
+
+### New IPC methods
+
+*Since: v1.6 — `API_VERSION` bumped from `1.5.0` to `1.6.0` in
+`breadd/src/ipc/mod.rs` for this addition.* All new methods live under the
+`module_host.*` prefix and are only meaningful on a connection that has
+completed the `module_host.hello` handshake (see the token/identity
+section above) — see [Dictionary: IPC protocol](#dictionary-ipc-protocol)
+for the full list alongside the pre-existing methods.
+
+### What's implemented vs. deferred
+
+**Landed (P0)**:
+- The `bread-module-host` binary, spawn + token-based identity handshake.
+- Real Landlock sandboxing built from a module's `ModulePermission` list,
+  independently verified at the OS level (`breadd/src/module_host.rs`'s
+  `landlock_denies_reads_outside_granted_path`/
+  `no_exec_permission_means_binary_cannot_be_executed_at_all` unit tests
+  against a real spawned child; `breadd/tests/module_host_sandbox.rs`'s
+  `os_execute_and_io_open_are_denied_at_the_kernel_level_outside_granted_scope`
+  end-to-end, going through a real IPC handshake and real Lua calling
+  `os.execute`/`io.open` directly).
+- RPC bridge for the baseline set plus `fs.read`/`fs.write`/`exec`/
+  `exec_capture`/`state.read` (`state.get` only).
+- Crash isolation: kill-9 of a module-host child doesn't take `breadd` or
+  any other module down, and is reported via `bread.module.crashed`
+  (`breadd/tests/module_host_sandbox.rs`'s
+  `killing_a_module_host_child_does_not_take_down_breadd_or_other_modules`).
+
+**Landed beyond the minimum (still P0-adjacent)**:
+- `bread.spawn`/`bread.wait` (pure-Lua coroutine sugar) work out-of-process
+  too, since they're built entirely on already-bridged primitives.
+- `bread.state.get` (not originally required for the P0 minimum, added
+  because a pre-existing capability-manifest test exercised it).
+
+**Deferred (P1 — do next if this workstream continues)**:
+- `trust = "in-process"` manifest escape hatch for latency-sensitive
+  modules that want to opt back into today's D-mechanism deliberately.
+- Extracting `bread.spawn`/`bread.wait`'s embedded Lua source (currently
+  duplicated between `breadd` and `bread-module-host`) into a shared
+  `bread-shared` module so the two copies can't drift.
+- The remaining `bread.*` namespaces over RPC: `bread.state.watch` and the
+  `.monitors`/`.active_workspace`/etc. shorthands, `bread.fs.exists`/
+  `.readlink`/`.expand`, `bread.profile.activate`, `bread.notify`,
+  `bread.machine.*`, `bread.hyprland.*`, `bread.widget.*`,
+  `bread.bluetooth.*`, `bread.wait_any`/`.wait_all`/`bread.workflow.*` —
+  mechanically the same pattern as the ones already bridged.
+
+**Deferred (P2 — explicitly out of scope for this pass)**:
+- Network sandboxing / a `network` permission kind.
+- `bread modules info` showing the resolved sandbox profile.
+- Full restart/backoff supervision policy for crashed module-hosts.
+- A fully static (musl) build of `bread-module-host`, which would remove
+  the library-directory `Execute` baseline grant entirely.
+- 100% RPC coverage of every remaining namespace.
 
 ## Debugging tips
 
@@ -1108,6 +1404,7 @@ Events are delivered as a `BreadEvent`:
 | Event | Data |
 |-------|------|
 | `bread.system.startup` | `{}` |
+| `bread.module.crashed` *(Since: v1.6)* | `{ module, pid, reason, exit_code, signal }` — an out-of-process `bread-module-host` child exited (crash, panic, `kill -9`, ...). `exit_code`/`signal` are mutually exclusive (whichever applies); see [Out-of-process module sandboxing](#out-of-process-module-sandboxing-since-v16). |
 
 #### Devices (udev / Bluetooth)
 
@@ -1432,6 +1729,34 @@ Available methods:
 | `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly, tagged `Manual` *(Since: v1.5 — previously tagged `System`; see below)*, for manually testing Lua handlers (this is what `bread emit <event>` and `bread-emit` use). With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. Any other `source` value is rejected — this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
 | `workflows.list` | — | List running/completed workflow instances and their step/status *(Since: v1.2)* |
 | `widgets.list` | — | List all registered widgets across every module *(Since: v1.3)* |
+
+*Since: v1.6* — `module_host.*`: the RPC bridge an out-of-process
+`bread-module-host` child uses in place of direct in-process `bread.*`
+bindings (see [Out-of-process module
+sandboxing](#out-of-process-module-sandboxing-since-v16)). Meaningful only
+on a connection that has completed the handshake below; not intended for
+direct use by other clients.
+
+| Method | Params | Description |
+|--------|--------|-------------|
+| `module_host.hello` | `token` | One-time handshake. Consumes the token, replies with `{ module, permissions, api_version }` or an error for an unknown/expired token. Takes over the rest of the connection's lifetime as a bidirectional RPC bridge, same as `events.subscribe` does for a plain event stream. |
+| `module_host.on` / `.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
+| `module_host.off` | `id` | Cancel a subscription. |
+| `module_host.after` / `.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
+| `module_host.cancel` | `id` | Cancel a timer. |
+| `module_host.emit` | `event`, `data` | Same manual-emit semantics (and reserved-domain guard) as the top-level `emit` method. |
+| `module_host.log` / `.warn` / `.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
+| `module_host.fs_read` | `path` | Requires `fs.read` granted; path-prefix-checked against the manifest's `path` hint if one was declared. Replies `{ content }` (`null` if unreadable). |
+| `module_host.fs_write` | `path`, `content` | Requires `fs.write`, same scoping check. |
+| `module_host.exec` | `cmd` | Requires `exec`; `bin`-hint-checked (by leading command word) if declared. Fire-and-forget, matching `bread.exec`'s own semantics. |
+| `module_host.exec_capture` | `cmd`, `timeout_ms` | Requires `exec`. Replies `{ ok, stdout }`. |
+| `module_host.state_get` | `key` | Requires `state.read`. Replies `{ value }`. |
+| `module_host.status` | `state` (`"loaded"`\|`"load_error"`), `error` | The module-host reports its own load outcome after running `init.lua`; updates `modules.list` status and unblocks `breadd`'s spawn-side wait. |
+
+Every gated method above checks the module's granted `PermissionKind`s
+(learned at hello-time) before attempting the call — belt-and-suspenders
+alongside the Landlock sandbox enforced at the OS level on the
+module-host process itself, not a replacement for it.
 
 The `health` response's `api_version` field lets a client — the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app — assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).
 

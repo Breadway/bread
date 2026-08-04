@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod apps;
 pub mod glob;
+pub mod module_host_ipc;
 pub mod permissions;
 pub mod widget;
 
+pub use module_host_ipc::{ModuleHostHello, ModuleHostPush};
 pub use permissions::{ModulePermission, PermissionKind};
 
 /// Identifies which adapter produced an event.

@@ -4,6 +4,7 @@ members = [
     "breadd",
     "bread-cli",
     "bread-emit",
+    "bread-module-host",
     "xtask",
 ]
 resolver = "2"
@@ -18,3 +19,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6.0"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+# Pure-Rust bindings to the Linux Landlock LSM syscalls (landlock_create_ruleset/
+# landlock_restrict_self) — kernel 5.13+, no external bwrap/firejail binary
+# dependency. See Workstream G (bread-module-host / breadd's module_host
+# spawner) — the actual OS-level sandboxing mechanism for out-of-process
+# module execution. Verified against this repo's dev kernel (6.18) with a
+# real pre_exec()-restricted child process before adoption: filesystem reads
+# outside the granted rule set are denied at the kernel level
+# (RulesetStatus::FullyEnforced / PartiallyEnforced, EACCES on the denied
+# path), not merely a Lua-level check.
+landlock = "0.4"
+uuid = { version = "1", features = ["v4"] }

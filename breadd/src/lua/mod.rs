@@ -25,6 +25,7 @@ use crate::core::subscriptions::SubscriptionId;
 use crate::core::types::{
     DeviceRule, MatchCondition, ModuleLoadState, RuntimeState, WorkflowState, WorkflowStatus,
 };
+use crate::module_host::{self, ModuleHostOutcome, ModuleHostRegistry};
 use bread_shared::now_unix_ms;
 
 pub enum LuaMessage {
@@ -90,6 +91,7 @@ pub fn spawn_runtime(
     config: Config,
     state_handle: StateHandle,
     emit_tx: mpsc::UnboundedSender<BreadEvent>,
+    module_host_registry: ModuleHostRegistry,
 ) -> Result<RuntimeHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let recent_errors = Arc::new(Mutex::new(VecDeque::with_capacity(50)));
@@ -114,6 +116,7 @@ pub fn spawn_runtime(
                     emit_tx,
                     thread_tx.clone(),
                     recent_errors,
+                    module_host_registry,
                 ) {
                     Ok(engine) => engine,
                     Err(err) => {
@@ -246,6 +249,11 @@ struct LuaEngine {
     modules_config: ModulesConfig,
     notifications_config: NotificationsConfig,
     recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
+    /// Workstream G: spawn/token bookkeeping for out-of-process module
+    /// hosts, shared with `ipc::Server` (which authenticates the spawned
+    /// children and serves their RPC calls). See `crate::module_host`.
+    module_host_registry: ModuleHostRegistry,
+    socket_path: PathBuf,
 }
 
 impl LuaEngine {
@@ -255,7 +263,9 @@ impl LuaEngine {
         emit_tx: mpsc::UnboundedSender<BreadEvent>,
         lua_tx: mpsc::UnboundedSender<LuaMessage>,
         recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
+        module_host_registry: ModuleHostRegistry,
     ) -> Result<Self> {
+        let socket_path = config.socket_path();
         Ok(Self {
             lua: Lua::new(),
             handlers: Arc::new(Mutex::new(HashMap::new())),
@@ -271,6 +281,8 @@ impl LuaEngine {
             state_handle,
             emit_tx,
             lua_tx,
+            module_host_registry,
+            socket_path,
             entry_point: config.lua_entry_point(),
             module_path: config.lua_module_path(),
             modules_config: config.modules.clone(),
@@ -1525,15 +1537,37 @@ impl LuaEngine {
     }
 
     fn load_module(&self, decl: &ModuleDecl) -> Result<()> {
+        // Workstream G branch point: a third-party module that declared
+        // `[[permissions]]` (opted into the D capability-manifest system —
+        // `decl.permissions.is_some()`, including `Some(&[])`) gets spawned
+        // as a separate, OS-sandboxed `bread-module-host` process instead of
+        // being loaded into this Lua VM at all. Its Lua state, `bread.on`
+        // handlers, timers, etc. all live in that other process from here
+        // on — none of this engine's module-table/on_load bookkeeping below
+        // applies to it, hence the early return.
+        //
+        // `decl.permissions.is_none()` (no manifest, or a manifest with no
+        // `permissions` key) falls through to the unchanged in-process,
+        // unscoped path for backward compatibility — see
+        // `ModuleDecl::permissions`'s doc comment and `Documentation.md`'s
+        // "Workstream G" section for why this is a deliberate scope
+        // decision rather than an oversight: Landlock needs concrete rules
+        // to build from, and "no manifest at all" carries none.
+        if decl.source.is_none() {
+            if let Some(permissions) = decl.permissions.as_ref() {
+                return self.load_out_of_process_module(decl, permissions);
+            }
+        }
+
         self.set_current_module(Some(decl.name.clone()));
         let result = if let Some(source) = decl.source {
             // Builtins (bread.monitors/devices/workspaces/binds) — embedded
             // source, always the full ambient bread table, never scoped.
             self.load_lua_source(source, &decl.name)
         } else {
-            // Third-party, on-disk modules only. Capability-scoped per
-            // decl.permissions — see load_scoped_lua_file.
-            self.load_scoped_lua_file(&decl.path, &decl.name, decl.permissions.as_deref())
+            // Third-party, on-disk, no-manifest module: today's original
+            // behavior, unchanged (full ungated in-process access).
+            self.load_scoped_lua_file(&decl.path, &decl.name, None)
         };
         self.set_current_module(None);
         result?;
@@ -1543,6 +1577,33 @@ impl LuaEngine {
         }
 
         self.run_on_load(&decl.name)
+    }
+
+    /// Spawn (or respawn, on `bread reload`) a sandboxed `bread-module-host`
+    /// child for `decl` and block until it reports ready or fails — see
+    /// `crate::module_host::spawn_module_host`. Blocking here (rather than
+    /// making `load_module` async) keeps `load_module`'s existing
+    /// synchronous "a module either loaded or it didn't" contract intact
+    /// for callers like `load_init_and_modules` and the `modules.reload`
+    /// IPC method, which both expect to know Loaded-vs-LoadError before
+    /// they return.
+    fn load_out_of_process_module(
+        &self,
+        decl: &ModuleDecl,
+        permissions: &[ModulePermission],
+    ) -> Result<()> {
+        let outcome = module_host::spawn_module_host(
+            &self.module_host_registry,
+            &decl.name,
+            &decl.path,
+            permissions,
+            &self.socket_path,
+            &self.emit_tx,
+        )?;
+        match outcome {
+            ModuleHostOutcome::Ready => Ok(()),
+            ModuleHostOutcome::LoadError(err) => Err(anyhow!(err)),
+        }
     }
 
     /// Load `init.lua` (the trusted entry point) or any other file that

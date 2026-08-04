@@ -2,6 +2,7 @@ mod adapters;
 mod core;
 mod ipc;
 mod lua;
+mod module_host;
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -37,9 +38,14 @@ async fn main() -> Result<()> {
 
     let subscription_count = Arc::new(AtomicU64::new(0));
     let state_handle = StateHandle::new(state.clone(), state_cmd_tx);
+    let module_host_registry = module_host::ModuleHostRegistry::new();
 
-    let lua_runtime =
-        lua::spawn_runtime(config.clone(), state_handle.clone(), normalized_tx.clone())?;
+    let lua_runtime = lua::spawn_runtime(
+        config.clone(),
+        state_handle.clone(),
+        normalized_tx.clone(),
+        module_host_registry.clone(),
+    )?;
     let lua_tx = lua_runtime.sender();
 
     tokio::spawn(run_state_engine(
@@ -119,6 +125,7 @@ async fn main() -> Result<()> {
         adapter_status,
         subscription_count,
         event_buffer,
+        module_host_registry.clone(),
     );
 
     info!("breadd fully started");
@@ -136,6 +143,7 @@ async fn main() -> Result<()> {
     let _ = shutdown_tx.send(true);
 
     lua_runtime.shutdown();
+    module_host_registry.shutdown_all();
     Ok(())
 }
 
