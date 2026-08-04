@@ -4,6 +4,7 @@ members = [
     "breadd",
     "bread-cli",
     "bread-emit",
+    "xtask",
 ]
 resolver = "2"
 

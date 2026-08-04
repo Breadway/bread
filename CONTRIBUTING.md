@@ -67,6 +67,24 @@ cargo build --release --workspace
 cargo test --release --workspace
 ```
 
+### Keeping the API docs honest
+
+`Documentation.md`'s Lua API and IPC protocol sections are hand-written and
+have drifted from the actual code before — there's a checked-in registry,
+`api-schema.toml`, plus an `xtask` checker that catches it happening again.
+
+Whenever you add, rename, or remove a `bread.*` Lua binding
+(`breadd/src/lua/mod.rs`) or an IPC method (`breadd/src/ipc/mod.rs`):
+
+1. Add/update/remove its entry in `api-schema.toml` to match.
+2. Add/update the corresponding section in `Documentation.md` (a
+   `#### bread.<name>` heading for a Lua binding, or a row in the IPC
+   Methods table for an IPC method).
+3. Run `cargo run -p xtask -- check-docs` before committing. It fails with
+   a non-zero exit and a list of exactly what's out of sync — added but
+   undocumented, stale in the schema, or missing a doc heading/row — if
+   `api-schema.toml`, the code, and `Documentation.md` don't all agree.
+
 ## CI
 
 - `dev-release.yml` — triggered on push to `main`.
