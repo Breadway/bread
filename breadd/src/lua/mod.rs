@@ -19,6 +19,7 @@ use tokio::time::{interval_at, sleep, Instant};
 use tracing::{error, info, warn};
 
 use crate::core::config::{Config, ModulesConfig, NotificationsConfig};
+use crate::core::rules::{self, RuleAction, RulesLoadOutcome};
 use crate::core::state_engine::StateHandle;
 use crate::core::subscriptions::SubscriptionId;
 use crate::core::types::{
@@ -299,6 +300,7 @@ impl LuaEngine {
         self.install_api()?;
         self.load_device_rules()?;
         self.load_profiles()?;
+        self.load_rules_toml()?;
         self.load_init_and_modules()?;
         self.run_on_reload();
 
@@ -1343,6 +1345,70 @@ impl LuaEngine {
             .set_name("profiles.lua")
             .exec()
             .map_err(|e| anyhow!("profiles.lua error: {e}"))
+    }
+
+    /// Reads and validates `rules.toml` (if present) and stashes the result
+    /// in Lua globals for `bread.rules`'s `on_load()` to pick up once
+    /// `load_init_and_modules()` loads that built-in module. See the
+    /// `BUILTIN_RULES` doc comment for why globals rather than generating
+    /// Lua source text: the rule data is dynamic (comes from a config file
+    /// parsed fresh each reload) while `ModuleDecl::source` is a
+    /// `&'static str`, so passing it as real Lua values via `mlua`'s Table
+    /// API sidesteps ever having to hand-escape a path or shell command
+    /// into a Lua string literal.
+    fn load_rules_toml(&self) -> Result<()> {
+        let path = rules::rules_path();
+        match rules::load_rules(&path) {
+            RulesLoadOutcome::Absent => Ok(()),
+            RulesLoadOutcome::Fatal(msg) => {
+                self.lua.globals().set("__rules_fatal", msg)?;
+                Ok(())
+            }
+            RulesLoadOutcome::Loaded { rules, issues } => {
+                let data = self.lua.create_table()?;
+                for (i, rule) in rules.iter().enumerate() {
+                    let tbl = self.lua.create_table()?;
+                    tbl.set("on", rule.on.clone())?;
+                    match &rule.action {
+                        // `run` names exactly one program: tilde-expand it
+                        // the same way `bread.fs.*`/`bread.exec` callers
+                        // would, then shell-quote the whole thing so a path
+                        // containing spaces still runs as one file rather
+                        // than being word-split by the `sh -c` that
+                        // `bread.exec()` runs it through.
+                        RuleAction::Run(path) => {
+                            let expanded = lua_expand_path(path);
+                            let quoted = shell_quote(&expanded.to_string_lossy());
+                            tbl.set("run", quoted)?;
+                        }
+                        // `exec` is a full shell command line — pass it
+                        // through to `bread.exec()` verbatim, exactly like
+                        // hand-written Lua calling `bread.exec()` directly.
+                        RuleAction::Exec(cmd) => {
+                            tbl.set("exec", cmd.clone())?;
+                        }
+                        RuleAction::Notify(message) => {
+                            tbl.set("notify", message.clone())?;
+                        }
+                    }
+                    data.set(i + 1, tbl)?;
+                }
+                self.lua.globals().set("__rules_data", data)?;
+
+                if !issues.is_empty() {
+                    let combined = issues
+                        .iter()
+                        .map(|issue| issue.to_string())
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    self.lua
+                        .globals()
+                        .set("__rules_warning", format!("rules.toml: {combined}"))?;
+                }
+
+                Ok(())
+            }
+        }
     }
 
     fn load_init_and_modules(&self) -> Result<()> {
@@ -2648,6 +2714,15 @@ fn lua_expand_path(path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
+/// POSIX single-quotes `s` for safe embedding as one token in a `sh -c`
+/// command line — used for `rules.toml`'s `run = "<script path>"` action
+/// (see `LuaEngine::load_rules_toml`), which is meant to name exactly one
+/// program regardless of spaces in its path, unlike `exec = "..."` which is
+/// a full command line handed to the shell as-is.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 fn dirs_home() -> Option<std::path::PathBuf> {
     if let Ok(home) = std::env::var("HOME") {
         return Some(std::path::PathBuf::from(home));
@@ -2936,6 +3011,68 @@ end
 return M
 "#;
 
+// `bread.rules` — the Lua half of the `rules.toml` declarative automation
+// layer (see `crate::core::rules` for TOML parsing/validation). This module
+// itself is static like the other built-ins; the *data* it acts on is
+// dynamic (parsed from the user's rules.toml each reload), so it's threaded
+// through via `__rules_data` / `__rules_fatal` / `__rules_warning` globals
+// that `load_rules_toml()` sets just before `load_init_and_modules()` runs
+// this module's `on_load()` — the same "stash data in a global, consume it
+// from a lifecycle hook, then clear it" technique `load_profiles()` already
+// uses for `__profiles_path`.
+//
+// A fatal problem (rules.toml unreadable or not valid TOML) is surfaced by
+// calling Lua's `error()`, which `run_on_load()` propagates back to
+// `load_module()` exactly like any other module's `on_load` failure — so it
+// shows up in `bread doctor` / `modules.list` as `bread.rules` in
+// `load_error` state with a `last_error`, the same path a broken
+// hand-written Lua module's error already takes. A handful of individually
+// malformed `[[rule]]` entries (bad `on`, wrong number of action keys)
+// aren't fatal to the rest of the file: the valid rules register first (so
+// they keep working), then the collected issue list is raised the same way
+// so it's still doctor-visible rather than a silent no-op.
+const BUILTIN_RULES: &str = r#"
+local M = bread.module({ name = "bread.rules", version = "1.0.0" })
+
+local function run_action(rule)
+    if rule.run then
+        bread.exec(rule.run)
+    elseif rule.exec then
+        bread.exec(rule.exec)
+    elseif rule.notify then
+        bread.notify(rule.notify)
+    end
+end
+
+function M.on_load()
+    if __rules_fatal then
+        local msg = __rules_fatal
+        __rules_fatal = nil
+        __rules_data = nil
+        __rules_warning = nil
+        error(msg)
+    end
+
+    local data = __rules_data
+    __rules_data = nil
+    if data then
+        for _, rule in ipairs(data) do
+            bread.on("bread." .. rule.on, function(event)
+                run_action(rule)
+            end)
+        end
+    end
+
+    if __rules_warning then
+        local msg = __rules_warning
+        __rules_warning = nil
+        error(msg)
+    end
+end
+
+return M
+"#;
+
 fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
     let mut out = Vec::new();
 
@@ -2949,6 +3086,7 @@ fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
             BUILTIN_WORKSPACES,
         ),
         ("bread.binds", "1.0.0", Vec::new(), BUILTIN_BINDS),
+        ("bread.rules", "1.0.0", Vec::new(), BUILTIN_RULES),
     ];
 
     for (name, version, after, source) in entries {

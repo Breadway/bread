@@ -282,6 +282,19 @@ fn config_path() -> PathBuf {
     expand_home("~/.config/bread/breadd.toml")
 }
 
+/// Location of the optional `rules.toml` — declarative automation rules
+/// (see `crate::core::rules`). Resolved with the exact same
+/// `XDG_CONFIG_HOME`-vs-`HOME` precedence as `config_path()` above; see the
+/// `expand_home` doc comment for why every config-adjacent path the daemon
+/// resolves has to agree on that precedence.
+pub fn rules_path() -> PathBuf {
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        return Path::new(&xdg).join("bread").join("rules.toml");
+    }
+
+    expand_home("~/.config/bread/rules.toml")
+}
+
 /// Expands a leading `~/`. `~/.config/...` paths specifically prefer
 /// `$XDG_CONFIG_HOME` when it's set, consistent with `config_path()`'s own
 /// resolution of `breadd.toml` itself — otherwise the default `lua.entry_point`
@@ -290,7 +303,7 @@ fn config_path() -> PathBuf {
 /// though the config file that sets them was found via that same variable,
 /// which is exactly the kind of inconsistency that made init.lua/module
 /// loading silently no-op for a XDG_CONFIG_HOME-only test setup.
-fn expand_home(input: &str) -> PathBuf {
+pub(crate) fn expand_home(input: &str) -> PathBuf {
     if let Some(stripped) = input.strip_prefix("~/.config/") {
         if let Ok(xdg_config) = env::var("XDG_CONFIG_HOME") {
             return Path::new(&xdg_config).join(stripped);
@@ -633,6 +646,27 @@ legacy_hyprland_event_names = false
         assert_eq!(
             config_path(),
             PathBuf::from("/synthetic/home/.config/bread/breadd.toml")
+        );
+    }
+
+    #[test]
+    fn rules_path_respects_xdg_config_home() {
+        let _g = EnvGuard::new(&["XDG_CONFIG_HOME", "HOME"]);
+        std::env::set_var("XDG_CONFIG_HOME", "/synthetic/xdg-config");
+        assert_eq!(
+            rules_path(),
+            PathBuf::from("/synthetic/xdg-config/bread/rules.toml")
+        );
+    }
+
+    #[test]
+    fn rules_path_falls_back_to_home_when_no_xdg() {
+        let _g = EnvGuard::new(&["XDG_CONFIG_HOME", "HOME"]);
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", "/synthetic/home");
+        assert_eq!(
+            rules_path(),
+            PathBuf::from("/synthetic/home/.config/bread/rules.toml")
         );
     }
 }

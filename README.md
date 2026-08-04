@@ -153,11 +153,33 @@ default_urgency = "normal"
 notify_send_path = "notify-send"
 
 [modules]
-builtin = true    # load built-in modules (monitors, devices, workspaces, binds)
+builtin = true    # load built-in modules (monitors, devices, workspaces, binds, rules)
 disable = []      # list of built-in module names to disable
 ```
 
-Your automation lives in `~/.config/bread/init.lua`. Modules placed in `~/.config/bread/modules/` are auto-loaded after `init.lua`:
+For the common "when event X happens, do Y" case, you don't need Lua at
+all — drop rules straight into `~/.config/bread/rules.toml` and skip
+`init.lua` entirely:
+
+```toml
+# ~/.config/bread/rules.toml
+[[rule]]
+on = "device.dock.connected"
+run = "~/.config/bread/scripts/dock-connected.sh"
+
+[[rule]]
+on = "power.ac.disconnected"
+notify = "Unplugged"
+```
+
+It's optional and purely additive alongside `init.lua` — see
+[Getting started in Documentation.md](Documentation.md#getting-started) for
+the full schema (`run` vs `exec` vs `notify`, wildcard `on` patterns, and
+how a malformed rule surfaces via `bread doctor`).
+
+For anything beyond a single action per event, your automation lives in
+`~/.config/bread/init.lua`. Modules placed in `~/.config/bread/modules/` are
+auto-loaded after `init.lua`:
 
 ```lua
 -- ~/.config/bread/init.lua
