@@ -146,8 +146,8 @@ function M.on_load()
     -- catch a branch switch inside the same still-focused tab (e.g. `git
     -- checkout` run without ever changing window focus), which produces no
     -- focus event at all.
-    bread.on("bread.window.focused", update)
-    bread.on("bread.window.focus.changed", update)
+    bread.on("bread.hyprland.window.focused", update)
+    bread.on("bread.hyprland.window.focus.changed", update)
     bread.every(2000, update)
 end
 
