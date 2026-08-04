@@ -21,7 +21,7 @@ bread.workflow.define("dock-connected", function()
 
     bread.workflow.step("waiting for monitor")
     local event = bread.wait_any(
-        { "bread.monitor.connected", "bread.hyprland.event" },
+        { "bread.hyprland.monitor.connected", "bread.hyprland.event" },
         { timeout = 5000 }
     )
     if not event then
@@ -35,7 +35,7 @@ bread.workflow.define("dock-connected", function()
     bread.profile.activate("docked")
 
     bread.workflow.step("waiting for workspace")
-    bread.wait("bread.workspace.changed", { timeout = 3000 })
+    bread.wait("bread.hyprland.workspace.changed", { timeout = 3000 })
 
     bread.workflow.step("notifying")
     bread.notify("Dock connected", { title = "bread" })

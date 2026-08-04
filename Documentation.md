@@ -915,19 +915,42 @@ Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bre
 
 #### Hyprland
 
+*Since: v1.5 — the `bread.hyprland.*` namespaced forms below. Bread's event vocabulary is meant to be portable across a future second compositor backend; a flat `bread.workspace.*`/`bread.monitor.*`/`bread.window.*` name gave no way to tell a genuinely cross-backend event (like `bread.power.*`) apart from one that is Hyprland-specific. The 10 rows marked `Deprecated: v1.5` are unaffected functionally — they keep firing — but new automation should subscribe to their `bread.hyprland.*` sibling instead.*
+
+Every Hyprland-sourced event below is dual-emitted: the daemon fires both the legacy flat name and its `bread.hyprland.<rest>` equivalent with identical `data`/`timestamp`/`source`, unless `[compat] legacy_hyprland_event_names = false` is set (see below), in which case only the namespaced name fires. A module that subscribes only to `bread.hyprland.*` always gets full workspace/monitor/window coverage regardless of that setting.
+
 | Event | Data |
 |-------|------|
-| `bread.workspace.changed` | raw payload |
-| `bread.workspace.created` | `{ workspace }` |
-| `bread.workspace.destroyed` | `{ workspace }` |
-| `bread.monitor.connected` | raw payload |
-| `bread.monitor.disconnected` | raw payload |
-| `bread.window.focus.changed` | raw payload |
-| `bread.window.focused` | `{ address }` |
-| `bread.window.opened` | `{ address, workspace, class, title }` |
-| `bread.window.closed` | `{ address }` |
-| `bread.window.moved` | `{ address, workspace }` |
-| `bread.hyprland.event` | `{ kind, raw, data }` (unhandled kinds) |
+| `bread.workspace.changed` *(Deprecated: v1.5 — use `bread.hyprland.workspace.changed`)* | raw payload |
+| `bread.hyprland.workspace.changed` *(Since: v1.5)* | raw payload |
+| `bread.workspace.created` *(Deprecated: v1.5 — use `bread.hyprland.workspace.created`)* | `{ workspace }` |
+| `bread.hyprland.workspace.created` *(Since: v1.5)* | `{ workspace }` |
+| `bread.workspace.destroyed` *(Deprecated: v1.5 — use `bread.hyprland.workspace.destroyed`)* | `{ workspace }` |
+| `bread.hyprland.workspace.destroyed` *(Since: v1.5)* | `{ workspace }` |
+| `bread.monitor.connected` *(Deprecated: v1.5 — use `bread.hyprland.monitor.connected`)* | raw payload |
+| `bread.hyprland.monitor.connected` *(Since: v1.5)* | raw payload |
+| `bread.monitor.disconnected` *(Deprecated: v1.5 — use `bread.hyprland.monitor.disconnected`)* | raw payload |
+| `bread.hyprland.monitor.disconnected` *(Since: v1.5)* | raw payload |
+| `bread.window.focus.changed` *(Deprecated: v1.5 — use `bread.hyprland.window.focus.changed`)* | raw payload |
+| `bread.hyprland.window.focus.changed` *(Since: v1.5)* | raw payload |
+| `bread.window.focused` *(Deprecated: v1.5 — use `bread.hyprland.window.focused`)* | `{ address }` |
+| `bread.hyprland.window.focused` *(Since: v1.5)* | `{ address }` |
+| `bread.window.opened` *(Deprecated: v1.5 — use `bread.hyprland.window.opened`)* | `{ address, workspace, class, title }` |
+| `bread.hyprland.window.opened` *(Since: v1.5)* | `{ address, workspace, class, title }` |
+| `bread.window.closed` *(Deprecated: v1.5 — use `bread.hyprland.window.closed`)* | `{ address }` |
+| `bread.hyprland.window.closed` *(Since: v1.5)* | `{ address }` |
+| `bread.window.moved` *(Deprecated: v1.5 — use `bread.hyprland.window.moved`)* | `{ address, workspace }` |
+| `bread.hyprland.window.moved` *(Since: v1.5)* | `{ address, workspace }` |
+| `bread.hyprland.event` | `{ kind, raw, data }` (unhandled kinds — already namespaced, not part of this migration) |
+
+##### Compatibility: `[compat]` config
+
+```toml
+[compat]
+legacy_hyprland_event_names = true   # default during the deprecation window
+```
+
+Set to `false` to suppress the 10 legacy flat names above and emit only their `bread.hyprland.*` equivalents. This defaults to `true` for now; per the [API Stability & Versioning](#api-stability--versioning) deprecation-window policy, the default will flip to `false` in a later release once the window closes. Removing the legacy names entirely is a further, separate follow-up — see the note in `DEPRECATIONS.md`.
 
 #### Power
 

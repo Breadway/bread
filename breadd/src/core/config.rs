@@ -19,6 +19,8 @@ pub struct Config {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub events: EventsConfig,
+    #[serde(default)]
+    pub compat: CompatConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -119,6 +121,22 @@ pub struct EventsConfig {
     pub dedup_window_ms: u64,
 }
 
+/// Deprecation-window toggles for backwards compatibility with pre-namespace
+/// event names. See `[compat]` in `breadd.toml` / `Documentation.md`'s
+/// Hyprland event reference for the migration this gates.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompatConfig {
+    /// When `true` (the default during the deprecation window), the Hyprland
+    /// adapter dual-emits both its legacy flat event names (e.g.
+    /// `bread.workspace.changed`) and their namespaced `bread.hyprland.*`
+    /// equivalents (e.g. `bread.hyprland.workspace.changed`). Set to `false`
+    /// to suppress the legacy names and emit only the namespaced ones — this
+    /// will become the default in a later release once the deprecation
+    /// window closes.
+    #[serde(default = "default_true")]
+    pub legacy_hyprland_event_names: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotificationsConfig {
     #[serde(default = "default_notify_timeout")]
@@ -214,6 +232,14 @@ impl Default for NotificationsConfig {
             default_timeout_ms: default_notify_timeout(),
             default_urgency: default_notify_urgency(),
             notify_send_path: default_notify_path(),
+        }
+    }
+}
+
+impl Default for CompatConfig {
+    fn default() -> Self {
+        Self {
+            legacy_hyprland_event_names: default_true(),
         }
     }
 }
@@ -379,6 +405,7 @@ mod tests {
         assert_eq!(cfg.notifications.notify_send_path, "notify-send");
         assert!(cfg.modules.builtin);
         assert!(cfg.modules.disable.is_empty());
+        assert!(cfg.compat.legacy_hyprland_event_names);
     }
 
     #[test]
@@ -394,6 +421,7 @@ mod tests {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg.daemon.log_level, "info");
         assert!(cfg.adapters.hyprland.enabled);
+        assert!(cfg.compat.legacy_hyprland_event_names);
     }
 
     #[test]
@@ -435,6 +463,9 @@ dedup_window_ms = 250
 default_timeout_ms = 1000
 default_urgency = "critical"
 notify_send_path = "/usr/local/bin/notify-send"
+
+[compat]
+legacy_hyprland_event_names = false
 "#;
         let cfg: Config = toml::from_str(raw).unwrap();
         assert_eq!(cfg.daemon.log_level, "debug");
@@ -453,6 +484,7 @@ notify_send_path = "/usr/local/bin/notify-send"
         assert_eq!(cfg.events.dedup_window_ms, 250);
         assert_eq!(cfg.notifications.default_timeout_ms, 1000);
         assert_eq!(cfg.notifications.default_urgency, "critical");
+        assert!(!cfg.compat.legacy_hyprland_event_names);
     }
 
     #[test]
@@ -466,6 +498,23 @@ log_level = "trace"
         // Untouched sections still get their defaults.
         assert!(cfg.adapters.hyprland.enabled);
         assert_eq!(cfg.events.dedup_window_ms, 100);
+        assert!(cfg.compat.legacy_hyprland_event_names);
+    }
+
+    #[test]
+    fn compat_section_defaults_legacy_hyprland_names_to_true() {
+        let cfg = Config::default();
+        assert!(cfg.compat.legacy_hyprland_event_names);
+    }
+
+    #[test]
+    fn compat_section_can_disable_legacy_hyprland_names() {
+        let raw = r#"
+[compat]
+legacy_hyprland_event_names = false
+"#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(!cfg.compat.legacy_hyprland_event_names);
     }
 
     #[test]

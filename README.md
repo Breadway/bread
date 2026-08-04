@@ -15,7 +15,7 @@ Instead of scattering behavior across shell scripts, compositor configs, udev ru
 Bread runs a long-lived daemon (`breadd`) that:
 
 1. Ingests raw signals from your compositor, hardware, and OS
-2. Normalizes them into stable, semantic events (`bread.device.dock.connected`, `bread.monitor.connected`, etc.)
+2. Normalizes them into stable, semantic events (`bread.device.dock.connected`, `bread.hyprland.monitor.connected`, etc.)
 3. Maintains a live model of your desktop state
 4. Delivers those events to Lua modules that implement your automation
 
@@ -143,6 +143,9 @@ enabled = true
 
 [events]
 dedup_window_ms = 100
+
+[compat]
+legacy_hyprland_event_names = true   # dual-emits bread.hyprland.* alongside legacy flat names; see Documentation.md
 
 [notifications]
 default_timeout_ms = 5000

@@ -52,7 +52,10 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     ));
 
-    let normalizer = Arc::new(EventNormalizer::new(config.events.dedup_window_ms));
+    let normalizer = Arc::new(
+        EventNormalizer::new(config.events.dedup_window_ms)
+            .with_legacy_hyprland_event_names(config.compat.legacy_hyprland_event_names),
+    );
     {
         let normalizer = normalizer.clone();
         let normalized_tx = normalized_tx.clone();

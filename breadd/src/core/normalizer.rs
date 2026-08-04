@@ -14,6 +14,11 @@ pub struct EventNormalizer {
     /// fired within the current window, so subsequent child-node events from the
     /// same plug-in are suppressed at the normalizer level.
     seen_devices: RwLock<HashMap<String, u64>>,
+    /// Mirrors `[compat] legacy_hyprland_event_names` in `breadd.toml`. When
+    /// `true` (the default during the deprecation window), `normalize_hyprland`
+    /// dual-emits both its legacy flat event names and their namespaced
+    /// `bread.hyprland.*` equivalents. See `with_legacy_hyprland_event_names`.
+    legacy_hyprland_event_names: bool,
 }
 
 impl EventNormalizer {
@@ -22,7 +27,19 @@ impl EventNormalizer {
             dedup_window_ms,
             recent: RwLock::new(HashMap::new()),
             seen_devices: RwLock::new(HashMap::new()),
+            legacy_hyprland_event_names: true,
         }
+    }
+
+    /// Overrides whether the Hyprland adapter's legacy flat event names
+    /// (`bread.workspace.changed` etc.) keep firing alongside their
+    /// `bread.hyprland.*` equivalents. Defaults to `true` via `new`, mirroring
+    /// `[compat] legacy_hyprland_event_names`'s documented default during the
+    /// deprecation window; `main.rs` overrides this from
+    /// `config.compat.legacy_hyprland_event_names`.
+    pub fn with_legacy_hyprland_event_names(mut self, enabled: bool) -> Self {
+        self.legacy_hyprland_event_names = enabled;
+        self
     }
 
     pub fn normalize(&self, raw: &RawEvent) -> Vec<BreadEvent> {
@@ -188,107 +205,67 @@ impl EventNormalizer {
             .unwrap_or("");
 
         match kind {
-            "workspace" | "workspacev2" => vec![BreadEvent {
-                event: "bread.workspace.changed".to_string(),
-                timestamp: raw.timestamp,
-                source: AdapterSource::Hyprland,
-                id: bread_shared::new_event_id(),
-                caused_by: None,
-                data: raw.payload.clone(),
-            }],
-            "createworkspace" => vec![BreadEvent {
-                event: "bread.workspace.created".to_string(),
-                timestamp: raw.timestamp,
-                source: AdapterSource::Hyprland,
-                id: bread_shared::new_event_id(),
-                caused_by: None,
-                data: json!({ "workspace": data }),
-            }],
-            "destroyworkspace" => vec![BreadEvent {
-                event: "bread.workspace.destroyed".to_string(),
-                timestamp: raw.timestamp,
-                source: AdapterSource::Hyprland,
-                id: bread_shared::new_event_id(),
-                caused_by: None,
-                data: json!({ "workspace": data }),
-            }],
-            "monitoradded" => vec![BreadEvent {
-                event: "bread.monitor.connected".to_string(),
-                timestamp: raw.timestamp,
-                source: AdapterSource::Hyprland,
-                id: bread_shared::new_event_id(),
-                caused_by: None,
-                data: json!({ "name": data }),
-            }],
-            "monitorremoved" => vec![BreadEvent {
-                event: "bread.monitor.disconnected".to_string(),
-                timestamp: raw.timestamp,
-                source: AdapterSource::Hyprland,
-                id: bread_shared::new_event_id(),
-                caused_by: None,
-                data: json!({ "name": data }),
-            }],
-            "activewindow" => vec![BreadEvent {
-                event: "bread.window.focus.changed".to_string(),
-                timestamp: raw.timestamp,
-                source: AdapterSource::Hyprland,
-                id: bread_shared::new_event_id(),
-                caused_by: None,
-                data: raw.payload.clone(),
-            }],
+            "workspace" | "workspacev2" => {
+                self.emit_hyprland_dual("bread.workspace.changed", raw.payload.clone(), raw)
+            }
+            "createworkspace" => {
+                self.emit_hyprland_dual("bread.workspace.created", json!({ "workspace": data }), raw)
+            }
+            "destroyworkspace" => self.emit_hyprland_dual(
+                "bread.workspace.destroyed",
+                json!({ "workspace": data }),
+                raw,
+            ),
+            "monitoradded" => {
+                self.emit_hyprland_dual("bread.monitor.connected", json!({ "name": data }), raw)
+            }
+            "monitorremoved" => {
+                self.emit_hyprland_dual("bread.monitor.disconnected", json!({ "name": data }), raw)
+            }
+            "activewindow" => {
+                self.emit_hyprland_dual("bread.window.focus.changed", raw.payload.clone(), raw)
+            }
             "activewindowv2" => {
                 let fields = split_hyprland_fields(data);
-                vec![BreadEvent {
-                    event: "bread.window.focused".to_string(),
-                    timestamp: raw.timestamp,
-                    source: AdapterSource::Hyprland,
-                    id: bread_shared::new_event_id(),
-                    caused_by: None,
-                    data: json!({
+                self.emit_hyprland_dual(
+                    "bread.window.focused",
+                    json!({
                         "address": fields.first().unwrap_or(&"")
                     }),
-                }]
+                    raw,
+                )
             }
             "openwindow" => {
                 let fields = split_hyprland_fields(data);
-                vec![BreadEvent {
-                    event: "bread.window.opened".to_string(),
-                    timestamp: raw.timestamp,
-                    source: AdapterSource::Hyprland,
-                    id: bread_shared::new_event_id(),
-                    caused_by: None,
-                    data: json!({
+                self.emit_hyprland_dual(
+                    "bread.window.opened",
+                    json!({
                         "address": fields.first().unwrap_or(&""),
                         "workspace": fields.get(1).unwrap_or(&""),
                         "class": fields.get(2).unwrap_or(&""),
                         "title": fields.get(3).unwrap_or(&""),
                     }),
-                }]
+                    raw,
+                )
             }
             "closewindow" => {
                 let fields = split_hyprland_fields(data);
-                vec![BreadEvent {
-                    event: "bread.window.closed".to_string(),
-                    timestamp: raw.timestamp,
-                    source: AdapterSource::Hyprland,
-                    id: bread_shared::new_event_id(),
-                    caused_by: None,
-                    data: json!({ "address": fields.first().unwrap_or(&"") }),
-                }]
+                self.emit_hyprland_dual(
+                    "bread.window.closed",
+                    json!({ "address": fields.first().unwrap_or(&"") }),
+                    raw,
+                )
             }
             "movewindow" => {
                 let fields = split_hyprland_fields(data);
-                vec![BreadEvent {
-                    event: "bread.window.moved".to_string(),
-                    timestamp: raw.timestamp,
-                    source: AdapterSource::Hyprland,
-                    id: bread_shared::new_event_id(),
-                    caused_by: None,
-                    data: json!({
+                self.emit_hyprland_dual(
+                    "bread.window.moved",
+                    json!({
                         "address": fields.first().unwrap_or(&""),
                         "workspace": fields.get(1).unwrap_or(&""),
                     }),
-                }]
+                    raw,
+                )
             }
             _ => vec![BreadEvent {
                 event: "bread.hyprland.event".to_string(),
@@ -299,6 +276,44 @@ impl EventNormalizer {
                 data: raw.payload.clone(),
             }],
         }
+    }
+
+    /// Emits a Hyprland event under its namespaced `bread.hyprland.<rest>`
+    /// name — always — plus, when `legacy_hyprland_event_names` is enabled
+    /// (the default during the deprecation window), a second `BreadEvent`
+    /// under the pre-namespace flat name (e.g. `bread.workspace.changed`).
+    /// This is the single mechanism behind Workstream C: the two names carry
+    /// identical `data`/`timestamp`/`source`, so a module can migrate to
+    /// `bread.hyprland.*` at its own pace without missing events either way.
+    fn emit_hyprland_dual(
+        &self,
+        legacy_event: &str,
+        data: Value,
+        raw: &RawEvent,
+    ) -> Vec<BreadEvent> {
+        let rest = legacy_event.strip_prefix("bread.").unwrap_or(legacy_event);
+        let namespaced_event = format!("bread.hyprland.{rest}");
+
+        let mut out = Vec::with_capacity(2);
+        if self.legacy_hyprland_event_names {
+            out.push(BreadEvent {
+                event: legacy_event.to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
+                data: data.clone(),
+            });
+        }
+        out.push(BreadEvent {
+            event: namespaced_event,
+            timestamp: raw.timestamp,
+            source: AdapterSource::Hyprland,
+            id: bread_shared::new_event_id(),
+            caused_by: None,
+            data,
+        });
+        out
     }
 
     fn normalize_power(&self, raw: &RawEvent) -> Vec<BreadEvent> {
@@ -781,6 +796,11 @@ mod tests {
     }
 
     // ─── Hyprland ─────────────────────────────────────────────────────────
+    //
+    // `EventNormalizer::new` defaults `legacy_hyprland_event_names` to `true`
+    // (mirrors `[compat]`'s documented default), so by default every mapped
+    // Hyprland kind dual-emits: the legacy flat name plus its namespaced
+    // `bread.hyprland.*` sibling. See `emit_hyprland_dual`.
 
     #[test]
     fn hyprland_workspace_change() {
@@ -792,8 +812,11 @@ mod tests {
             1,
         );
         let out = n.normalize(&ev);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].event, "bread.workspace.changed");
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.event == "bread.workspace.changed"));
+        assert!(out
+            .iter()
+            .any(|e| e.event == "bread.hyprland.workspace.changed"));
     }
 
     #[test]
@@ -806,9 +829,14 @@ mod tests {
             1,
         );
         let out = n.normalize(&ev);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].event, "bread.window.focused");
-        assert_eq!(out[0].data.get("address").unwrap(), "0xdeadbeef");
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.event == "bread.window.focused"));
+        assert!(out
+            .iter()
+            .any(|e| e.event == "bread.hyprland.window.focused"));
+        for ev in &out {
+            assert_eq!(ev.data.get("address").unwrap(), "0xdeadbeef");
+        }
     }
 
     #[test]
@@ -821,17 +849,25 @@ mod tests {
             1,
         );
         let out = n.normalize(&ev);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].event, "bread.window.opened");
-        let d = &out[0].data;
-        assert_eq!(d.get("address").unwrap(), "0xabc");
-        assert_eq!(d.get("workspace").unwrap(), "2");
-        assert_eq!(d.get("class").unwrap(), "firefox");
-        assert_eq!(d.get("title").unwrap(), "Mozilla Firefox");
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|e| e.event == "bread.window.opened"));
+        assert!(out
+            .iter()
+            .any(|e| e.event == "bread.hyprland.window.opened"));
+        for ev in &out {
+            let d = &ev.data;
+            assert_eq!(d.get("address").unwrap(), "0xabc");
+            assert_eq!(d.get("workspace").unwrap(), "2");
+            assert_eq!(d.get("class").unwrap(), "firefox");
+            assert_eq!(d.get("title").unwrap(), "Mozilla Firefox");
+        }
     }
 
     #[test]
     fn hyprland_unknown_kind_falls_through_to_generic_event() {
+        // The `bread.hyprland.event` fallback is already namespaced, so it's
+        // exempt from dual-emit — it never had a legacy flat name to begin
+        // with.
         let n = EventNormalizer::new(0);
         let ev = raw(
             AdapterSource::Hyprland,
@@ -859,9 +895,274 @@ mod tests {
             json!({"kind": "monitorremoved", "data": "HDMI-A-1"}),
             2,
         ));
-        assert_eq!(added[0].event, "bread.monitor.connected");
-        assert_eq!(added[0].data.get("name").unwrap(), "HDMI-A-1");
-        assert_eq!(removed[0].event, "bread.monitor.disconnected");
+        assert_eq!(added.len(), 2);
+        assert!(added.iter().any(|e| e.event == "bread.monitor.connected"));
+        assert!(added
+            .iter()
+            .any(|e| e.event == "bread.hyprland.monitor.connected"));
+        for ev in &added {
+            assert_eq!(ev.data.get("name").unwrap(), "HDMI-A-1");
+        }
+
+        assert_eq!(removed.len(), 2);
+        assert!(removed
+            .iter()
+            .any(|e| e.event == "bread.monitor.disconnected"));
+        assert!(removed
+            .iter()
+            .any(|e| e.event == "bread.hyprland.monitor.disconnected"));
+    }
+
+    /// (a) With the default config (`legacy_hyprland_event_names = true`),
+    /// every one of the 10 dual-emit mappings fires both its legacy flat
+    /// name and its namespaced `bread.hyprland.*` sibling, with identical
+    /// data on each.
+    #[test]
+    fn hyprland_dual_emit_covers_all_ten_mappings_by_default() {
+        let n = EventNormalizer::new(0);
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "workspace",
+                "2",
+                "bread.workspace.changed",
+                "bread.hyprland.workspace.changed",
+            ),
+            (
+                "workspacev2",
+                "2,name",
+                "bread.workspace.changed",
+                "bread.hyprland.workspace.changed",
+            ),
+            (
+                "createworkspace",
+                "3",
+                "bread.workspace.created",
+                "bread.hyprland.workspace.created",
+            ),
+            (
+                "destroyworkspace",
+                "3",
+                "bread.workspace.destroyed",
+                "bread.hyprland.workspace.destroyed",
+            ),
+            (
+                "monitoradded",
+                "HDMI-A-1",
+                "bread.monitor.connected",
+                "bread.hyprland.monitor.connected",
+            ),
+            (
+                "monitorremoved",
+                "HDMI-A-1",
+                "bread.monitor.disconnected",
+                "bread.hyprland.monitor.disconnected",
+            ),
+            (
+                "activewindow",
+                "firefox,Mozilla Firefox",
+                "bread.window.focus.changed",
+                "bread.hyprland.window.focus.changed",
+            ),
+            (
+                "activewindowv2",
+                "0xdead",
+                "bread.window.focused",
+                "bread.hyprland.window.focused",
+            ),
+            (
+                "openwindow",
+                "0xabc>>2>>firefox>>Mozilla Firefox",
+                "bread.window.opened",
+                "bread.hyprland.window.opened",
+            ),
+            (
+                "closewindow",
+                "0xabc",
+                "bread.window.closed",
+                "bread.hyprland.window.closed",
+            ),
+            (
+                "movewindow",
+                "0xabc,2",
+                "bread.window.moved",
+                "bread.hyprland.window.moved",
+            ),
+        ];
+
+        for (kind, data, legacy_event, namespaced_event) in cases {
+            let ev = raw(
+                AdapterSource::Hyprland,
+                "hypr",
+                json!({"kind": kind, "data": data}),
+                1,
+            );
+            let out = n.normalize(&ev);
+            assert_eq!(out.len(), 2, "kind {kind} should dual-emit exactly 2 events");
+            assert!(
+                out.iter().any(|e| &e.event == legacy_event),
+                "kind {kind} missing legacy event {legacy_event}"
+            );
+            assert!(
+                out.iter().any(|e| &e.event == namespaced_event),
+                "kind {kind} missing namespaced event {namespaced_event}"
+            );
+            let legacy_data = out.iter().find(|e| &e.event == legacy_event).unwrap().data.clone();
+            let namespaced_data = out
+                .iter()
+                .find(|e| &e.event == namespaced_event)
+                .unwrap()
+                .data
+                .clone();
+            assert_eq!(
+                legacy_data, namespaced_data,
+                "kind {kind}: legacy and namespaced events should carry identical data"
+            );
+        }
+    }
+
+    /// (b) With `legacy_hyprland_event_names = false`, only the namespaced
+    /// `bread.hyprland.*` names fire — the legacy flat names are fully
+    /// suppressed, not just relegated to a secondary slot.
+    #[test]
+    fn hyprland_legacy_names_suppressed_when_compat_disabled() {
+        let n = EventNormalizer::new(0).with_legacy_hyprland_event_names(false);
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "workspace",
+                "2",
+                "bread.workspace.changed",
+                "bread.hyprland.workspace.changed",
+            ),
+            (
+                "createworkspace",
+                "3",
+                "bread.workspace.created",
+                "bread.hyprland.workspace.created",
+            ),
+            (
+                "destroyworkspace",
+                "3",
+                "bread.workspace.destroyed",
+                "bread.hyprland.workspace.destroyed",
+            ),
+            (
+                "monitoradded",
+                "HDMI-A-1",
+                "bread.monitor.connected",
+                "bread.hyprland.monitor.connected",
+            ),
+            (
+                "monitorremoved",
+                "HDMI-A-1",
+                "bread.monitor.disconnected",
+                "bread.hyprland.monitor.disconnected",
+            ),
+            (
+                "activewindow",
+                "firefox,Mozilla Firefox",
+                "bread.window.focus.changed",
+                "bread.hyprland.window.focus.changed",
+            ),
+            (
+                "activewindowv2",
+                "0xdead",
+                "bread.window.focused",
+                "bread.hyprland.window.focused",
+            ),
+            (
+                "openwindow",
+                "0xabc>>2>>firefox>>Mozilla Firefox",
+                "bread.window.opened",
+                "bread.hyprland.window.opened",
+            ),
+            (
+                "closewindow",
+                "0xabc",
+                "bread.window.closed",
+                "bread.hyprland.window.closed",
+            ),
+            (
+                "movewindow",
+                "0xabc,2",
+                "bread.window.moved",
+                "bread.hyprland.window.moved",
+            ),
+        ];
+
+        for (kind, data, legacy_event, namespaced_event) in cases {
+            let ev = raw(
+                AdapterSource::Hyprland,
+                "hypr",
+                json!({"kind": kind, "data": data}),
+                1,
+            );
+            let out = n.normalize(&ev);
+            assert_eq!(
+                out.len(),
+                1,
+                "kind {kind} should emit exactly 1 event when legacy names are disabled"
+            );
+            assert_eq!(
+                out[0].event, *namespaced_event,
+                "kind {kind} should emit only the namespaced event"
+            );
+            assert!(
+                !out.iter().any(|e| &e.event == legacy_event),
+                "kind {kind} leaked legacy event {legacy_event} despite being disabled"
+            );
+        }
+
+        // The already-namespaced fallback is unaffected either way.
+        let fallback = n.normalize(&raw(
+            AdapterSource::Hyprland,
+            "hypr",
+            json!({"kind": "submap", "data": "resize"}),
+            1,
+        ));
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].event, "bread.hyprland.event");
+    }
+
+    /// (c) A module that subscribes only to `bread.hyprland.*` gets full
+    /// coverage of workspace, monitor, and window activity — regardless of
+    /// the `[compat]` setting — since the namespaced name is unconditional.
+    /// This is the actual promise Workstream C makes: "portable automation"
+    /// only means something if the namespaced form alone is a complete feed.
+    #[test]
+    fn hyprland_namespace_only_subscriber_gets_full_coverage_regardless_of_compat() {
+        let kinds_and_data: &[(&str, &str)] = &[
+            ("workspace", "2"),
+            ("createworkspace", "3"),
+            ("destroyworkspace", "3"),
+            ("monitoradded", "HDMI-A-1"),
+            ("monitorremoved", "HDMI-A-1"),
+            ("activewindow", "firefox,Mozilla Firefox"),
+            ("activewindowv2", "0xdead"),
+            ("openwindow", "0xabc>>2>>firefox>>Mozilla Firefox"),
+            ("closewindow", "0xabc"),
+            ("movewindow", "0xabc,2"),
+        ];
+
+        for legacy_enabled in [true, false] {
+            let n = EventNormalizer::new(0).with_legacy_hyprland_event_names(legacy_enabled);
+            for (kind, data) in kinds_and_data {
+                let out = n.normalize(&raw(
+                    AdapterSource::Hyprland,
+                    "hypr",
+                    json!({"kind": kind, "data": data}),
+                    1,
+                ));
+                let namespaced_hits = out
+                    .iter()
+                    .filter(|e| e.event.starts_with("bread.hyprland."))
+                    .count();
+                assert_eq!(
+                    namespaced_hits, 1,
+                    "kind {kind} (legacy_enabled={legacy_enabled}) should always emit exactly \
+                     one bread.hyprland.* event, matching a bread.hyprland.* subscriber's view"
+                );
+            }
+        }
     }
 
     // ─── Power ─────────────────────────────────────────────────────────────
@@ -1124,9 +1425,14 @@ mod tests {
             json!({"kind": "workspace", "data": "2"}),
             1100,
         );
-        assert_eq!(n.normalize(&a).len(), 1);
+        // Hyprland's "workspace" kind dual-emits (legacy + namespaced name,
+        // see the Hyprland test section below), so each distinct payload
+        // produces 2 events rather than 1 — but the point of this test is
+        // that neither call is suppressed by dedup, since the payloads
+        // differ and thus so does the dedup key.
+        assert_eq!(n.normalize(&a).len(), 2);
         // Different payloads = different dedup key
-        assert_eq!(n.normalize(&b).len(), 1);
+        assert_eq!(n.normalize(&b).len(), 2);
     }
 
     #[test]
