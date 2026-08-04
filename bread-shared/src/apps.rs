@@ -18,6 +18,18 @@ pub const KNOWN_APPS: &[&str] = &[
 /// app id, even if a future `bread*` app would otherwise want that name —
 /// these are the top-level segments the normalizer and built-in event
 /// families already use.
+///
+/// This is also the single source of truth the IPC boundary checks before
+/// allowing a manual (no-`source`) `emit` request to use an event name — a
+/// socket client may freely emit a custom/test event, but not one whose
+/// top-level segment is one of these, since that would let it impersonate
+/// a real adapter (or another daemon-internal event family) rather than
+/// producing an obviously-manual one. See [`is_reserved_domain`] and
+/// `breadd/src/ipc/mod.rs`'s `emit` handler. *Since: v1.5 — `bluetooth`,
+/// `workspace`, `window`, and `monitor` added (event families the Hyprland
+/// and Bluetooth adapters already published under, but that were missing
+/// from this list) when this became a spoofing-prevention boundary and not
+/// just an app-id-conflict one.*
 const RESERVED_DOMAINS: &[&str] = &[
     "terminal",
     "git",
@@ -34,6 +46,10 @@ const RESERVED_DOMAINS: &[&str] = &[
     "notify",
     "command",
     "workflow",
+    "bluetooth",
+    "workspace",
+    "window",
+    "monitor",
 ];
 
 /// Whether `id` is a registered sibling-app id.
@@ -53,6 +69,15 @@ pub fn is_reserved_domain(id: &str) -> bool {
 /// `RawEvent` tagged `AdapterSource::App(app)`.
 pub fn validate_app_namespace(app: &str, event: &str) -> bool {
     event.starts_with(&format!("bread.{app}."))
+}
+
+/// The top-level dotted segment after `bread.` in an event name — e.g.
+/// `Some("power")` for `"bread.power.ac.connected"`. Returns `None` for
+/// event names that don't start with `bread.` at all, which are always
+/// outside any reserved namespace (freely-named custom/test events, the
+/// `bread emit <name>` debug use case, never take this prefix).
+pub fn event_domain(event: &str) -> Option<&str> {
+    event.strip_prefix("bread.")?.split('.').next()
 }
 
 #[cfg(test)]
@@ -86,6 +111,35 @@ mod tests {
         assert!(is_reserved_domain("power"));
         assert!(is_reserved_domain("hyprland"));
         assert!(!is_reserved_domain("clip"));
+    }
+
+    #[test]
+    fn reserved_domains_cover_every_adapter_owned_event_family() {
+        // Every top-level segment a real adapter (via the normalizer) or the
+        // daemon itself publishes under must be reserved, or a manual/no-source
+        // `emit` over the IPC socket could impersonate it undetected.
+        for domain in [
+            "power", "network", "device", "bluetooth", "hyprland", "workspace", "monitor",
+            "window", "system",
+        ] {
+            assert!(
+                is_reserved_domain(domain),
+                "'{domain}' is an adapter-owned event family and must be reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn event_domain_extracts_top_level_segment() {
+        assert_eq!(event_domain("bread.power.ac.connected"), Some("power"));
+        assert_eq!(event_domain("bread.custom.event"), Some("custom"));
+        assert_eq!(event_domain("bread.test"), Some("test"));
+    }
+
+    #[test]
+    fn event_domain_is_none_without_bread_prefix() {
+        assert_eq!(event_domain("power.ac.connected"), None);
+        assert_eq!(event_domain(""), None);
     }
 
     #[test]
