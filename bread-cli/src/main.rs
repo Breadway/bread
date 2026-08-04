@@ -132,6 +132,9 @@ enum ModulesCommand {
     List,
     /// Show full manifest details for a module
     Info { name: String },
+    /// Statically scan an installed module's Lua source and suggest a
+    /// `[[permissions]]` block for its `bread.module.toml` manifest
+    Audit { name: String },
 }
 
 #[tokio::main]
@@ -311,6 +314,55 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
             println!("source:       {}", m.source);
             println!("installed_at: {}", m.installed_at);
             println!("status:       {}", status);
+            match &m.permissions {
+                None => println!(
+                    "permissions:  (none declared — full, ungated bread.* access; see 'bread doctor')"
+                ),
+                Some(perms) if perms.is_empty() => {
+                    println!("permissions:  (declared empty — baseline access only)")
+                }
+                Some(perms) => {
+                    println!("permissions:");
+                    for p in perms {
+                        let mut line = format!("  - {:?}", p.kind);
+                        if let Some(path) = &p.path {
+                            line.push_str(&format!(" path={path}"));
+                        }
+                        if let Some(bin) = &p.bin {
+                            line.push_str(&format!(" bin={bin}"));
+                        }
+                        println!("{line}");
+                    }
+                }
+            }
+        }
+
+        ModulesCommand::Audit { name } => {
+            let module_dir = mods_dir.join(&name);
+            if !module_dir.exists() {
+                eprintln!("bread: module '{}' is not installed", name);
+                std::process::exit(1);
+            }
+            let suggested = modules_mgmt::audit_module(&module_dir)?;
+            if suggested.is_empty() {
+                println!(
+                    "bread: no capability-gated bread.* calls found in '{}' — \
+                     it appears to only use baseline APIs (events, timers, json, \
+                     logging). Declaring `permissions = []` in bread.module.toml \
+                     documents that intentionally and avoids the 'no permissions \
+                     declared' warning from `bread doctor`.",
+                    name
+                );
+                return Ok(());
+            }
+            println!(
+                "bread: suggested permissions for '{}' (best-effort static scan — \
+                 review before pasting into bread.module.toml; false positives \
+                 are possible, missing an actually-needed permission should be rare \
+                 for direct bread.exec()-style call sites):\n",
+                name
+            );
+            print!("{}", modules_mgmt::render_permissions_toml(&suggested)?);
         }
     }
     Ok(())
@@ -677,14 +729,35 @@ fn render_doctor(health: &Value) {
     if let Some(modules) = health.get("modules").and_then(Value::as_array) {
         println!();
         println!("modules");
+        let mut ungated_count = 0;
         for module in modules {
             let name = module.get("name").and_then(Value::as_str).unwrap_or("?");
             let status = module.get("status").and_then(Value::as_str).unwrap_or("?");
             let error = module.get("last_error").and_then(Value::as_str);
+            let ungated = module
+                .get("ungated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             println!("  {:30} {}", name, status);
             if let Some(error) = error {
                 println!("    └ {error}");
             }
+            if ungated {
+                ungated_count += 1;
+                println!(
+                    "    └ ⚠ running with full, ungated access — no permissions \
+                     manifest declared (add `[[permissions]]` to its \
+                     bread.module.toml, or run `bread modules audit {name}` \
+                     for a suggested block)"
+                );
+            }
+        }
+        if ungated_count > 0 {
+            println!();
+            println!(
+                "  {ungated_count} module(s) running with full, ungated bread.* access — \
+                 see above"
+            );
         }
     }
 

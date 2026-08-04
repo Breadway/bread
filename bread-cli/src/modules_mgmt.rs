@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use bread_shared::{ModulePermission, PermissionKind};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -13,6 +14,16 @@ pub struct ModuleManifest {
     pub author: String,
     pub source: String,
     pub installed_at: String,
+    /// Declared `[[permissions]]` entries. `None` means the manifest has no
+    /// `permissions` key at all — either because it predates this field (an
+    /// already-installed module) or because the author simply didn't add
+    /// one. `breadd` treats that the same way: full, ungated `bread.*`
+    /// access, same as today, but `bread doctor` flags it so the gap is
+    /// visible instead of silently permanent. An explicit `permissions = []`
+    /// is different: it's a deliberate "baseline only" declaration and does
+    /// *not* get flagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<Vec<ModulePermission>>,
 }
 
 /// Resolve a module source string to a local directory path.
@@ -226,4 +237,236 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `bread modules audit` — best-effort static permission suggestion
+// ---------------------------------------------------------------------------
+//
+// This is deliberately a text scan, not a Lua parser. `breadd`'s own
+// scoping mechanism only cares whether a permission was declared at all
+// (see `Documentation.md`'s "Capability-scoped modules" section), so the
+// bar here is the same one the report set: false positives (suggesting a
+// permission a module doesn't strictly need) are fine, false negatives on
+// a plain `bread.exec("...")`-style call site should be rare. It is not
+// expected to follow dynamic dispatch, string-built calls, or anything a
+// real parser would be needed for.
+
+/// Statically scan every `.lua` file in `module_dir` (recursively — a
+/// module may `require()` sibling files from its own directory) for
+/// `bread.*` call-site patterns and return a suggested, deduplicated
+/// permission list for the user to review.
+pub fn audit_module(module_dir: &Path) -> Result<Vec<ModulePermission>> {
+    let mut found: std::collections::BTreeMap<PermissionKind, ModulePermission> =
+        std::collections::BTreeMap::new();
+    let mut files = Vec::new();
+    collect_lua_files(module_dir, &mut files)?;
+    for file in &files {
+        if let Ok(src) = fs::read_to_string(file) {
+            scan_lua_source(&src, &mut found);
+        }
+    }
+    Ok(found.into_values().collect())
+}
+
+/// Render a suggested permission list as a pastable `[[permissions]]` TOML
+/// block, matching exactly what `bread.module.toml` expects.
+pub fn render_permissions_toml(perms: &[ModulePermission]) -> Result<String> {
+    #[derive(Serialize)]
+    struct PermissionsBlock<'a> {
+        permissions: &'a [ModulePermission],
+    }
+    toml::to_string_pretty(&PermissionsBlock { permissions: perms })
+        .context("failed to render suggested permissions as TOML")
+}
+
+fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lua_files(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("lua") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Scan one file's source for `bread.<ident>[.<ident>]` occurrences and
+/// classify each into a permission, accumulating into `found` (keyed by
+/// kind, so repeated call sites for the same permission collapse to one
+/// suggestion — first-seen scoping hint wins).
+fn scan_lua_source(src: &str, found: &mut std::collections::BTreeMap<PermissionKind, ModulePermission>) {
+    const NEEDLE: &str = "bread.";
+    let mut cursor = 0usize;
+    while let Some(rel) = src[cursor..].find(NEEDLE) {
+        let ident_start = cursor + rel + NEEDLE.len();
+        cursor = ident_start;
+        let rest = &src[ident_start..];
+        let ident_len = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        let ident = rest[..ident_len].trim_end_matches('.');
+        if ident.is_empty() {
+            continue;
+        }
+        classify_call_site(ident, &rest[ident_len..], found);
+    }
+}
+
+fn classify_call_site(
+    ident: &str,
+    tail: &str,
+    found: &mut std::collections::BTreeMap<PermissionKind, ModulePermission>,
+) {
+    let (kind, bin, path): (PermissionKind, Option<String>, Option<String>) = match ident {
+        "fs.write" => (PermissionKind::FsWrite, None, extract_first_string_arg(tail)),
+        "fs.read" | "fs.exists" | "fs.readlink" | "fs.expand" => {
+            (PermissionKind::FsRead, None, extract_first_string_arg(tail))
+        }
+        "exec" | "exec_capture" => {
+            let hint = extract_first_string_arg(tail)
+                .and_then(|s| s.split_whitespace().next().map(str::to_string));
+            (PermissionKind::Exec, hint, None)
+        }
+        "notify" => (PermissionKind::Notify, None, None),
+        "profile.activate" => (PermissionKind::ProfileActivate, None, None),
+        "state.watch" => (PermissionKind::StateWatch, None, extract_first_string_arg(tail)),
+        other if other == "state" || other.starts_with("state.") => {
+            (PermissionKind::StateRead, None, extract_first_string_arg(tail))
+        }
+        other if other == "machine" || other.starts_with("machine.") => {
+            (PermissionKind::Machine, None, None)
+        }
+        other if other == "hyprland" || other.starts_with("hyprland.") => {
+            (PermissionKind::Hyprland, None, None)
+        }
+        other if other == "widget" || other.starts_with("widget.") => {
+            (PermissionKind::Widget, None, None)
+        }
+        other if other == "bluetooth" || other.starts_with("bluetooth.") => {
+            (PermissionKind::Bluetooth, None, None)
+        }
+        // Everything else (on/once/filter/off/emit/after/every/cancel/json/
+        // module/log/warn/error/debounce/spawn/wait/wait_any/wait_all/
+        // workflow/__private) is baseline — always available, nothing to
+        // suggest.
+        _ => return,
+    };
+    found
+        .entry(kind)
+        .or_insert(ModulePermission { kind, path, bin });
+}
+
+/// Best-effort extraction of the first quoted string literal appearing on
+/// the same line right after a call-site's opening paren, e.g.
+/// `bread.exec("hyprpaper --config foo")` -> `Some("hyprpaper --config foo")`.
+/// Returns `None` for dynamic/variable arguments (`bread.fs.read(path)`) —
+/// the permission is still suggested, just without a scoping hint.
+fn extract_first_string_arg(tail: &str) -> Option<String> {
+    let line_end = tail.find('\n').unwrap_or(tail.len());
+    let window = &tail[..line_end];
+    let quote_pos = window.find(['"', '\''])?;
+    let quote_char = window.as_bytes()[quote_pos] as char;
+    let after = &window[quote_pos + 1..];
+    let quote_end = after.find(quote_char)?;
+    Some(after[..quote_end].to_string())
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn audit_detects_fs_read_and_widget_from_cpu_temp_widget_style_module() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("init.lua"),
+            r#"
+            local M = bread.module({ name = "cpu-temp-widget", version = "1.0.0" })
+            local function read_temp_c()
+                local raw = bread.fs.read("/sys/class/hwmon/hwmon6/temp1_input")
+                return raw
+            end
+            function M.on_load()
+                bread.widget.register({ id = "cpu-temp" })
+                bread.every(5000, function()
+                    bread.widget.update("cpu-temp", {})
+                end)
+            end
+            return M
+            "#,
+        )
+        .unwrap();
+
+        let perms = audit_module(dir.path()).unwrap();
+        let kinds: Vec<PermissionKind> = perms.iter().map(|p| p.kind).collect();
+        assert!(kinds.contains(&PermissionKind::FsRead));
+        assert!(kinds.contains(&PermissionKind::Widget));
+        assert!(!kinds.contains(&PermissionKind::Exec));
+        assert!(!kinds.contains(&PermissionKind::Bluetooth));
+
+        let fs_perm = perms.iter().find(|p| p.kind == PermissionKind::FsRead).unwrap();
+        assert_eq!(fs_perm.path.as_deref(), Some("/sys/class/hwmon/hwmon6/temp1_input"));
+    }
+
+    #[test]
+    fn audit_extracts_exec_bin_hint_and_ignores_baseline_calls() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("init.lua"),
+            r#"
+            local M = bread.module({ name = "wallpaper", version = "1.0.0" })
+            function M.on_load()
+                bread.on("bread.monitor.connected", function()
+                    bread.exec("hyprpaper --config /tmp/foo")
+                end)
+                bread.log("loaded")
+            end
+            return M
+            "#,
+        )
+        .unwrap();
+
+        let perms = audit_module(dir.path()).unwrap();
+        assert_eq!(perms.len(), 1);
+        assert_eq!(perms[0].kind, PermissionKind::Exec);
+        assert_eq!(perms[0].bin.as_deref(), Some("hyprpaper"));
+    }
+
+    #[test]
+    fn audit_scans_required_sibling_files_in_module_directory() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("init.lua"),
+            r#"local lib = require("./lib"); return bread.module({ name = "m", version = "1.0.0" })"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("lib.lua"),
+            r#"return { go = function() bread.bluetooth.power(true) end }"#,
+        )
+        .unwrap();
+
+        let perms = audit_module(dir.path()).unwrap();
+        assert!(perms.iter().any(|p| p.kind == PermissionKind::Bluetooth));
+    }
+
+    #[test]
+    fn render_permissions_toml_produces_pastable_block() {
+        let perms = vec![ModulePermission {
+            kind: PermissionKind::Exec,
+            path: None,
+            bin: Some("hyprpaper".to_string()),
+        }];
+        let rendered = render_permissions_toml(&perms).unwrap();
+        assert!(rendered.contains("[[permissions]]"));
+        assert!(rendered.contains("type = \"exec\""));
+        assert!(rendered.contains("bin = \"hyprpaper\""));
+    }
 }

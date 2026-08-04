@@ -14,6 +14,22 @@ cp low-battery-warning.lua ~/.config/bread/modules/
 bread reload
 ```
 
+`cpu-temp-widget/` is a directory (not a flat file) with a `bread.module.toml`
+manifest declaring its `[[permissions]]` — see
+[Capability-scoped modules](../../Documentation.md#capability-scoped-modules-since-v15).
+Either copy the whole directory into `~/.config/bread/modules/`, or install it
+properly so the manifest travels with it:
+
+```sh
+bread modules install ./cpu-temp-widget
+bread reload
+```
+
+The other modules here are flat files with no manifest — they load exactly
+like today, with full, ungated `bread.*` access (`bread doctor` will note
+that). Run `bread modules audit <name>` on an installed one any time to get a
+suggested `[[permissions]]` block for its own `bread.module.toml`.
+
 ## Modules
 
 | File | What it does | Config needed |
@@ -22,7 +38,7 @@ bread reload
 | `pause-media-on-headphone-unplug.lua` | Runs `playerctl pause` when a headphone/earbud device disconnects. | none (needs `playerctl`) |
 | `dock-monitors.lua` | Applies a multi-monitor layout when an external display connects, reverts when removed. | edit output names/resolutions |
 | `active-window-widget.lua` | Shows the focused window next to the workspace pills in breadbar, via `bread.widget` + `bread.state.watch`. | none |
-| `cpu-temp-widget.lua` | Live CPU temperature readout in breadbar's stats area, via `bread.widget` + `bread.fs.read` on a timer. | edit `TEMP_PATH` for your hwmon layout |
+| `cpu-temp-widget/` | Live CPU temperature readout in breadbar's stats area, via `bread.widget` + `bread.fs.read` on a timer. Directory module with a `bread.module.toml` declaring `fs.read` + `widget` — the permission-manifest worked example. | edit `TEMP_PATH` for your hwmon layout |
 | `bluetooth-toggle-widget.lua` | One-click Bluetooth power toggle in breadbar's tray, via `bread.widget` + a click handler. | none |
 | `focus-mode-widget.lua` | Click-to-toggle "Focus" profile that mutes audio; a widget as an action launcher, not just a readout, and stays in sync with profile changes triggered elsewhere. | none (needs `wpctl`) |
 | `workflow-status-widget.lua` | Surfaces `bread.workflow.list()` in breadbar's tray — shows whichever workflow (e.g. `dock-workflow.lua`, below) is currently running or failed, hidden otherwise. | none |

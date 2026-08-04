@@ -123,6 +123,15 @@ pub struct ModuleStatus {
     pub builtin: bool,
     #[serde(default)]
     pub store: HashMap<String, Value>,
+    /// `true` when this is a third-party module running with full, ungated
+    /// `bread.*` access because its `bread.module.toml` declares no
+    /// `permissions` at all (or the module has no manifest on disk). Always
+    /// `false` for builtin modules, which are never subject to capability
+    /// scoping in the first place — see the "Capability-scoped modules"
+    /// section of `Documentation.md`. `bread doctor` surfaces this as a
+    /// warning so an ungated module doesn't stay invisible forever.
+    #[serde(default)]
+    pub ungated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -44,6 +44,7 @@ pub enum StateCommand {
         status: ModuleLoadState,
         last_error: Option<String>,
         builtin: bool,
+        ungated: bool,
     },
     SetProfile {
         name: String,
@@ -129,11 +130,30 @@ impl StateHandle {
         last_error: Option<String>,
         builtin: bool,
     ) {
+        self.set_module_status_ex(name, status, last_error, builtin, false);
+    }
+
+    /// Same as [`set_module_status`](Self::set_module_status) but also
+    /// records whether the module is running with full, ungated `bread.*`
+    /// access (no `permissions` declared in its manifest). Kept as a
+    /// separate method rather than changing `set_module_status`'s signature
+    /// everywhere so call sites that don't yet know the answer (load
+    /// errors, disabled modules, etc.) don't have to thread a meaningless
+    /// value through.
+    pub fn set_module_status_ex(
+        &self,
+        name: String,
+        status: ModuleLoadState,
+        last_error: Option<String>,
+        builtin: bool,
+        ungated: bool,
+    ) {
         let _ = self.command_tx.send(StateCommand::SetModuleStatus {
             name,
             status,
             last_error,
             builtin,
+            ungated,
         });
     }
 
@@ -303,18 +323,21 @@ async fn handle_command(
             status,
             last_error,
             builtin,
+            ungated,
         } => {
             let mut guard = state.write().await;
             if let Some(existing) = guard.modules.iter_mut().find(|m| m.name == name) {
                 existing.status = status;
                 existing.last_error = last_error;
                 existing.builtin = builtin;
+                existing.ungated = ungated;
             } else {
                 guard.modules.push(crate::core::types::ModuleStatus {
                     name,
                     status,
                     last_error,
                     builtin,
+                    ungated,
                     store: HashMap::new(),
                 });
             }
