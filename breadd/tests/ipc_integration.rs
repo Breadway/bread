@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -517,6 +518,147 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
     }
 
     assert!(got, "did not receive emitted event on stream");
+    harness.shutdown();
+    Ok(())
+}
+
+/// A chain of 3 handlers, each reacting to the previous one's emitted event
+/// entirely inside the Lua runtime (no test-side pumping between links):
+/// module A handles the external trigger and emits X, module B subscribes
+/// to X and emits Y, module C subscribes to Y and emits Z. This exercises
+/// the "current dispatch id" mechanism in `breadd::lua::LuaEngine` end to
+/// end: `caused_by` must thread through every hop of the chain, not just a
+/// single emit.
+#[tokio::test]
+async fn event_causality_chain_threads_caused_by_across_handlers() -> Result<()> {
+    let harness = TestHarness::spawn_with_init(
+        r#"
+        -- module A: reacts to the external trigger, emits X
+        bread.on("bread.chain.trigger", function(event)
+            bread.emit("bread.chain.x", {})
+        end)
+
+        -- module B: reacts to X, emits Y
+        bread.on("bread.chain.x", function(event)
+            bread.emit("bread.chain.y", {})
+        end)
+
+        -- module C: reacts to Y, emits Z
+        bread.on("bread.chain.y", function(event)
+            bread.emit("bread.chain.z", {})
+        end)
+        "#,
+    )?;
+    harness.wait_until_ready().await?;
+
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe = json!({
+        "id": "sub-chain",
+        "method": "events.subscribe",
+        "params": { "filter": "bread.chain.*" }
+    });
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+
+    let mut reader = BufReader::new(read_half).lines();
+    let ack = reader
+        .next_line()
+        .await?
+        .ok_or_else(|| anyhow!("missing subscribe ack"))?;
+    let ack_json: Value = serde_json::from_str(&ack)?;
+    assert_eq!(
+        ack_json
+            .get("result")
+            .and_then(|v| v.get("subscribed"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    // The trigger itself comes in over IPC's unsourced `emit`, outside any
+    // Lua handler — its `caused_by` must be None. Everything downstream
+    // (X, Y, Z) is emitted by `bread.emit()` from inside a running handler.
+    harness
+        .send_request("emit", json!({ "event": "bread.chain.trigger", "data": {} }))
+        .await?;
+
+    let mut events: HashMap<String, Value> = HashMap::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while events.len() < 4 && Instant::now() < deadline {
+        let Some(line) = reader.next_line().await? else {
+            break;
+        };
+        let event: Value = serde_json::from_str(&line)?;
+        let name = event
+            .get("event")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if name.starts_with("bread.chain.") {
+            events.insert(name, event);
+        }
+    }
+
+    let trigger = events
+        .get("bread.chain.trigger")
+        .expect("missing trigger event");
+    let x = events.get("bread.chain.x").expect("missing X event");
+    let y = events.get("bread.chain.y").expect("missing Y event");
+    let z = events.get("bread.chain.z").expect("missing Z event");
+
+    let trigger_id = trigger
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("trigger event missing id")
+        .to_string();
+    let x_id = x
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("X event missing id")
+        .to_string();
+    let y_id = y
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("Y event missing id")
+        .to_string();
+    let z_id = z
+        .get("id")
+        .and_then(Value::as_str)
+        .expect("Z event missing id")
+        .to_string();
+
+    assert_eq!(
+        trigger.get("caused_by").and_then(Value::as_str),
+        None,
+        "IPC-originated trigger event should have no caused_by"
+    );
+    assert_eq!(
+        x.get("caused_by").and_then(Value::as_str),
+        Some(trigger_id.as_str()),
+        "X should be caused_by the trigger event's id"
+    );
+    assert_eq!(
+        y.get("caused_by").and_then(Value::as_str),
+        Some(x_id.as_str()),
+        "Y should be caused_by X's id, not the original trigger"
+    );
+    assert_eq!(
+        z.get("caused_by").and_then(Value::as_str),
+        Some(y_id.as_str()),
+        "Z should be caused_by Y's id"
+    );
+
+    let ids: std::collections::HashSet<&str> =
+        [trigger_id.as_str(), x_id.as_str(), y_id.as_str(), z_id.as_str()]
+            .into_iter()
+            .collect();
+    assert_eq!(
+        ids.len(),
+        4,
+        "every event in the chain should have a distinct id"
+    );
+
     harness.shutdown();
     Ok(())
 }

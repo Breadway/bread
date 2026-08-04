@@ -90,18 +90,63 @@ pub struct BreadEvent {
     pub source: AdapterSource,
     /// Structured event data. The shape depends on the event family.
     pub data: serde_json::Value,
+    /// Unique id for this specific event instance, assigned at construction.
+    ///
+    /// *Since: v1.5* — enables causality tracking (`caused_by`) across chains
+    /// of Lua modules that re-emit events from inside `bread.on` handlers.
+    pub id: String,
+    /// The `id` of the event whose Lua handler emitted this event via
+    /// `bread.emit()`, if any.
+    ///
+    /// `None` for events that originate outside any Lua handler invocation
+    /// (adapter-normalized events, IPC `emit`, daemon-internal sends like
+    /// `bread.system.startup` / `bread.profile.activated`). Populated only
+    /// when the event was constructed by `bread.emit()` while a subscriber
+    /// callback was synchronously running — see the "current dispatch id"
+    /// mechanism on `breadd`'s Lua engine.
+    ///
+    /// *Since: v1.5*
+    pub caused_by: Option<String>,
 }
 
 impl BreadEvent {
-    /// Construct a new event with `timestamp` set to the current wall-clock.
+    /// Construct a new event with `timestamp` set to the current wall-clock,
+    /// a freshly generated `id`, and `caused_by` unset.
     pub fn new(event: impl Into<String>, source: AdapterSource, data: serde_json::Value) -> Self {
+        Self::with_timestamp(event, now_unix_ms(), source, data)
+    }
+
+    /// Construct a new event with an explicit `timestamp`, preserving the
+    /// originating signal's observed time instead of "now". Used by the
+    /// normalizer, which carries `RawEvent::timestamp` through unchanged.
+    ///
+    /// Like [`BreadEvent::new`], this always assigns a fresh `id` and leaves
+    /// `caused_by` unset — callers that need to thread causality set
+    /// `caused_by` on the returned value themselves.
+    pub fn with_timestamp(
+        event: impl Into<String>,
+        timestamp: u64,
+        source: AdapterSource,
+        data: serde_json::Value,
+    ) -> Self {
         Self {
             event: event.into(),
-            timestamp: now_unix_ms(),
+            timestamp,
             source,
             data,
+            id: new_event_id(),
+            caused_by: None,
         }
     }
+}
+
+/// Generate a fresh unique id for a [`BreadEvent`].
+///
+/// Every construction path (`BreadEvent::new`, `BreadEvent::with_timestamp`,
+/// and any remaining struct-literal construction) calls this so every event
+/// gets a stable identity to hang `caused_by` chains off of.
+pub fn new_event_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// Current Unix epoch in milliseconds.
@@ -316,6 +361,8 @@ mod tests {
             timestamp: 1_700_000_000_000,
             source: AdapterSource::Udev,
             data: json!({ "id": "usb-1-1.4", "name": "Logitech" }),
+            id: "test-id-1".to_string(),
+            caused_by: Some("test-id-0".to_string()),
         };
         let raw = serde_json::to_string(&original).unwrap();
         let decoded: BreadEvent = serde_json::from_str(&raw).unwrap();
@@ -324,6 +371,30 @@ mod tests {
         assert_eq!(decoded.timestamp, original.timestamp);
         assert_eq!(decoded.source, original.source);
         assert_eq!(decoded.data, original.data);
+        assert_eq!(decoded.id, original.id);
+        assert_eq!(decoded.caused_by, original.caused_by);
+    }
+
+    #[test]
+    fn bread_event_new_assigns_unique_id_and_no_cause() {
+        let a = BreadEvent::new("bread.test.a", AdapterSource::System, json!({}));
+        let b = BreadEvent::new("bread.test.b", AdapterSource::System, json!({}));
+        assert!(!a.id.is_empty());
+        assert_ne!(a.id, b.id, "each constructed event should get a unique id");
+        assert_eq!(a.caused_by, None);
+    }
+
+    #[test]
+    fn bread_event_with_timestamp_preserves_timestamp_and_assigns_id() {
+        let event = BreadEvent::with_timestamp(
+            "bread.test.c",
+            42,
+            AdapterSource::Udev,
+            json!({ "x": 1 }),
+        );
+        assert_eq!(event.timestamp, 42);
+        assert!(!event.id.is_empty());
+        assert_eq!(event.caused_by, None);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write as IoWrite};
 use std::path::{Path, PathBuf};
@@ -54,6 +55,12 @@ enum Commands {
         /// Replay events from the last N seconds
         #[arg(long)]
         since: Option<u64>,
+        /// Render events as a causality tree via `caused_by` instead of a
+        /// flat stream (events emitted from inside a `bread.emit()` call
+        /// made by another event's Lua handler are nested under it).
+        /// Overrides `--json` — tree rendering always uses the formatted view.
+        #[arg(long)]
+        tree: bool,
     },
     /// Manage installed Lua modules
     Modules {
@@ -158,8 +165,9 @@ async fn main() -> Result<()> {
             json,
             fields,
             since,
+            tree,
         } => {
-            stream_events(&socket, pattern, json, fields, since).await?;
+            stream_events(&socket, pattern, json, fields, since, tree).await?;
         }
         Commands::Modules { subcommand } => {
             handle_modules_cmd(subcommand, &socket).await?;
@@ -378,7 +386,13 @@ async fn stream_events(
     raw_json: bool,
     fields: Option<String>,
     since: Option<u64>,
+    tree: bool,
 ) -> Result<()> {
+    // Tree rendering needs `id`/`caused_by` visible in a consistent shape,
+    // so it always uses the formatted view — a live-streaming-friendly
+    // indent-as-you-go tree rather than buffering the whole stream.
+    let mut causality = CausalityTracker::default();
+
     if let Some(seconds) = since {
         let replay = send_request(
             socket,
@@ -388,7 +402,9 @@ async fn stream_events(
         .await?;
         if let Some(list) = replay.as_array() {
             for item in list {
-                if raw_json {
+                if tree {
+                    causality.print(item);
+                } else if raw_json {
                     println!("{}", serde_json::to_string_pretty(item)?);
                 } else {
                     print_event(item, fields.as_deref());
@@ -426,7 +442,9 @@ async fn stream_events(
 
     while let Some(line) = lines.next_line().await? {
         let value: Value = serde_json::from_str(&line)?;
-        if raw_json {
+        if tree {
+            causality.print(&value);
+        } else if raw_json {
             println!("{}", serde_json::to_string_pretty(&value)?);
         } else {
             print_event(&value, fields.as_deref());
@@ -434,6 +452,63 @@ async fn stream_events(
     }
 
     Ok(())
+}
+
+/// Tracks `id` -> `caused_by` for events seen so far in this stream/replay
+/// batch, so each new event can be indented under its parent as it arrives
+/// — no buffering, no waiting for the stream to end. An event whose parent
+/// hasn't been seen yet (e.g. the parent predates a replay window, or the
+/// causing event is filtered out by the subscription pattern) is rendered
+/// as its own root rather than blocking on a parent that may never show up.
+#[derive(Default)]
+struct CausalityTracker {
+    parents: HashMap<String, Option<String>>,
+}
+
+impl CausalityTracker {
+    /// Depth = number of ancestors reachable by following `caused_by`.
+    /// Guards against cycles/self-loops (shouldn't happen, but a rendering
+    /// bug here must never hang the CLI) with both a seen-set and a hard cap.
+    fn depth(&self, id: &str) -> usize {
+        let mut depth = 0;
+        let mut current = id.to_string();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(Some(parent)) = self.parents.get(&current) {
+            if depth >= 64 || !seen.insert(current.clone()) {
+                break;
+            }
+            depth += 1;
+            current = parent.clone();
+        }
+        depth
+    }
+
+    fn print(&mut self, event: &Value) {
+        let id = event.get("id").and_then(Value::as_str).map(str::to_string);
+        let caused_by = event
+            .get("caused_by")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        let depth = if let Some(id) = &id {
+            self.parents.insert(id.clone(), caused_by.clone());
+            self.depth(id)
+        } else {
+            0
+        };
+
+        let ts = event.get("timestamp").and_then(Value::as_u64).unwrap_or(0);
+        let event_name = event.get("event").and_then(Value::as_str).unwrap_or("?");
+        let source = event.get("source").and_then(Value::as_str).unwrap_or("?");
+        let time = format_timestamp(ts);
+        let indent = "  ".repeat(depth);
+        let connector = if depth > 0 { "\u{2514}\u{2500} " } else { "" };
+        let id_display = id.as_deref().unwrap_or("?");
+        println!("{indent}{connector}{time}  {event_name}  source={source}  id={id_display}");
+        if let Some(data) = event.get("data") {
+            println!("{indent}  data: {data}");
+        }
+    }
 }
 
 fn print_json(value: &Value) -> Result<()> {
