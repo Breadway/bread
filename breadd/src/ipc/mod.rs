@@ -20,6 +20,9 @@ use tracing::{error, info, warn};
 use crate::adapters::AdapterStatus;
 use crate::core::state_engine::StateHandle;
 use crate::lua::RuntimeHandle;
+use crate::module_host::ModuleHostRegistry;
+
+mod module_host_bridge;
 
 /// The Bread Automation API version (Lua API surface + IPC methods + event
 /// vocabulary + runtime-state schema), per `Documentation.md`'s "API
@@ -27,7 +30,11 @@ use crate::lua::RuntimeHandle;
 /// something new-but-additive (a binding, an event, an IPC param); bump the
 /// major version only for a breaking change, which should not happen inside
 /// this daemon's v1 lifetime per that section's stated policy.
-const API_VERSION: &str = "1.5.0";
+///
+/// *Since 1.6.0* — Workstream G's `module_host.*` methods (hello handshake
+/// plus the RPC bridge a `bread-module-host` child uses in place of direct
+/// in-process `bread.*` bindings).
+const API_VERSION: &str = "1.6.0";
 
 #[derive(Clone)]
 pub struct Server {
@@ -42,6 +49,11 @@ pub struct Server {
     event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
     started_at: Instant,
     pid: u32,
+    /// Workstream G: token/identity bookkeeping for out-of-process module
+    /// hosts, shared with the Lua engine (which spawns them). See
+    /// `crate::module_host` and `module_host_bridge` (this module's
+    /// `module_host.*` method handling).
+    module_host_registry: ModuleHostRegistry,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,7 +74,7 @@ struct IpcResponse {
 }
 
 impl Server {
-    // Server::new legitimately requires all 8 fields; a builder pattern here would be
+    // Server::new legitimately requires all 10 fields; a builder pattern here would be
     // over-engineering for a single-call-site constructor.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -75,6 +87,7 @@ impl Server {
         adapter_status: Arc<RwLock<HashMap<String, AdapterStatus>>>,
         subscription_count: Arc<AtomicU64>,
         event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
+        module_host_registry: ModuleHostRegistry,
     ) -> Self {
         Self {
             socket_path,
@@ -84,6 +97,7 @@ impl Server {
             emit_tx,
             raw_tx,
             adapter_status,
+            module_host_registry,
             subscription_count,
             event_buffer,
             started_at: Instant::now(),
@@ -174,6 +188,20 @@ impl Server {
                     .await?;
                 self.stream_events(&mut write_half, filter).await?;
                 return Ok(());
+            }
+
+            // Workstream G: a `bread-module-host` child's very first message
+            // presents its one-time spawn token. From here on this
+            // connection is a dedicated, bidirectional module-host bridge
+            // (RPC requests interleaved with async event/timer pushes) —
+            // see `module_host_bridge::handle_module_host_connection` —
+            // rather than a one-shot request/response exchange, so it takes
+            // over the rest of this connection's lifetime exactly like
+            // `events.subscribe` above does for a plain event stream.
+            if req.method == "module_host.hello" {
+                return self
+                    .handle_module_host_connection(req, lines, write_half)
+                    .await;
             }
 
             let response = match self.handle_request(req).await {
@@ -339,24 +367,7 @@ impl Server {
                     let Some(event) = req.params.get("event").and_then(Value::as_str) else {
                         return Err((id, "missing event name".to_string()));
                     };
-                    if let Some(domain) = event_domain(event) {
-                        if is_reserved_domain(domain) {
-                            return Err((
-                                id,
-                                format!(
-                                    "event '{event}' claims the reserved '{domain}' domain — manual emit cannot impersonate an adapter-owned event; use a custom event name, or a sourced emit if this should go through the normalizer"
-                                ),
-                            ));
-                        }
-                    }
-                    if self
-                        .emit_tx
-                        .send(BreadEvent::new(event, AdapterSource::Manual, data))
-                        .is_err()
-                    {
-                        return Err((id, "emit channel closed".to_string()));
-                    }
-                    Ok(json!({ "emitted": true }))
+                    self.manual_emit(event, data)
                 }
             }
             "health" => {
@@ -407,6 +418,31 @@ impl Server {
             Ok(v) => Ok((id, v)),
             Err(err) => Err((id, err)),
         }
+    }
+
+    /// Unsourced-emit logic, factored out of `handle_request`'s `"emit"`
+    /// case so `module_host_bridge`'s `module_host.emit` (Workstream G) can
+    /// share the exact same reserved-domain guard rather than re-deriving
+    /// it — see the original inline comment (still above the one call site
+    /// in `handle_request`) for why the guard exists: a same-UID socket
+    /// client (or, now, a module-host child) must not be able to
+    /// impersonate a real adapter-owned event namespace.
+    fn manual_emit(&self, event: &str, data: Value) -> std::result::Result<Value, String> {
+        if let Some(domain) = event_domain(event) {
+            if is_reserved_domain(domain) {
+                return Err(format!(
+                    "event '{event}' claims the reserved '{domain}' domain — manual emit cannot impersonate an adapter-owned event; use a custom event name, or a sourced emit if this should go through the normalizer"
+                ));
+            }
+        }
+        if self
+            .emit_tx
+            .send(BreadEvent::new(event, AdapterSource::Manual, data))
+            .is_err()
+        {
+            return Err("emit channel closed".to_string());
+        }
+        Ok(json!({ "emitted": true }))
     }
 
     async fn stream_events(
