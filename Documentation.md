@@ -8,6 +8,7 @@
 - [Your first module](#your-first-module)
 - [Run, reload, and watch](#run-reload-and-watch)
 - [Modules: install and manage](#modules-install-and-manage)
+- [Capability-scoped modules](#capability-scoped-modules-since-v15)
 - [Debugging tips](#debugging-tips)
 - [Dictionary: Lua API](#dictionary-lua-api)
   - [Workflows](#workflows-since-v12)
@@ -100,6 +101,12 @@ Key rules:
 - Register subscriptions inside `M.on_load` so they are cleaned up properly on hot reload.
 - Use `bread.log` early to verify handlers are firing.
 
+A flat file like `modules/hello.lua` with no manifest gets full, unscoped
+`bread.*` access — exactly what you see above, unchanged. That's fine for a
+personal one-off. Once you install a module properly (`bread modules
+install`), it's worth declaring what it actually uses — see
+[Capability-scoped modules](#capability-scoped-modules-since-v15).
+
 ## Run, reload, and watch
 
 ```bash
@@ -130,8 +137,12 @@ bread modules install ~/src/bread-wifi
 # List installed modules and their daemon status
 bread modules list
 
-# Show full manifest for one module
+# Show full manifest for one module (including its declared permissions)
 bread modules info bread-wifi
+
+# Get a suggested [[permissions]] block from a static scan of the module's
+# Lua source — see "Capability-scoped modules" below
+bread modules audit bread-wifi
 
 # Remove a module
 bread modules remove bread-wifi
@@ -147,13 +158,148 @@ description = "WiFi management for Bread"
 author = "someuser"
 source = "/home/you/src/bread-wifi"
 installed_at = "2026-01-01T00:00:00Z"
+
+[[permissions]]
+type = "exec"
+bin = "nmcli"
+
+[[permissions]]
+type = "notify"
 ```
+
+`permissions` is optional *(Since: v1.5)*. Omitting it entirely — every
+manifest written before v1.5, and any manifest an author just hasn't gotten
+around to annotating — means the module runs exactly like it always has:
+full, unscoped `bread.*` access. See the next section for what declaring it
+actually buys you and the full permission taxonomy.
+
+## Capability-scoped modules *(Since: v1.5)*
+
+By default every third-party module gets the full `bread` table — the same
+one built-in modules and `init.lua` see. `[[permissions]]` in
+`bread.module.toml` narrows that: a module only sees the `bread.*` bindings
+it was granted, plus a fixed **baseline** every module gets regardless.
+Anything not granted is genuinely **absent** — `bread.fs == nil`, not
+`bread.fs.read()` throwing a permission error — so a module written
+defensively (`if bread.fs then ... end`) degrades exactly the way it would
+if, say, Bluetooth hardware weren't present.
+
+### Baseline (always available, no manifest entry needed)
+
+Event subscription and timers are how a module does anything at all, so
+they're never gated: `bread.on`/`once`/`filter`/`off`/`emit`,
+`bread.after`/`every`/`cancel`. Also baseline: `bread.json` (pure decode,
+no I/O), `bread.module` (required just to register), `bread.log`/`warn`/
+`error` (diagnostics), and the pure-Lua sugar built entirely on top of the
+above — `bread.debounce`, `bread.spawn`/`wait`/`wait_any`/`wait_all`,
+`bread.workflow.*`.
+
+### Gated — requires a matching `[[permissions]]` entry
+
+| `type` | Grants | Notes |
+|--------|--------|-------|
+| `state.read` | `bread.state.get`/`.monitors`/`.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/`.profile` | Read-only snapshots of daemon state. `path` is an advisory scoping hint (e.g. `"monitors"`), not yet enforced per-call — see the note below. |
+| `state.watch` | `bread.state.watch` | Split from `state.read`: a standing subscription is a more persistent capability than a one-off read. |
+| `profile.activate` | `bread.profile.activate` | Switches the daemon's system-wide active profile — a real cross-module side effect. |
+| `exec` | `bread.exec`, `bread.exec_capture` | Spawns an arbitrary shell command. `bin` is an advisory hint (e.g. `"hyprpaper"`). |
+| `notify` | `bread.notify` | Desktop notifications. |
+| `machine` | `bread.machine.name`/`.tags`/`.has_tag` | Reads hostname/tags, including an optional on-disk `sync.toml`. |
+| `hyprland` | `bread.hyprland.*` | Compositor IPC — `dispatch`/`keyword`/`eval` control the session, `monitors`/`workspaces`/`clients`/`active_window`/`on_raw` observe it. Not split further; grant it for either. |
+| `widget` | `bread.widget.register`/`.update`/`.remove`/`.list` | Registers UI in a sibling `bread*` app (breadbar). |
+| `fs.read` | `bread.fs.read`/`.exists`/`.readlink`/`.expand` | Read-only filesystem access. `path` is an advisory scoping hint. |
+| `fs.write` | `bread.fs.write` | Filesystem writes. Split from `fs.read` — a module that only reads shouldn't need to declare write access. |
+| `bluetooth` | `bread.bluetooth.*` | BlueZ control — power/connect/disconnect/scan/devices. |
+
+Example — a module that switches wallpaper via `hyprpaper` based on the
+current monitor layout, and reads images from one directory:
+
+```toml
+[[permissions]]
+type = "exec"
+bin = "hyprpaper"
+
+[[permissions]]
+type = "state.read"
+path = "monitors"
+
+[[permissions]]
+type = "fs.read"
+path = "~/Wallpapers"
+```
+
+That module's `bread` table has `bread.exec`, `bread.state` (read
+functions only — no `bread.state.watch`), and `bread.fs` (read functions
+only — no `bread.fs.write`), plus the full baseline. `bread.hyprland`,
+`bread.bluetooth`, `bread.notify`, `bread.machine`, and `bread.widget` are
+all `nil`.
+
+An explicit empty list (`permissions = []`) is a deliberate "baseline only"
+declaration — different from omitting the key entirely. It scopes the
+module down for real but is *not* flagged by `bread doctor`, since the
+author made a conscious choice rather than just not knowing about this
+feature yet.
+
+### `path`/`bin` are not enforced yet — by design
+
+The scoping mechanism above only gates *presence* of a `bread.*` binding.
+The `path`/`bin` fields on each permission are recorded in the manifest but
+not checked against the actual arguments a module passes at runtime — a
+module with `fs.read` scoped to `~/Wallpapers` can currently call
+`bread.fs.read("/etc/shadow")` and it will attempt the read (and fail or
+succeed based on normal OS permissions, same as today). Real per-call
+argument enforcement needs a hard security boundary this in-process Lua
+mechanism can't provide on its own — `os.execute`/`io.open`/`debug.*`
+remain reachable from Lua's standard library regardless of what a module's
+`bread` table contains, so a deliberately malicious script can already
+route around `bread.exec`/`bread.fs` entirely. Closing that gap for real is
+the planned **out-of-process module sandboxing** workstream, which this
+manifest schema exists to feed: recording `path`/`bin` now means modules
+declared today won't need a second migration once that lands. Until then,
+treat this mechanism as making accidental over-reach visible and giving
+well-behaved modules a way to advertise (and be held to) a minimal surface
+— not as a hard boundary against hostile code.
+
+### `require("bread.devices")` still works from a scoped module
+
+Builtin library modules (`bread.devices`, `bread.monitors`, `bread.workspaces`,
+`bread.binds`) always load with the full ambient `bread` table — they're
+never subject to manifest-based scoping, regardless of what any third-party
+module that `require`s them declares. `require("bread.devices")` resolves
+via Lua's real `package.loaded` table (already populated by the time any
+third-party module loads, since builtins load first) — a real global,
+reachable from a scoped module through a metatable fallback to the true
+globals for everything that isn't `bread` itself (`pairs`, `string`,
+`table`, `require`, `package`, ...). The returned module's own functions
+(`devices.on()` etc.) were defined while `bread.devices` loaded unscoped,
+so they close over the *real* `bread` table as a Lua upvalue — closures
+capture their defining environment lexically, not the caller's — which is
+exactly why calling `devices.on(...)` from inside a scoped module works
+with no special-casing needed.
+
+### `bread modules audit <name>`
+
+Best-effort static scan of an installed module's `.lua` files (its entry
+file plus any others in the same directory) for `bread.*` call-site
+patterns, printing a suggested `[[permissions]]` block to review and paste
+into `bread.module.toml`:
+
+```bash
+bread modules audit bread-wifi
+```
+
+This is a text scan, not a Lua parser — false positives (suggesting a
+permission the module doesn't strictly need) are expected and fine; false
+negatives on a plain `bread.exec("...")`-style call site should be rare,
+but dynamic/computed call sites (`bread[method_name](...)`) won't be
+detected.
 
 ## Debugging tips
 
 - Run `bread events` to see live normalized events.
 - Run `bread state` to see full runtime state as JSON.
-- Run `bread doctor` to check adapter and module health.
+- Run `bread doctor` to check adapter and module health, including modules
+  running with full, ungated `bread.*` access because they have no
+  `permissions` declared.
 - Log event payloads with `bread.log(tostring(event.data))`.
 - Use `RUST_LOG=debug breadd` for verbose daemon output.
 

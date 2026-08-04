@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bread_shared::widget::{WidgetNode, WidgetPlacement, WidgetSpec};
-use bread_shared::{AdapterSource, BreadEvent};
+use bread_shared::{AdapterSource, BreadEvent, ModulePermission, PermissionKind};
 use mlua::{Error as LuaError, Function, Lua, LuaSerdeExt, RegistryKey, Table, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -197,6 +197,16 @@ struct ModuleDecl {
     path: PathBuf,
     source: Option<&'static str>,
     builtin: bool,
+    /// Declared `[[permissions]]` from this module's `bread.module.toml`,
+    /// read from disk alongside `path` for non-builtin modules (`None` for
+    /// builtins, which never go through manifest-based scoping at all).
+    ///
+    /// `None` here also covers the third-party, no-manifest-at-all and
+    /// manifest-with-no-permissions-key cases — both mean "not declared",
+    /// which `load_scoped_lua_file` treats as full, ungated access for
+    /// backward compatibility (see `Documentation.md`). `Some(vec![])` is a
+    /// deliberate "baseline only" declaration and is scoped down for real.
+    permissions: Option<Vec<ModulePermission>>,
 }
 
 struct ModuleInfo {
@@ -1349,7 +1359,19 @@ impl LuaEngine {
             }
 
             match self.scan_module_decl(&path) {
-                Ok(decl) => decls.push(decl),
+                Ok(mut decl) => {
+                    // Manifest lives beside the module's entry file
+                    // (bread-cli's install_from_local always writes
+                    // <modules_dir>/<name>/{bread.module.toml,init.lua} —
+                    // see bread-cli/src/modules_mgmt.rs). A hand-authored
+                    // flat file with no sibling manifest (e.g. the
+                    // "Your first module" walkthrough's modules/hello.lua)
+                    // has no manifest to find at all, which read_module_permissions
+                    // reports the same way as an existing-but-permissions-less
+                    // one: None, i.e. full ungated backward-compat access.
+                    decl.permissions = read_module_permissions(&path);
+                    decls.push(decl);
+                }
                 Err(err) => {
                     self.state_handle.set_module_status(
                         name,
@@ -1378,21 +1400,28 @@ impl LuaEngine {
         let mut load_order = Vec::new();
         for decl in ordered {
             load_order.push(decl.name.clone());
+            // Static per-decl (not per-status-transition) property: whether
+            // this module is running with full, ungated bread.* access. Only
+            // ever true for a non-builtin module with no declared
+            // permissions — see ModuleDecl::permissions' doc comment.
+            let ungated = !decl.builtin && decl.permissions.is_none();
             match self.load_module(&decl) {
                 Ok(()) => {
-                    self.state_handle.set_module_status(
+                    self.state_handle.set_module_status_ex(
                         decl.name.clone(),
                         ModuleLoadState::Loaded,
                         None,
                         decl.builtin,
+                        ungated,
                     );
                 }
                 Err(err) => {
-                    self.state_handle.set_module_status(
+                    self.state_handle.set_module_status_ex(
                         decl.name.clone(),
                         ModuleLoadState::LoadError,
                         Some(err.to_string()),
                         decl.builtin,
+                        ungated,
                     );
                 }
             }
@@ -1406,9 +1435,13 @@ impl LuaEngine {
     fn load_module(&self, decl: &ModuleDecl) -> Result<()> {
         self.set_current_module(Some(decl.name.clone()));
         let result = if let Some(source) = decl.source {
+            // Builtins (bread.monitors/devices/workspaces/binds) — embedded
+            // source, always the full ambient bread table, never scoped.
             self.load_lua_source(source, &decl.name)
         } else {
-            self.load_lua_file(&decl.path, &decl.name, decl.builtin)
+            // Third-party, on-disk modules only. Capability-scoped per
+            // decl.permissions — see load_scoped_lua_file.
+            self.load_scoped_lua_file(&decl.path, &decl.name, decl.permissions.as_deref())
         };
         self.set_current_module(None);
         result?;
@@ -1420,6 +1453,9 @@ impl LuaEngine {
         self.run_on_load(&decl.name)
     }
 
+    /// Load `init.lua` (the trusted entry point) or any other file that
+    /// should see the real, unscoped `bread` global exactly like today.
+    /// Not used for third-party modules — see [`load_scoped_lua_file`].
     fn load_lua_file(&self, path: &Path, module_name: &str, builtin: bool) -> Result<()> {
         if !path.exists() {
             warn!(path = %path.display(), "lua file does not exist; skipping");
@@ -1438,6 +1474,207 @@ impl LuaEngine {
             .set_name(path.to_string_lossy().as_ref())
             .exec()?;
         Ok(())
+    }
+
+    /// Load a third-party module's `.lua` file, giving its chunk a
+    /// capability-scoped `_ENV` instead of the real shared globals.
+    ///
+    /// `permissions: None` means the module's manifest declared no
+    /// `permissions` at all (no manifest on disk, or a manifest predating
+    /// this field) — backward compat: full, ungated access, identical to
+    /// `load_lua_file`. `Some(perms)` (including `Some(&[])`) builds a fresh
+    /// `bread` table containing only the baseline bindings plus whatever
+    /// `perms` grants, and sets it as the chunk's environment. See
+    /// `build_scoped_env` for how `require`/stdlib stay reachable.
+    fn load_scoped_lua_file(
+        &self,
+        path: &Path,
+        module_name: &str,
+        permissions: Option<&[ModulePermission]>,
+    ) -> Result<()> {
+        if !path.exists() {
+            warn!(path = %path.display(), "lua file does not exist; skipping");
+            self.state_handle.set_module_status(
+                module_name.to_string(),
+                ModuleLoadState::NotFound,
+                None,
+                false,
+            );
+            return Ok(());
+        }
+
+        let src = fs::read_to_string(path)?;
+        let chunk = self.lua.load(&src).set_name(path.to_string_lossy().as_ref());
+
+        match permissions {
+            None => {
+                // No manifest / no permissions declared: today's behavior,
+                // unchanged. Do NOT call set_environment here at all (rather
+                // than passing globals() explicitly) so this stays
+                // byte-for-byte the same code path load_lua_file already
+                // uses and has always used.
+                chunk.exec()?;
+            }
+            Some(perms) => {
+                let env = self.build_scoped_env(perms)?;
+                chunk.set_environment(env).exec()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Build a fresh `_ENV` table for a capability-scoped module chunk.
+    ///
+    /// Shape: a table whose own `bread` key is a *new* table containing only
+    /// the baseline bindings (event subscription, timers, json, module/
+    /// store, logging, and the pure-Lua sugar built on top of those —
+    /// debounce/spawn/wait*/workflow) plus whichever gated namespaces
+    /// `perms` grants (fs, exec, notify, machine, hyprland, widget,
+    /// bluetooth, state, profile — split at the granularity the manifest
+    /// schema exposes, e.g. `fs.read` without `fs.write` yields a `bread.fs`
+    /// table with `.read`/`.exists`/`.readlink`/`.expand` but no `.write`).
+    /// A permission that isn't granted means the corresponding key is
+    /// genuinely absent (`bread.fs == nil`), not present-but-erroring.
+    ///
+    /// Everything else — `pairs`, `string`, `table`, `math`, `pcall`,
+    /// `coroutine`, `require`, `package`, ... — is reached through a
+    /// metatable `__index` that falls back to the real global table, so
+    /// `require("bread.devices")` still works: `require` is the real global
+    /// function operating on the real global `package.loaded`, which
+    /// already contains `bread.devices`'s module table by the time any
+    /// third-party module loads (builtins load first). That module table's
+    /// own methods (`devices.on()` etc.) were themselves defined while
+    /// `bread.devices` was loaded unscoped, so they close over the *real*
+    /// `bread` table as an upvalue — Lua closures capture their defining
+    /// environment lexically, not the caller's — which is exactly why
+    /// `require("bread.devices")` keeps working from inside a scoped module
+    /// with no special-casing needed here.
+    ///
+    /// One deliberate hardening step beyond that: `_G` is explicitly
+    /// rebound to point at this same scoped table (self-referentially, the
+    /// same way stock Lua's base library self-references the real global
+    /// table under `_G`). Without that, `local G = _G; G.bread.fs...` would
+    /// walk straight past the whole mechanism, since `_G` is just an
+    /// ordinary global (not magic in Lua 5.2+) and would otherwise resolve
+    /// through the `__index` fallback to the *real* globals table.
+    ///
+    /// What this does **not** do: strip `os`/`io`/`debug` from the
+    /// fallback. Those remain reachable from a scoped module exactly as
+    /// they are from an unscoped one — `os.execute`/`io.open` bypass
+    /// `bread.exec`/`bread.fs` gating entirely if a module chooses to use
+    /// them directly. This mechanism gates the documented `bread.*` API
+    /// surface (so a well-behaved module naturally degrades, and an
+    /// accidental over-reach is caught), it is not a hard security boundary
+    /// against a deliberately malicious script — that's what the
+    /// out-of-process module sandboxing workstream this manifest schema
+    /// exists for is for.
+    fn build_scoped_env(&self, perms: &[ModulePermission]) -> Result<Table<'_>> {
+        let globals = self.lua.globals();
+        let real_bread: Table = globals.get("bread")?;
+
+        let granted: HashSet<PermissionKind> = perms.iter().map(|p| p.kind).collect();
+
+        let scoped_bread = self.lua.create_table()?;
+
+        // Baseline — always available, no manifest entry required.
+        const BASELINE_KEYS: &[&str] = &[
+            "on", "once", "filter", "off", "emit", "after", "every", "cancel", "json", "module",
+            "log", "warn", "error", "debounce", "spawn", "wait", "wait_any", "wait_all",
+            "workflow",
+        ];
+        for key in BASELINE_KEYS {
+            let v: Value = real_bread.get(*key)?;
+            if !matches!(v, Value::Nil) {
+                scoped_bread.set(*key, v)?;
+            }
+        }
+
+        if granted.contains(&PermissionKind::StateRead) || granted.contains(&PermissionKind::StateWatch)
+        {
+            let real_state: Table = real_bread.get("state")?;
+            let scoped_state = self.lua.create_table()?;
+            if granted.contains(&PermissionKind::StateRead) {
+                for key in [
+                    "get",
+                    "monitors",
+                    "active_workspace",
+                    "active_window",
+                    "devices",
+                    "power",
+                    "network",
+                    "profile",
+                ] {
+                    let v: Value = real_state.get(key)?;
+                    scoped_state.set(key, v)?;
+                }
+            }
+            if granted.contains(&PermissionKind::StateWatch) {
+                let v: Value = real_state.get("watch")?;
+                scoped_state.set("watch", v)?;
+            }
+            scoped_bread.set("state", scoped_state)?;
+        }
+
+        if granted.contains(&PermissionKind::ProfileActivate) {
+            let v: Value = real_bread.get("profile")?;
+            scoped_bread.set("profile", v)?;
+        }
+
+        if granted.contains(&PermissionKind::Exec) {
+            let exec: Value = real_bread.get("exec")?;
+            scoped_bread.set("exec", exec)?;
+            let exec_capture: Value = real_bread.get("exec_capture")?;
+            scoped_bread.set("exec_capture", exec_capture)?;
+        }
+
+        if granted.contains(&PermissionKind::Notify) {
+            let v: Value = real_bread.get("notify")?;
+            scoped_bread.set("notify", v)?;
+        }
+
+        if granted.contains(&PermissionKind::Machine) {
+            let v: Value = real_bread.get("machine")?;
+            scoped_bread.set("machine", v)?;
+        }
+
+        if granted.contains(&PermissionKind::Hyprland) {
+            let v: Value = real_bread.get("hyprland")?;
+            scoped_bread.set("hyprland", v)?;
+        }
+
+        if granted.contains(&PermissionKind::Widget) {
+            let v: Value = real_bread.get("widget")?;
+            scoped_bread.set("widget", v)?;
+        }
+
+        if granted.contains(&PermissionKind::Bluetooth) {
+            let v: Value = real_bread.get("bluetooth")?;
+            scoped_bread.set("bluetooth", v)?;
+        }
+
+        if granted.contains(&PermissionKind::FsRead) || granted.contains(&PermissionKind::FsWrite) {
+            let real_fs: Table = real_bread.get("fs")?;
+            let scoped_fs = self.lua.create_table()?;
+            if granted.contains(&PermissionKind::FsRead) {
+                for key in ["read", "exists", "readlink", "expand"] {
+                    let v: Value = real_fs.get(key)?;
+                    scoped_fs.set(key, v)?;
+                }
+            }
+            if granted.contains(&PermissionKind::FsWrite) {
+                let v: Value = real_fs.get("write")?;
+                scoped_fs.set("write", v)?;
+            }
+            scoped_bread.set("fs", scoped_fs)?;
+        }
+
+        let env = self.lua.create_table()?;
+        let mt = self.lua.create_table()?;
+        mt.set("__index", self.lua.globals())?;
+        env.set_metatable(Some(mt));
+        env.set("bread", scoped_bread)?;
+        env.set("_G", env.clone())?;
+        Ok(env)
     }
 
     fn load_lua_source(&self, source: &str, module_name: &str) -> Result<()> {
@@ -1575,11 +1812,12 @@ impl LuaEngine {
                 if let Err(err) = result {
                     error!(module = %name, error = %err, "module on_reload failed");
                     let builtin = self.module_is_builtin(&name);
-                    self.state_handle.set_module_status(
+                    self.state_handle.set_module_status_ex(
                         name.to_string(),
                         ModuleLoadState::Degraded,
                         Some(err.to_string()),
                         builtin,
+                        self.module_ungated(&name),
                     );
                 }
             }
@@ -1600,11 +1838,12 @@ impl LuaEngine {
                 if let Err(err) = result {
                     error!(module = %name, error = %err, "module on_unload failed");
                     let builtin = self.module_is_builtin(&name);
-                    self.state_handle.set_module_status(
+                    self.state_handle.set_module_status_ex(
                         name.to_string(),
                         ModuleLoadState::Degraded,
                         Some(err.to_string()),
                         builtin,
+                        self.module_ungated(&name),
                     );
                 }
             }
@@ -1624,11 +1863,12 @@ impl LuaEngine {
                     message: err.to_string(),
                 });
             }
-            self.state_handle.set_module_status(
+            self.state_handle.set_module_status_ex(
                 module.to_string(),
                 ModuleLoadState::Degraded,
                 Some(err.to_string()),
                 builtin,
+                self.module_ungated(module),
             );
             if let Some(hook) = self.get_module_hook(module, "on_error") {
                 match hook.call::<_, bool>(err.to_string()) {
@@ -1669,6 +1909,21 @@ impl LuaEngine {
             .lock()
             .ok()
             .and_then(|map| map.get(name).map(|d| d.builtin))
+            .unwrap_or(false)
+    }
+
+    /// Whether `name` is a third-party module running with full, ungated
+    /// `bread.*` access (no `permissions` declared). See
+    /// `ModuleDecl::permissions`'s doc comment for exactly what "declared"
+    /// means. Always `false` for builtins and for unknown module names.
+    fn module_ungated(&self, name: &str) -> bool {
+        self.module_decls
+            .lock()
+            .ok()
+            .and_then(|map| {
+                map.get(name)
+                    .map(|d| !d.builtin && d.permissions.is_none())
+            })
             .unwrap_or(false)
     }
 
@@ -1796,6 +2051,10 @@ impl LuaEngine {
                 path: module_path.clone(),
                 source: None,
                 builtin: false,
+                // Populated afterwards by the caller (load_init_and_modules),
+                // which reads bread.module.toml from disk — scan_module_decl
+                // only cares about the bread.module({...}) declaration itself.
+                permissions: None,
             });
             Err(LuaError::RuntimeError(MODULE_DECL_ABORT.to_string()))
         })?;
@@ -2494,6 +2753,47 @@ fn is_lib_path(module_root: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Read the `permissions` declared in the `bread.module.toml` manifest
+/// sibling to a third-party module's entry file, if any.
+///
+/// `bread-cli`'s `install_from_local` always lays a module out as
+/// `<modules_dir>/<name>/{bread.module.toml,init.lua,...}` (see
+/// `bread-cli/src/modules_mgmt.rs`), so the manifest is always the entry
+/// file's parent directory + `bread.module.toml`. Returns `None` — meaning
+/// "not declared", handled as full ungated backward-compat access by
+/// `load_scoped_lua_file` — whenever: the module has no directory-level
+/// manifest at all (a hand-authored flat file, e.g. the "Your first
+/// module" walkthrough's `modules/hello.lua`); the manifest exists but has
+/// no `permissions` key; or the manifest fails to parse (logged, not
+/// treated as a load error — a broken manifest shouldn't also break the
+/// module load path it's unrelated to).
+fn read_module_permissions(module_file: &Path) -> Option<Vec<ModulePermission>> {
+    #[derive(serde::Deserialize)]
+    struct PermissionsOnly {
+        #[serde(default)]
+        permissions: Option<Vec<ModulePermission>>,
+    }
+
+    let manifest_path = module_file.parent()?.join("bread.module.toml");
+    if !manifest_path.exists() {
+        return None;
+    }
+    let raw = match fs::read_to_string(&manifest_path) {
+        Ok(raw) => raw,
+        Err(err) => {
+            warn!(path = %manifest_path.display(), error = %err, "failed to read bread.module.toml");
+            return None;
+        }
+    };
+    match toml::from_str::<PermissionsOnly>(&raw) {
+        Ok(parsed) => parsed.permissions,
+        Err(err) => {
+            warn!(path = %manifest_path.display(), error = %err, "failed to parse bread.module.toml; treating as no permissions declared");
+            None
+        }
+    }
+}
+
 /// `lua.to_value()`'s default `Options` map JSON null / Rust `Option::None`
 /// to a distinct `lua.null()` sentinel rather than real Lua `nil`, to
 /// preserve JSON round-trip fidelity — but bread never round-trips a Lua
@@ -2585,6 +2885,10 @@ fn module_store_set(
         status: ModuleLoadState::Loaded,
         last_error: None,
         builtin: false,
+        // Placeholder until the real load-time status (with the correct
+        // ungated value) lands via set_module_status_ex; this fallback only
+        // fires if a module's own store is written before that happens.
+        ungated: false,
         store,
     });
 }
@@ -2916,6 +3220,10 @@ fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
             path: PathBuf::from(format!("<builtin:{name}>")),
             source: Some(source),
             builtin: true,
+            // Builtins never go through manifest-based scoping (or the
+            // "ungated" doctor warning) — they always get the full ambient
+            // bread table, by design.
+            permissions: None,
         });
     }
 

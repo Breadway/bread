@@ -279,6 +279,207 @@ async fn modules_list_returns_array() -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Capability-scoped module API (Workstream D)
+// ---------------------------------------------------------------------------
+
+/// Core regression test from the capability-manifest report: a third-party
+/// module whose manifest grants only `state.read` can call
+/// `bread.state.get(...)`, but `bread.fs` and `bread.exec` must be
+/// genuinely *absent* from the `bread` table it sees — `nil`, not merely
+/// permission-denied when called.
+#[tokio::test]
+async fn scoped_module_sees_only_granted_state_read_permission() -> Result<()> {
+    let manifest = r#"
+name = "scoped-test"
+version = "1.0.0"
+description = "test"
+author = "test"
+source = "test"
+installed_at = ""
+
+[[permissions]]
+type = "state.read"
+path = "monitors"
+"#;
+    let module_lua = r#"
+local M = bread.module({ name = "scoped-test", version = "1.0.0" })
+
+function M.on_load()
+    local ok = pcall(bread.state.get, "monitors")
+    M.store.set("state_get_ok", ok)
+    M.store.set("fs_present", bread.fs ~= nil)
+    M.store.set("exec_present", bread.exec ~= nil)
+    M.store.set("exec_capture_present", bread.exec_capture ~= nil)
+    M.store.set("bluetooth_present", bread.bluetooth ~= nil)
+    -- Baseline must still work from inside a scoped module.
+    M.store.set("json_present", bread.json ~= nil)
+    M.store.set("log_present", bread.log ~= nil)
+end
+
+return M
+"#;
+
+    let harness = TestHarness::spawn_with_module("scoped-test", Some(manifest), module_lua)?;
+    harness.wait_until_ready().await?;
+
+    let modules = harness
+        .send_request("state.get", json!({"key": "modules"}))
+        .await?;
+    let entry = modules
+        .as_array()
+        .and_then(|arr| arr.iter().find(|m| m.get("name").and_then(Value::as_str) == Some("scoped-test")))
+        .cloned()
+        .ok_or_else(|| anyhow!("scoped-test module not found in modules state; dump: {modules}"))?;
+
+    assert_eq!(
+        entry.get("status").and_then(Value::as_str),
+        Some("loaded"),
+        "module failed to load: {entry}"
+    );
+
+    let store = entry
+        .get("store")
+        .ok_or_else(|| anyhow!("no store on module status: {entry}"))?;
+    assert_eq!(store.get("state_get_ok"), Some(&json!(true)));
+    assert_eq!(
+        store.get("fs_present"),
+        Some(&json!(false)),
+        "bread.fs must be absent (nil) without an fs.read/fs.write permission"
+    );
+    assert_eq!(
+        store.get("exec_present"),
+        Some(&json!(false)),
+        "bread.exec must be absent (nil) without an exec permission"
+    );
+    assert_eq!(store.get("exec_capture_present"), Some(&json!(false)));
+    assert_eq!(store.get("bluetooth_present"), Some(&json!(false)));
+    assert_eq!(store.get("json_present"), Some(&json!(true)), "baseline bread.json must still be present");
+    assert_eq!(store.get("log_present"), Some(&json!(true)), "baseline bread.log must still be present");
+
+    assert_eq!(
+        entry.get("ungated"),
+        Some(&json!(false)),
+        "a module with a manifest that declares permissions must not be flagged ungated"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+/// A third-party module installed with no `bread.module.toml` manifest at
+/// all (the pre-existing/legacy case) keeps full, unscoped `bread.*`
+/// access — but is surfaced as `ungated` in module status, which is exactly
+/// what `bread doctor` reads to print its "no permissions declared"
+/// warning.
+#[tokio::test]
+async fn module_with_no_manifest_keeps_full_access_but_is_flagged_ungated() -> Result<()> {
+    let module_lua = r#"
+local M = bread.module({ name = "legacy-test", version = "1.0.0" })
+
+function M.on_load()
+    M.store.set("fs_present", bread.fs ~= nil)
+    M.store.set("exec_present", bread.exec ~= nil)
+    M.store.set("bluetooth_present", bread.bluetooth ~= nil)
+end
+
+return M
+"#;
+
+    let harness = TestHarness::spawn_with_module("legacy-test", None, module_lua)?;
+    harness.wait_until_ready().await?;
+
+    let modules = harness
+        .send_request("state.get", json!({"key": "modules"}))
+        .await?;
+    let entry = modules
+        .as_array()
+        .and_then(|arr| arr.iter().find(|m| m.get("name").and_then(Value::as_str) == Some("legacy-test")))
+        .cloned()
+        .ok_or_else(|| anyhow!("legacy-test module not found in modules state; dump: {modules}"))?;
+
+    assert_eq!(
+        entry.get("status").and_then(Value::as_str),
+        Some("loaded"),
+        "module failed to load: {entry}"
+    );
+
+    let store = entry
+        .get("store")
+        .ok_or_else(|| anyhow!("no store on module status: {entry}"))?;
+    assert_eq!(
+        store.get("fs_present"),
+        Some(&json!(true)),
+        "no manifest declared -> backward compat full access, bread.fs must be present"
+    );
+    assert_eq!(store.get("exec_present"), Some(&json!(true)));
+    assert_eq!(store.get("bluetooth_present"), Some(&json!(true)));
+
+    assert_eq!(
+        entry.get("ungated"),
+        Some(&json!(true)),
+        "a module with no permissions manifest must be flagged ungated for `bread doctor`"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+/// An explicit `permissions = []` (present but empty) is a deliberate
+/// "baseline only" declaration, distinct from no manifest at all: it must
+/// scope the module down for real (no fs/exec/etc.) but must *not* trip the
+/// `ungated` doctor warning, since the author made a conscious choice.
+#[tokio::test]
+async fn explicit_empty_permissions_is_scoped_but_not_flagged_ungated() -> Result<()> {
+    let manifest = r#"
+name = "empty-perms-test"
+version = "1.0.0"
+description = "test"
+author = "test"
+source = "test"
+installed_at = ""
+permissions = []
+"#;
+    let module_lua = r#"
+local M = bread.module({ name = "empty-perms-test", version = "1.0.0" })
+
+function M.on_load()
+    M.store.set("fs_present", bread.fs ~= nil)
+    M.store.set("state_present", bread.state ~= nil)
+end
+
+return M
+"#;
+
+    let harness = TestHarness::spawn_with_module("empty-perms-test", Some(manifest), module_lua)?;
+    harness.wait_until_ready().await?;
+
+    let modules = harness
+        .send_request("state.get", json!({"key": "modules"}))
+        .await?;
+    let entry = modules
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("empty-perms-test"))
+        })
+        .cloned()
+        .ok_or_else(|| anyhow!("empty-perms-test module not found in modules state; dump: {modules}"))?;
+
+    assert_eq!(entry.get("status").and_then(Value::as_str), Some("loaded"));
+    let store = entry.get("store").unwrap();
+    assert_eq!(store.get("fs_present"), Some(&json!(false)));
+    assert_eq!(store.get("state_present"), Some(&json!(false)));
+    assert_eq!(
+        entry.get("ungated"),
+        Some(&json!(false)),
+        "an explicit empty permissions list is a deliberate declaration, not 'undeclared'"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
 #[tokio::test]
 async fn modules_reload_succeeds() -> Result<()> {
     let harness = TestHarness::spawn()?;
@@ -678,6 +879,82 @@ log_level = "error"
 [lua]
 entry_point = "~/.config/bread/init.lua"
 module_path = "~/.config/bread/modules"
+
+[adapters.hyprland]
+enabled = false
+
+[adapters.udev]
+enabled = false
+
+[adapters.power]
+enabled = false
+
+[adapters.network]
+enabled = false
+"#,
+        )?;
+
+        let socket_path = runtime_dir.join("bread").join("breadd.sock");
+        let child = Command::new(env!("CARGO_BIN_EXE_breadd"))
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        Ok(Self {
+            _temp: temp,
+            child,
+            socket_path,
+        })
+    }
+
+    /// Like `spawn_with_init`, but also installs one third-party,
+    /// directory-based module (`<modules_dir>/<name>/{bread.module.toml,
+    /// init.lua}`) — the same on-disk shape `bread modules install`
+    /// produces — before starting the daemon. `manifest_toml` is written
+    /// verbatim as `bread.module.toml`; pass `None` to install the module
+    /// with no manifest file at all (the legacy/backward-compat case).
+    fn spawn_with_module(
+        module_name: &str,
+        manifest_toml: Option<&str>,
+        module_init_lua: &str,
+    ) -> Result<Self> {
+        let temp = tempfile::tempdir()?;
+        let runtime_dir = temp.path().join("runtime");
+        let config_home = temp.path().join("config");
+        let home = temp.path().join("home");
+        fs::create_dir_all(&runtime_dir)?;
+        fs::create_dir_all(&config_home)?;
+        fs::create_dir_all(&home)?;
+
+        let bread_cfg = config_home.join("bread");
+        let module_dir = bread_cfg.join("modules").join(module_name);
+        fs::create_dir_all(&module_dir)?;
+
+        fs::write(
+            bread_cfg.join("init.lua"),
+            "bread.on('bread.system.startup', function() end)\n",
+        )?;
+        if let Some(manifest) = manifest_toml {
+            fs::write(module_dir.join("bread.module.toml"), manifest)?;
+        }
+        fs::write(module_dir.join("init.lua"), module_init_lua)?;
+
+        fs::write(
+            bread_cfg.join("breadd.toml"),
+            r#"
+[daemon]
+log_level = "error"
+
+[lua]
+entry_point = "~/.config/bread/init.lua"
+module_path = "~/.config/bread/modules"
+
+[modules]
+builtin = false
 
 [adapters.hyprland]
 enabled = false
