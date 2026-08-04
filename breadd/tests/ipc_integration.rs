@@ -959,18 +959,29 @@ async fn rules_toml_well_formed_all_action_kinds_work_end_to_end() -> Result<()>
     perms.set_mode(0o755);
     fs::set_permissions(&script_path, perms)?;
 
+    // Non-reserved-domain event names ("testrule.*" rather than the
+    // realistic "device.*"/"power.*" shown in rules.toml's own docs):
+    // Workstream A closed the IPC `emit` method's no-source path to reject
+    // any event name claiming a reserved, adapter-owned domain (see
+    // `bread_shared::apps::RESERVED_DOMAINS` — "device" and "power" are both
+    // in it), so a real `bread.device.dock.connected` can no longer be
+    // manually injected over the socket the way this test needs to. What's
+    // under test here is rules.toml -> bread.on() -> action wiring, which is
+    // exercised identically regardless of which domain the event name lives
+    // in, so a custom domain sidesteps that (correct, unrelated) restriction
+    // without weakening it.
     let rules_toml = format!(
         r#"
 [[rule]]
-on = "device.dock.connected"
+on = "testrule.dock.connected"
 run = "{run_path}"
 
 [[rule]]
-on = "power.ac.disconnected"
+on = "testrule.ac.disconnected"
 notify = "Unplugged"
 
 [[rule]]
-on = "device.keyboard.connected"
+on = "testrule.keyboard.connected"
 exec = "touch '{exec_path}'"
 "#,
         run_path = script_path.display(),
@@ -1003,7 +1014,7 @@ exec = "touch '{exec_path}'"
     harness
         .send_request(
             "emit",
-            json!({"event": "bread.device.dock.connected", "data": {}}),
+            json!({"event": "bread.testrule.dock.connected", "data": {}}),
         )
         .await?;
     wait_for_file(&run_marker).await?;
@@ -1012,7 +1023,7 @@ exec = "touch '{exec_path}'"
     harness
         .send_request(
             "emit",
-            json!({"event": "bread.device.keyboard.connected", "data": {}}),
+            json!({"event": "bread.testrule.keyboard.connected", "data": {}}),
         )
         .await?;
     wait_for_file(&exec_marker).await?;
@@ -1023,7 +1034,7 @@ exec = "touch '{exec_path}'"
     harness
         .send_request(
             "emit",
-            json!({"event": "bread.power.ac.disconnected", "data": {}}),
+            json!({"event": "bread.testrule.ac.disconnected", "data": {}}),
         )
         .await?;
     sleep(Duration::from_millis(150)).await;
