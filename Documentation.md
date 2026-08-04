@@ -543,6 +543,10 @@ bread.hyprland.dispatch("exec", "kitty")
 -- Set a keyword
 bread.hyprland.keyword("monitor", "HDMI-A-1, 2560x1440, 0x0, 1")
 
+-- Send a raw request to the Hyprland socket, e.g. to evaluate a config-file
+-- expression the way `hyprctl eval <expr>` does; returns the raw response string
+local result = bread.hyprland.eval("some expression")
+
 -- Query compositor state (returns deserialized Lua tables)
 local win        = bread.hyprland.active_window()
 local monitors   = bread.hyprland.monitors()

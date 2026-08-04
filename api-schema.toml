@@ -1,0 +1,500 @@
+# Bread Automation API schema — checked-in source-of-truth registry.
+#
+# This is Workstream F (scoped down) from the governance-hardening report:
+# a *drift detector*, not a doc generator. `Documentation.md`'s "Dictionary:
+# Lua API" section is hand-written prose (one `#### bread.<name>(...)`
+# heading per binding, with worked examples and edge-case notes) — nothing
+# here regenerates or reformats that prose. Instead, this file is the
+# checked-in list of every `bread.*` Lua binding and IPC method that is
+# supposed to exist right now, and `cargo run -p xtask -- check-docs`
+# cross-checks it against:
+#
+#   1. The actual bindings registered in breadd/src/lua/mod.rs
+#      (`bread.set("name", ...)` calls, the nested `<x>_tbl.set(...)` calls
+#      for state/profile/hyprland/widget/machine/fs/json/bluetooth, and the
+#      handful of bindings defined via plain embedded Lua source rather than
+#      `bread.set` — log/warn/error/debounce/spawn/wait/wait_any/wait_all/
+#      workflow.*).
+#   2. The actual IPC methods dispatched in breadd/src/ipc/mod.rs's
+#      `match req.method.as_str() { ... }` block, plus the specially-cased
+#      `events.subscribe` streaming upgrade.
+#   3. Documentation.md itself, to make sure each entry here still has a
+#      `#### bread.<name>` heading (Lua) or a row in the IPC Methods table
+#      (IPC methods).
+#
+# Whenever you add, rename, or remove a `bread.*` binding or IPC method:
+#   1. Update this file to match.
+#   2. Update/add the corresponding section in Documentation.md.
+#   3. Run `cargo run -p xtask -- check-docs` before committing — it fails
+#      loudly (non-zero exit) if the three are out of sync.
+#
+# `kind` is one of: "lua_function", "lua_table", "ipc_method".
+# `since` is the API version (Documentation.md's "API Stability &
+# Versioning" section) the binding/method was introduced in. Anything from
+# the original v1.0 baseline (no `*(Since: vX.Y)*` marker in Documentation.md)
+# is listed as "1.0" here.
+#
+# Format chosen: a single checked-in TOML file (this is the "a schema file
+# that's checked and diffed against the actual API surface, and CI fails the
+# build if they drift" option the source report names, as opposed to Rust
+# attribute macros — overkill for a ~30-binding surface with no existing
+# proc-macro infrastructure in this workspace). TOML specifically because
+# `toml = "0.8"` is already a dependency of breadd/bread-cli/bread-shared
+# (see breadd/src/core/config.rs, bread-cli/src/modules_mgmt.rs) — no new
+# format/parser needed anywhere in the ecosystem.
+
+# ---------------------------------------------------------------------------
+# Lua API — Events (breadd/src/lua/mod.rs install_api + install_wait_helper)
+
+[[entry]]
+name = "on"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "once"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "filter"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "off"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "emit"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "wait"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "spawn"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "wait_any"
+kind = "lua_function"
+since = "1.2"
+
+[[entry]]
+name = "wait_all"
+kind = "lua_function"
+since = "1.2"
+
+# ---------------------------------------------------------------------------
+# Lua API — Workflows (install_workflow_helpers) *(Since: v1.2)*
+
+[[entry]]
+name = "workflow"
+kind = "lua_table"
+since = "1.2"
+
+[[entry]]
+name = "workflow.define"
+kind = "lua_function"
+since = "1.2"
+
+[[entry]]
+name = "workflow.start"
+kind = "lua_function"
+since = "1.2"
+
+[[entry]]
+name = "workflow.step"
+kind = "lua_function"
+since = "1.2"
+
+[[entry]]
+name = "workflow.status"
+kind = "lua_function"
+since = "1.2"
+
+[[entry]]
+name = "workflow.list"
+kind = "lua_function"
+since = "1.2"
+
+# ---------------------------------------------------------------------------
+# Lua API — Widgets (widget_tbl) *(Since: v1.3)*
+
+[[entry]]
+name = "widget"
+kind = "lua_table"
+since = "1.3"
+
+[[entry]]
+name = "widget.register"
+kind = "lua_function"
+since = "1.3"
+
+[[entry]]
+name = "widget.update"
+kind = "lua_function"
+since = "1.3"
+
+[[entry]]
+name = "widget.remove"
+kind = "lua_function"
+since = "1.3"
+
+[[entry]]
+name = "widget.list"
+kind = "lua_function"
+since = "1.3"
+
+# ---------------------------------------------------------------------------
+# Lua API — State (state_tbl)
+
+[[entry]]
+name = "state"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "state.get"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.monitors"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.active_workspace"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.active_window"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.devices"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.power"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.network"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.profile"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "state.watch"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Profiles (profile_tbl)
+
+[[entry]]
+name = "profile"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "profile.activate"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Execution, notifications, timers
+
+[[entry]]
+name = "exec"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "exec_capture"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "notify"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "after"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "every"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "cancel"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Hyprland (hyprland_tbl)
+
+[[entry]]
+name = "hyprland"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.dispatch"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.keyword"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.eval"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.active_window"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.monitors"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.workspaces"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.clients"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "hyprland.on_raw"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Module declaration
+
+[[entry]]
+name = "module"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Machine and filesystem (machine_tbl / fs_tbl / json_tbl)
+
+[[entry]]
+name = "machine"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "machine.name"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "machine.tags"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "machine.has_tag"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "fs"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "fs.write"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "fs.read"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "fs.exists"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "fs.readlink"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "fs.expand"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "json"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "json.decode"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Bluetooth (bluetooth_tbl)
+
+[[entry]]
+name = "bluetooth"
+kind = "lua_table"
+since = "1.0"
+
+[[entry]]
+name = "bluetooth.power"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "bluetooth.powered"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "bluetooth.connect"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "bluetooth.disconnect"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "bluetooth.scan"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "bluetooth.devices"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# Lua API — Utilities (install_log_helpers / install_debounce)
+
+[[entry]]
+name = "log"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "warn"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "error"
+kind = "lua_function"
+since = "1.0"
+
+[[entry]]
+name = "debounce"
+kind = "lua_function"
+since = "1.0"
+
+# ---------------------------------------------------------------------------
+# IPC methods (breadd/src/ipc/mod.rs handle_request + events.subscribe)
+
+[[entry]]
+name = "ping"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "health"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "state.get"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "state.dump"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "modules.list"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "modules.reload"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "profile.list"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "profile.activate"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "emit"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "events.subscribe"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "events.replay"
+kind = "ipc_method"
+since = "1.0"
+
+[[entry]]
+name = "workflows.list"
+kind = "ipc_method"
+since = "1.2"
+
+[[entry]]
+name = "widgets.list"
+kind = "ipc_method"
+since = "1.3"
