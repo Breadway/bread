@@ -48,10 +48,56 @@ This matters because the moment sibling apps and community modules depend on thi
 ### 1) Create a minimal config
 
 - Daemon config: `~/.config/bread/breadd.toml` (all values optional)
+- Declarative rules (optional, no Lua required): `~/.config/bread/rules.toml`
 - Lua entry point: `~/.config/bread/init.lua`
 - Lua modules: `~/.config/bread/modules/`
 
-### 2) Minimal `init.lua`
+### 2) The fast path: `rules.toml` *(Since: v1.5)*
+
+For the common "when event X happens, do Y" case, you don't need Lua at
+all. Create `~/.config/bread/rules.toml`:
+
+```toml
+[[rule]]
+on = "device.dock.connected"
+run = "~/.config/bread/scripts/dock-connected.sh"
+
+[[rule]]
+on = "power.ac.disconnected"
+notify = "Unplugged"
+
+[[rule]]
+on = "device.keyboard.connected"
+exec = "xset r rate 200 40"
+```
+
+Each `[[rule]]` needs exactly two things: an `on` (an event-name suffix —
+`bread.` is implied, so `"device.dock.connected"` matches the real event
+`bread.device.dock.connected`; wildcards `*`/`**`/`?` work the same way they
+do in `bread.on()`) and exactly one action:
+
+| Action | Meaning |
+|--------|---------|
+| `run = "<path>"` | Run exactly one script/program at that path. The path is tilde-expanded and quoted as a single unit for you, so spaces in it are safe — it will *not* be word-split into a command plus arguments. |
+| `exec = "<command line>"` | Run a full shell command line via `bread.exec()`, exactly as if you'd typed it in a shell — quote/escape arguments yourself. |
+| `notify = "<message>"` | Show a desktop notification with this text via `bread.notify()`. |
+
+`rules.toml` is entirely optional and purely additive alongside
+`init.lua` — both can coexist, rules load before user-defined modules, and
+an absent file is not an error. A malformed rule (missing/empty `on`, or
+zero/multiple action keys set) doesn't stop the rest of the file from
+working: the other rules in the file still register, and the specific bad
+rule shows up via `bread doctor` (see [Debugging tips](#debugging-tips))
+the same way a broken Lua module's error would.
+
+This covers the common cases directly. For fuzzier matching (substring
+device-name matching, filtering by a list of monitors, etc.) or any logic
+beyond "run this one action," reach for `bread.devices` /
+`bread.monitors` or hand-written Lua in `init.lua` — see
+[Dictionary: Built-in modules](#dictionary-built-in-modules) and the next
+section.
+
+### 3) Minimal `init.lua`
 
 ```lua
 bread.on("bread.system.startup", function(event)
@@ -60,7 +106,7 @@ bread.on("bread.system.startup", function(event)
 end)
 ```
 
-### 3) Start the daemon
+### 4) Start the daemon
 
 ```bash
 systemctl --user start breadd
@@ -69,7 +115,7 @@ systemctl --user start breadd
 breadd
 ```
 
-### 4) Check that it's running
+### 5) Check that it's running
 
 ```bash
 bread ping
@@ -672,6 +718,37 @@ Storage is scoped per module and is not shared across modules.
 ## Dictionary: Built-in modules
 
 Built-ins are loaded before user modules. Disable them via `[modules].disable` in the daemon config.
+
+### `bread.rules` *(Since: v1.5)*
+
+The Lua side of the `rules.toml` declarative automation layer described in
+[Getting started](#getting-started) — there is no separate API to call
+here, it's driven entirely by `~/.config/bread/rules.toml`. Listed here (and
+disable-able via `[modules].disable = ["bread.rules"]` like every other
+built-in) because it's a real module the same way `bread.devices` is, just
+one whose configuration lives in TOML instead of Lua.
+
+```toml
+# ~/.config/bread/rules.toml
+[[rule]]
+on = "device.dock.connected"
+run = "~/.config/bread/scripts/dock-connected.sh"
+
+[[rule]]
+on = "power.ac.disconnected"
+notify = "Unplugged"
+
+[[rule]]
+on = "device.keyboard.connected"
+exec = "xset r rate 200 40"
+```
+
+Each rule's `on` becomes a `bread.on("bread." .. on, ...)` subscription —
+see [Getting started](#getting-started) for the full `run`/`exec`/`notify`
+semantics and validation rules. `rules.toml`'s absence is not an error;
+parse/validation problems are reported the same way a broken hand-written
+module's `on_load` error would be — via `bread doctor` / `modules.list`,
+against the `bread.rules` module name.
 
 ### `bread.monitors`
 

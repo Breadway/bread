@@ -617,6 +617,210 @@ async fn workflow_captures_error_on_failure() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn rules_toml_absent_is_a_no_op() -> Result<()> {
+    // No rules.toml written at all — the daemon must still start cleanly
+    // and `bread.rules` (always present as a built-in) must come up
+    // `loaded` with nothing registered, not `load_error` or `not_found`.
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let health = harness.send_request("health", json!({})).await?;
+    let modules = health
+        .get("modules")
+        .and_then(Value::as_array)
+        .expect("modules array");
+    let rules_mod = modules
+        .iter()
+        .find(|m| m.get("name").and_then(Value::as_str) == Some("bread.rules"))
+        .expect("bread.rules should always be registered as a built-in");
+    assert_eq!(
+        rules_mod.get("status").and_then(Value::as_str),
+        Some("loaded")
+    );
+    assert!(rules_mod.get("last_error").and_then(Value::as_str).is_none());
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rules_toml_well_formed_all_action_kinds_work_end_to_end() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let assets = tempfile::tempdir()?;
+    // Deliberately includes a space to prove `run` shell-quotes the whole
+    // path rather than letting `sh -c` word-split it into "dock" + "sh".
+    let script_path = assets.path().join("dock connected.sh");
+    let run_marker = assets.path().join("run-marker");
+    let exec_marker = assets.path().join("exec-marker");
+
+    fs::write(
+        &script_path,
+        format!("#!/bin/sh\ntouch '{}'\n", run_marker.display()),
+    )?;
+    let mut perms = fs::metadata(&script_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms)?;
+
+    let rules_toml = format!(
+        r#"
+[[rule]]
+on = "device.dock.connected"
+run = "{run_path}"
+
+[[rule]]
+on = "power.ac.disconnected"
+notify = "Unplugged"
+
+[[rule]]
+on = "device.keyboard.connected"
+exec = "touch '{exec_path}'"
+"#,
+        run_path = script_path.display(),
+        exec_path = exec_marker.display(),
+    );
+
+    let harness = TestHarness::spawn_with_init_and_rules(
+        "bread.on('bread.system.startup', function() end)\n",
+        Some(&rules_toml),
+    )?;
+    harness.wait_until_ready().await?;
+
+    // rules.toml parsed and registered cleanly — no load_error.
+    let health = harness.send_request("health", json!({})).await?;
+    let modules = health
+        .get("modules")
+        .and_then(Value::as_array)
+        .expect("modules array");
+    let rules_mod = modules
+        .iter()
+        .find(|m| m.get("name").and_then(Value::as_str) == Some("bread.rules"))
+        .expect("bread.rules present");
+    assert_eq!(
+        rules_mod.get("status").and_then(Value::as_str),
+        Some("loaded"),
+        "unexpected bread.rules status: {rules_mod:?}"
+    );
+
+    // `run`: fire the matching event and expect the script to have run.
+    harness
+        .send_request(
+            "emit",
+            json!({"event": "bread.device.dock.connected", "data": {}}),
+        )
+        .await?;
+    wait_for_file(&run_marker).await?;
+
+    // `exec`: same, via a raw shell command instead of a script file.
+    harness
+        .send_request(
+            "emit",
+            json!({"event": "bread.device.keyboard.connected", "data": {}}),
+        )
+        .await?;
+    wait_for_file(&exec_marker).await?;
+
+    // `notify`: bread.notify() always emits bread.notify.sent regardless of
+    // whether a real notify-send binary is available, so that's the
+    // deterministic way to observe it fired with the right message.
+    harness
+        .send_request(
+            "emit",
+            json!({"event": "bread.power.ac.disconnected", "data": {}}),
+        )
+        .await?;
+    sleep(Duration::from_millis(150)).await;
+    let replay = harness
+        .send_request("events.replay", json!({"since_ms": 10_000}))
+        .await?;
+    let sent = replay
+        .as_array()
+        .expect("replay array")
+        .iter()
+        .find(|e| e.get("event").and_then(Value::as_str) == Some("bread.notify.sent"))
+        .expect("bread.notify.sent should have been emitted");
+    assert_eq!(
+        sent.get("data")
+            .and_then(|d| d.get("message"))
+            .and_then(Value::as_str),
+        Some("Unplugged")
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn rules_toml_malformed_rule_surfaces_doctor_visible_error() -> Result<()> {
+    // Rule #0 is fine; rule #1 has no action key at all.
+    let rules_toml = r#"
+[[rule]]
+on = "device.dock.connected"
+exec = "true"
+
+[[rule]]
+on = "power.ac.disconnected"
+"#;
+
+    let harness = TestHarness::spawn_with_init_and_rules(
+        "bread.on('bread.system.startup', function() end)\n",
+        Some(rules_toml),
+    )?;
+    harness.wait_until_ready().await?;
+
+    let health = harness.send_request("health", json!({})).await?;
+    let modules = health
+        .get("modules")
+        .and_then(Value::as_array)
+        .expect("modules array");
+    let rules_mod = modules
+        .iter()
+        .find(|m| m.get("name").and_then(Value::as_str) == Some("bread.rules"))
+        .expect("bread.rules present");
+    assert_eq!(
+        rules_mod.get("status").and_then(Value::as_str),
+        Some("load_error"),
+        "malformed rule should surface as load_error: {rules_mod:?}"
+    );
+    let last_error = rules_mod
+        .get("last_error")
+        .and_then(Value::as_str)
+        .expect("last_error should be set");
+    assert!(
+        last_error.contains("rule #1"),
+        "expected the bad rule's index in the error, got: {last_error}"
+    );
+    assert!(
+        last_error.contains("must set exactly one"),
+        "expected the validation message, got: {last_error}"
+    );
+
+    // The daemon itself must not have crashed — still reachable.
+    let ping = harness.send_request("ping", json!({})).await?;
+    assert_eq!(ping.get("ok").and_then(Value::as_bool), Some(true));
+
+    harness.shutdown();
+    Ok(())
+}
+
+/// Polls for `path` to exist, or times out after 5 seconds — `bread.exec`
+/// is fire-and-forget (spawn_blocking + `sh -c`), so its side effects land
+/// asynchronously relative to the IPC call that triggered them.
+async fn wait_for_file(path: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Err(anyhow!(
+        "expected file was not created in time: {}",
+        path.display()
+    ))
+}
+
 /// Polls `workflows.list` until `name` is present with `expected_state`, or
 /// times out after 5 seconds. Returns the matching entry.
 async fn poll_workflow_status(
@@ -656,6 +860,14 @@ impl TestHarness {
     }
 
     fn spawn_with_init(init_lua: &str) -> Result<Self> {
+        Self::spawn_with_init_and_rules(init_lua, None)
+    }
+
+    /// Like `spawn_with_init`, but also writes `rules.toml` (when `Some`)
+    /// into the same synthetic `~/.config/bread` before starting the
+    /// daemon, and exposes the synthetic `$HOME` so tests can point a
+    /// `run = "..."` rule at a script file they've written under it.
+    fn spawn_with_init_and_rules(init_lua: &str, rules_toml: Option<&str>) -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -668,6 +880,10 @@ impl TestHarness {
         fs::create_dir_all(bread_cfg.join("modules"))?;
 
         fs::write(bread_cfg.join("init.lua"), init_lua)?;
+
+        if let Some(rules_toml) = rules_toml {
+            fs::write(bread_cfg.join("rules.toml"), rules_toml)?;
+        }
 
         fs::write(
             bread_cfg.join("breadd.toml"),
