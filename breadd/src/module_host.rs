@@ -262,6 +262,7 @@ pub fn spawn_module_host(
     let sandbox_bin_path = bin_path.clone();
     let sandbox_module_name = module_name.to_string();
     let sandbox_entry_path = entry_path.to_path_buf();
+    let sandbox_socket_path = socket_path.to_path_buf();
     // SAFETY: the closure runs in the forked child between fork() and
     // execve() (that's what pre_exec is for). It only touches its own
     // captured, already-allocated data plus filesystem/landlock syscalls —
@@ -270,11 +271,17 @@ pub fn spawn_module_host(
     // restricting a spawned child.
     unsafe {
         cmd.pre_exec(move || {
-            apply_sandbox(&sandbox_bin_path, &sandbox_entry_path, &sandbox_permissions).map_err(|e| {
-                std::io::Error::other(format!(
-                    "landlock sandbox setup failed for module '{sandbox_module_name}': {e}"
-                ))
-            })
+            apply_sandbox(
+                &sandbox_bin_path,
+                &sandbox_entry_path,
+                &sandbox_socket_path,
+                &sandbox_permissions,
+            )
+                .map_err(|e| {
+                    std::io::Error::other(format!(
+                        "landlock sandbox setup failed for module '{sandbox_module_name}': {e}"
+                    ))
+                })
         });
     }
 
@@ -451,6 +458,7 @@ pub fn resolve_module_host_binary() -> PathBuf {
 fn apply_sandbox(
     module_host_bin: &Path,
     entry_path: &Path,
+    socket_path: &Path,
     permissions: &[ModulePermission],
 ) -> Result<()> {
     let abi = ABI::V1;
@@ -506,6 +514,36 @@ fn apply_sandbox(
                 .add_rule(PathBeneath::new(fd, read_only))
                 .map_err(|e| {
                     anyhow!("landlock rule for module directory {}: {e}", module_dir.display())
+                })?;
+        }
+    }
+    // The module-host must connect back to breadd over this Unix socket
+    // (BREAD_MODULE_SOCKET). Path-based AF_UNIX connect is mediated by
+    // Landlock as filesystem access — without a rule for the socket path
+    // (and walk access on its parent), UnixStream::connect fails with
+    // EACCES, the hello handshake never completes, and every
+    // out-of-process module times out with "did not report ready".
+    if let Some(socket_dir) = socket_path.parent() {
+        if let Ok(fd) = PathFd::new(socket_dir) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, read_only))
+                .map_err(|e| {
+                    anyhow!(
+                        "landlock rule for socket directory {}: {e}",
+                        socket_dir.display()
+                    )
+                })?;
+        }
+    }
+    if socket_path.exists() {
+        if let Ok(fd) = PathFd::new(socket_path) {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(fd, read_file_only))
+                .map_err(|e| {
+                    anyhow!(
+                        "landlock rule for socket {}: {e}",
+                        socket_path.display()
+                    )
                 })?;
         }
     }
@@ -652,7 +690,12 @@ mod tests {
         let sandbox_bin = sh_bin.clone();
         unsafe {
             cmd.pre_exec(move || {
-                apply_sandbox(&sandbox_bin, Path::new("/nonexistent/dummy/entry.lua"), &permissions)
+                apply_sandbox(
+                    &sandbox_bin,
+                    Path::new("/nonexistent/dummy/entry.lua"),
+                    Path::new("/nonexistent/dummy/breadd.sock"),
+                    &permissions,
+                )
                     .map_err(|e| std::io::Error::other(e.to_string()))
             });
         }
@@ -690,7 +733,7 @@ mod tests {
             &script_path,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
-        .unwrap();
+            .unwrap();
 
         // No permissions granted at all: the sandboxed process should not
         // be able to execute ANYTHING, including a script sitting right
@@ -707,7 +750,12 @@ mod tests {
         let sandbox_bin = sh_bin.clone();
         unsafe {
             cmd.pre_exec(move || {
-                apply_sandbox(&sandbox_bin, Path::new("/nonexistent/dummy/entry.lua"), &permissions)
+                apply_sandbox(
+                    &sandbox_bin,
+                    Path::new("/nonexistent/dummy/entry.lua"),
+                    Path::new("/nonexistent/dummy/breadd.sock"),
+                    &permissions,
+                )
                     .map_err(|e| std::io::Error::other(e.to_string()))
             });
         }

@@ -1,9 +1,0 @@
-/home/breadway/Projects/bread/.forgejo/workflows/dev-release.yml
-/home/breadway/Projects/bread/.forgejo/workflows/rc-release.yml
-/home/breadway/Projects/bread/.forgejo/workflows/release.yml
-/home/breadway/Projects/bread/CONTRIBUTING.md
-/home/breadway/Projects/bread/Documentation.md
-/home/breadway/Projects/bread/Examples.md
-/home/breadway/Projects/bread/README.md
-/home/breadway/Projects/bread/examples/modules/README.md
-/home/breadway/Projects/bread/packaging/README.md
