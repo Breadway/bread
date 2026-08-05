@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "bread-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bread-shared",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "bread-emit"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bread-shared",
  "serde_json",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "bread-module-host"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "bread-shared",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "bread-shared"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "dirs",
  "serde",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "breadd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
