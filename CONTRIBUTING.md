@@ -85,6 +85,22 @@ Whenever you add, rename, or remove a `bread.*` Lua binding
    undocumented, stale in the schema, or missing a doc heading/row — if
    `api-schema.toml`, the code, and `Documentation.md` don't all agree.
 
+`check-docs` is **not yet wired into CI** — it's a local, manually-run
+check today, not an enforced gate. That's a deliberate, still-open gap
+(not an oversight): CI pipeline changes get a separate review pass before
+landing, same as any other workflow-file edit. Wiring `cargo run -p xtask
+-- check-docs` into `dev-release.yml` (fail the build on drift) is the
+natural next step whenever that review happens — until then, discipline
+running it before committing is what keeps `api-schema.toml`, the code,
+and `Documentation.md` in sync, not anything automatic.
+
+Also note `check-docs`'s scope: it covers `bread.*` Lua bindings and IPC
+methods against `Documentation.md` only. It does not cover the `bread`
+CLI's subcommands against `README.md`'s hand-written CLI reference —
+that's a separate, currently-unguarded copy of information (see
+`README.md`'s "CLI reference" section) and has drifted before for exactly
+the same reason `Documentation.md` used to.
+
 ## CI
 
 - `dev-release.yml` — triggered on push to `main`.

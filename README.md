@@ -215,6 +215,7 @@ bread events bread.device.*           # Stream filtered events
 bread events --since 60               # Replay events from the last 60 seconds
 bread events --fields event,data      # Limit output to specific fields
 bread events --json                   # Output raw JSON
+bread events --tree                   # Render as a causality tree (caused_by) instead of a flat stream
 bread emit <event>                    # Manually fire an event (for testing)
 
 # Profiles
@@ -226,6 +227,11 @@ bread modules list                    # List installed modules and daemon status
 bread modules install /local/path     # Install from a local module directory
 bread modules remove <name>           # Remove an installed module (--yes skips confirmation)
 bread modules info <name>             # Show full manifest and daemon status
+bread modules audit <name>            # Scan a module's Lua source and suggest a [[permissions]] block
+
+# Hooks
+bread hooks install-shell [shell]     # Install precmd/preexec/chpwd shell hooks (auto-detects $SHELL)
+bread hooks install-git               # Install git hooks (post-commit/checkout/merge) in the current repo
 ```
 
 ---
@@ -236,10 +242,18 @@ Modules are Lua files (or directories) installed to `~/.config/bread/modules/`. 
 
 ### Installing modules
 
-Modules install from a local directory only. Modules run with full
-`bread.exec()` privileges and are **not** sandboxed, so to use a module
-published on a git host, clone it yourself and review the Lua before
-installing from the local checkout:
+Modules install from a local directory only. By default a module runs
+in-process with full, ungated `bread.exec()` privileges — the same trust
+model as before — so to use a module published on a git host, clone it
+yourself and review the Lua before installing from the local checkout.
+A module can opt into a smaller, enforced footprint by declaring
+`[[permissions]]` in its manifest: it then runs out-of-process under an
+OS-level (Landlock) sandbox limited to exactly what it declared, with a
+`bread` table that only exposes the granted namespaces. See
+[Capability-scoped modules](Documentation.md#capability-scoped-modules-since-v15) and
+[Out-of-process module sandboxing](Documentation.md#out-of-process-module-sandboxing-since-v16)
+for the full permission taxonomy and what's enforced at the kernel level
+versus what isn't yet.
 
 ```bash
 git clone https://github.com/someuser/bread-wifi ~/src/bread-wifi
