@@ -26,10 +26,10 @@ jobs:
         run: cd src && cargo run -p xtask --locked -- check-docs
 
       - name: build
-        run: cd src && cargo build --release --locked
+        run: cd src && bash ci/build.sh cargo build --release --locked
 
       - name: test
-        run: cd src && cargo test --release --locked --workspace
+        run: cd src && bash ci/build.sh cargo test --release --locked --workspace
 
       # breadd/Cargo.toml is the canonical version source (this workspace has
       # no shared workspace.package.version — breadd and bread-cli are kept
