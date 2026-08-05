@@ -1,13 +1,14 @@
 # Bread Automation API schema — checked-in source-of-truth registry.
 #
-# This is Workstream F (scoped down) from the governance-hardening report:
-# a *drift detector*, not a doc generator. `Documentation.md`'s "Dictionary:
-# Lua API" section is hand-written prose (one `#### bread.<name>(...)`
-# heading per binding, with worked examples and edge-case notes) — nothing
-# here regenerates or reformats that prose. Instead, this file is the
-# checked-in list of every `bread.*` Lua binding and IPC method that is
-# supposed to exist right now, and `cargo run -p xtask -- check-docs`
-# cross-checks it against:
+# This is Workstream F from the governance-hardening report: a *drift
+# detector*, not a doc generator. `Documentation.md`'s "Dictionary: Lua API"
+# section is hand-written prose (one `#### bread.<name>(...)` heading per
+# binding, with worked examples and edge-case notes) — nothing here
+# regenerates or reformats that prose. Instead, this file is the checked-in
+# list of every `bread.*` Lua binding, IPC method, and `bread` CLI command
+# that is supposed to exist right now, and `cargo run -p xtask -- check-docs`
+# (wired into CI via .forgejo/workflows/dev-release.yml — fails the build on
+# any drift) cross-checks it against:
 #
 #   1. The actual bindings registered in breadd/src/lua/mod.rs
 #      (`bread.set("name", ...)` calls, the nested `<x>_tbl.set(...)` calls
@@ -18,26 +19,49 @@
 #   2. The actual IPC methods dispatched in breadd/src/ipc/mod.rs's
 #      `match req.method.as_str() { ... }` block, plus the specially-cased
 #      `events.subscribe` streaming upgrade.
-#   3. Documentation.md itself, to make sure each entry here still has a
-#      `#### bread.<name>` heading (Lua) or a row in the IPC Methods table
-#      (IPC methods).
+#   3. The actual `bread` CLI commands declared in bread-cli/src/main.rs's
+#      `Commands`/`ModulesCommand`/`HooksCommand` enums.
+#   4. Documentation.md, to make sure each lua_function/lua_table/ipc_method
+#      entry here still has a `#### bread.<name>` heading (Lua) or a row in
+#      the IPC Methods table (IPC methods).
+#   5. README.md's "CLI reference" section, to make sure each cli_command
+#      entry here still has a `bread <name>` line there. This check exists
+#      because that section drifted from Documentation.md/the real CLI
+#      surface before check-docs covered it at all (missing `modules audit`,
+#      `hooks install-shell`/`install-git`, `events --tree`) — found and
+#      fixed by hand, then closed here so it can't recur silently.
 #
-# Whenever you add, rename, or remove a `bread.*` binding or IPC method:
+# Whenever you add, rename, or remove a `bread.*` binding, an IPC method, or
+# a `bread` CLI command:
 #   1. Update this file to match.
-#   2. Update/add the corresponding section in Documentation.md.
+#   2. Update/add the corresponding section in Documentation.md (Lua/IPC)
+#      or README.md's CLI reference (CLI commands).
 #   3. Run `cargo run -p xtask -- check-docs` before committing — it fails
-#      loudly (non-zero exit) if the three are out of sync.
+#      loudly (non-zero exit) if the schema, the code, and the docs are out
+#      of sync. CI runs this too (dev-release.yml), so drift that slips past
+#      a local run still fails the build.
 #
-# `kind` is one of: "lua_function", "lua_table", "ipc_method".
-# `since` is the API version (Documentation.md's "API Stability &
-# Versioning" section) the binding/method was introduced in. Anything from
-# the original v1.0 baseline (no `*(Since: vX.Y)*` marker in Documentation.md)
-# is listed as "1.0" here.
+# `kind` is one of: "lua_function", "lua_table", "ipc_method", "cli_command".
+#
+# `since` means two different things depending on `kind`, because CLI
+# commands were never part of the Bread Automation API's own versioned
+# contract (see Documentation.md's "API Stability & Versioning" section —
+# it's explicitly scoped to "Lua API surface + IPC methods + event
+# vocabulary + runtime-state schema", not the CLI):
+#   - lua_function / lua_table / ipc_method: the Bread Automation API
+#     version (breadd/src/ipc/mod.rs's `API_VERSION`) the binding/method was
+#     introduced in. Anything from the original v1.0 baseline (no
+#     `*(Since: vX.Y)*` marker in Documentation.md) is listed as "1.0" here.
+#   - cli_command: the `bread`/`breadd` package version (the workspace
+#     crates' `Cargo.toml` `version`, kept in lockstep — see CONTRIBUTING.md)
+#     the command was introduced in. Pre-existing commands as of this
+#     registry's creation are listed as "0.7" (the release before this one);
+#     no attempt was made to date them more precisely than that.
 #
 # Format chosen: a single checked-in TOML file (this is the "a schema file
 # that's checked and diffed against the actual API surface, and CI fails the
 # build if they drift" option the source report names, as opposed to Rust
-# attribute macros — overkill for a ~30-binding surface with no existing
+# attribute macros — overkill for a ~45-entry surface with no existing
 # proc-macro infrastructure in this workspace). TOML specifically because
 # `toml = "0.8"` is already a dependency of breadd/bread-cli/bread-shared
 # (see breadd/src/core/config.rs, bread-cli/src/modules_mgmt.rs) — no new
@@ -498,3 +522,89 @@ since = "1.2"
 name = "widgets.list"
 kind = "ipc_method"
 since = "1.3"
+
+# ---------------------------------------------------------------------------
+# CLI commands (bread-cli/src/main.rs) — checked against README.md's "CLI
+# reference" section, not Documentation.md (which has no CLI section of its
+# own). `since` here is the package version, not the API_VERSION — see this
+# file's header.
+
+[[entry]]
+name = "reload"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "state"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "events"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "modules.list"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "modules.install"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "modules.remove"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "modules.info"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "modules.audit"
+kind = "cli_command"
+since = "0.8"
+
+[[entry]]
+name = "hooks.install-shell"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "hooks.install-git"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "profile-list"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "profile-activate"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "emit"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "ping"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "health"
+kind = "cli_command"
+since = "0.7"
+
+[[entry]]
+name = "doctor"
+kind = "cli_command"
+since = "0.7"

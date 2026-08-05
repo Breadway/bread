@@ -69,37 +69,27 @@ cargo test --release --workspace
 
 ### Keeping the API docs honest
 
-`Documentation.md`'s Lua API and IPC protocol sections are hand-written and
-have drifted from the actual code before — there's a checked-in registry,
-`api-schema.toml`, plus an `xtask` checker that catches it happening again.
+`Documentation.md`'s Lua API/IPC protocol sections and README's CLI
+reference are hand-written and have drifted from the actual code before —
+there's a checked-in registry, `api-schema.toml`, plus an `xtask` checker
+(`cargo run -p xtask -- check-docs`) that catches it happening again, and
+it's enforced in CI (`dev-release.yml` fails the build on any drift).
 
 Whenever you add, rename, or remove a `bread.*` Lua binding
-(`breadd/src/lua/mod.rs`) or an IPC method (`breadd/src/ipc/mod.rs`):
+(`breadd/src/lua/mod.rs`), an IPC method (`breadd/src/ipc/mod.rs`), or a
+`bread` CLI command (`bread-cli/src/main.rs`):
 
 1. Add/update/remove its entry in `api-schema.toml` to match.
-2. Add/update the corresponding section in `Documentation.md` (a
-   `#### bread.<name>` heading for a Lua binding, or a row in the IPC
-   Methods table for an IPC method).
+2. Add/update the corresponding section — a `#### bread.<name>` heading in
+   `Documentation.md` for a Lua binding, a row in `Documentation.md`'s IPC
+   Methods table for an IPC method, or a `bread <name>` line in `README.md`'s
+   "CLI reference" section for a CLI command.
 3. Run `cargo run -p xtask -- check-docs` before committing. It fails with
    a non-zero exit and a list of exactly what's out of sync — added but
-   undocumented, stale in the schema, or missing a doc heading/row — if
-   `api-schema.toml`, the code, and `Documentation.md` don't all agree.
-
-`check-docs` is **not yet wired into CI** — it's a local, manually-run
-check today, not an enforced gate. That's a deliberate, still-open gap
-(not an oversight): CI pipeline changes get a separate review pass before
-landing, same as any other workflow-file edit. Wiring `cargo run -p xtask
--- check-docs` into `dev-release.yml` (fail the build on drift) is the
-natural next step whenever that review happens — until then, discipline
-running it before committing is what keeps `api-schema.toml`, the code,
-and `Documentation.md` in sync, not anything automatic.
-
-Also note `check-docs`'s scope: it covers `bread.*` Lua bindings and IPC
-methods against `Documentation.md` only. It does not cover the `bread`
-CLI's subcommands against `README.md`'s hand-written CLI reference —
-that's a separate, currently-unguarded copy of information (see
-`README.md`'s "CLI reference" section) and has drifted before for exactly
-the same reason `Documentation.md` used to.
+   undocumented, stale in the schema, or missing a doc line — if
+   `api-schema.toml`, the code, `Documentation.md`, and `README.md` don't
+   all agree. CI runs this too, so anything that slips past a local run
+   still fails the build rather than landing on `main`.
 
 ## CI
 

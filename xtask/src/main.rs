@@ -2,11 +2,20 @@
 //! binaries themselves.
 //!
 //! Currently just `check-docs`: a drift detector between the actual
-//! `bread.*` Lua binding surface + IPC method surface (as implemented in
-//! `breadd/src/lua/mod.rs` / `breadd/src/ipc/mod.rs`) and the checked-in
-//! registry at `api-schema.toml`, cross-referenced against `Documentation.md`.
-//! See `api-schema.toml`'s header comment for why this exists and why it's a
-//! *drift detector*, not a doc generator.
+//! `bread.*` Lua binding surface + IPC method surface + `bread` CLI command
+//! surface (as implemented in `breadd/src/lua/mod.rs`, `breadd/src/ipc/mod.rs`,
+//! and `bread-cli/src/main.rs`) and the checked-in registry at
+//! `api-schema.toml`, cross-referenced against `Documentation.md` (Lua/IPC)
+//! and `README.md` (CLI commands). See `api-schema.toml`'s header comment for
+//! why this exists and why it's a *drift detector*, not a doc generator.
+//!
+//! The CLI-command coverage exists specifically because README's "CLI
+//! reference" section drifted from `Documentation.md`/the real `bread-cli`
+//! source (missing `modules audit`, `hooks install-shell`/`install-git`,
+//! `events --tree`) — a live instance of exactly the drift this whole
+//! workstream exists to prevent, found and fixed by hand once the schema
+//! didn't cover it yet. See `api-schema.toml`'s header for how CLI commands
+//! are named and versioned differently from the Lua/IPC entries.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -50,12 +59,16 @@ fn run_check_docs() -> Result<bool> {
         .context("reading breadd/src/lua/mod.rs")?;
     let ipc_src = std::fs::read_to_string(root.join("breadd/src/ipc/mod.rs"))
         .context("reading breadd/src/ipc/mod.rs")?;
+    let cli_src = std::fs::read_to_string(root.join("bread-cli/src/main.rs"))
+        .context("reading bread-cli/src/main.rs")?;
     let schema_toml = std::fs::read_to_string(root.join("api-schema.toml"))
         .context("reading api-schema.toml")?;
     let doc_md =
         std::fs::read_to_string(root.join("Documentation.md")).context("reading Documentation.md")?;
+    let readme_md =
+        std::fs::read_to_string(root.join("README.md")).context("reading README.md")?;
 
-    let report = check(&lua_src, &ipc_src, &schema_toml, &doc_md)?;
+    let report = check(&lua_src, &ipc_src, &cli_src, &schema_toml, &doc_md, &readme_md)?;
     report.print();
     Ok(report.is_clean())
 }
@@ -87,7 +100,7 @@ struct SchemaEntry {
     since: String,
 }
 
-const VALID_KINDS: &[&str] = &["lua_function", "lua_table", "ipc_method"];
+const VALID_KINDS: &[&str] = &["lua_function", "lua_table", "ipc_method", "cli_command"];
 
 // ---------------------------------------------------------------------------
 // Extraction: breadd/src/lua/mod.rs -> the current bread.* Lua API surface.
@@ -260,6 +273,92 @@ fn extract_ipc_methods(src: &str) -> BTreeSet<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Extraction: bread-cli/src/main.rs -> the current `bread` CLI command
+// surface.
+//
+// Same deliberate textual-scanning approach as the Lua/IPC extractors
+// above, not a real Rust/clap-derive-macro-expanding parser.
+
+/// Top-level `Commands` variants that delegate to a nested subcommand enum
+/// via `#[command(subcommand)] subcommand: XCommand` rather than being a
+/// leaf command themselves — each such variant's own leaf commands are
+/// named `<variant-kebab>.<subcommand-kebab>` (e.g. `modules.audit`,
+/// `hooks.install-shell`) instead of the group variant itself being a leaf.
+/// Update this list if `bread-cli/src/main.rs` gains another subcommand
+/// group (the same kind of manual-update-needed list as `TABLE_VARS` above).
+const SUBCOMMAND_GROUPS: &[(&str, &str)] = &[("Modules", "ModulesCommand"), ("Hooks", "HooksCommand")];
+
+/// clap's default rename for a derived `Subcommand` variant: PascalCase ->
+/// kebab-case (`ProfileList` -> `profile-list`, `InstallShell` ->
+/// `install-shell`). This is what actually shows up as `bread <name>` on
+/// the command line and in README's CLI reference.
+fn kebab(pascal: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in pascal.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i != 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Scan a `#[derive(Subcommand, ...)] enum <enum_name> { ... }` block for
+/// its variant names, in source order. Depth-tracked the same way
+/// `extract_ipc_methods` tracks match-arm depth, so a variant's own nested
+/// struct-style fields (and their attributes/doc comments) aren't mistaken
+/// for sibling variants.
+fn extract_enum_variants(src: &str, enum_name: &str) -> Vec<String> {
+    let marker = format!("enum {enum_name} {{");
+    let Some(start) = src.find(&marker) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let mut depth: i32 = 0;
+    for line in src[start..].lines() {
+        let pre_depth = depth;
+        let trimmed = line.trim_start();
+
+        if pre_depth == 1 {
+            let name_end = trimmed
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(trimmed.len());
+            let name = &trimmed[..name_end];
+            if !name.is_empty() && name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                out.push(name.to_string());
+            }
+        }
+
+        depth += line.matches('{').count() as i32;
+        depth -= line.matches('}').count() as i32;
+        if pre_depth >= 1 && depth <= 0 {
+            break; // closed the enum block
+        }
+    }
+    out
+}
+
+fn extract_cli_commands(src: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for variant in extract_enum_variants(src, "Commands") {
+        if let Some((_, sub_enum)) = SUBCOMMAND_GROUPS.iter().find(|(v, _)| *v == variant) {
+            let group = kebab(&variant);
+            for sub in extract_enum_variants(src, sub_enum) {
+                out.insert(format!("{group}.{}", kebab(&sub)));
+            }
+        } else {
+            out.insert(kebab(&variant));
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Documentation.md cross-checks
 
 /// Slice out a `## `-level section (from its heading up to, but not
@@ -284,6 +383,13 @@ fn ipc_section(doc: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// README.md cross-check
+
+fn readme_cli_section(readme: &str) -> &str {
+    section(readme, "## CLI reference")
+}
+
+// ---------------------------------------------------------------------------
 // Report
 
 #[derive(Debug, Default)]
@@ -293,8 +399,11 @@ struct CheckReport {
     /// In api-schema.toml, no longer in code.
     stale_in_schema: Vec<(String, String)>,
     /// In api-schema.toml (and in code), but Documentation.md has no
-    /// heading/row for it.
+    /// heading/row for it (lua_function/lua_table/ipc_method only).
     undocumented: Vec<(String, String)>,
+    /// In api-schema.toml (and in code), but README's "CLI reference"
+    /// section has no `bread <name>` line for it (cli_command only).
+    missing_from_readme: Vec<(String, String)>,
     /// Schema entries with an unrecognized `kind`.
     bad_kind: Vec<(String, String)>,
     /// Schema entries with an empty `since`.
@@ -306,13 +415,14 @@ impl CheckReport {
         self.missing_from_schema.is_empty()
             && self.stale_in_schema.is_empty()
             && self.undocumented.is_empty()
+            && self.missing_from_readme.is_empty()
             && self.bad_kind.is_empty()
             && self.missing_since.is_empty()
     }
 
     fn print(&self) {
         if self.is_clean() {
-            println!("check-docs: OK — api-schema.toml matches breadd's Lua/IPC surface and Documentation.md.");
+            println!("check-docs: OK — api-schema.toml matches breadd's Lua/IPC/CLI surface, Documentation.md, and README.md.");
             return;
         }
 
@@ -348,6 +458,14 @@ impl CheckReport {
             println!();
         }
 
+        if !self.missing_from_readme.is_empty() {
+            println!("In api-schema.toml but missing from README.md's \"CLI reference\" section (no `bread <name>` line):");
+            for (kind, name) in &self.missing_from_readme {
+                println!("  - [{kind}] {name}");
+            }
+            println!();
+        }
+
         if !self.missing_since.is_empty() {
             println!("Schema entries with an empty `since`:");
             for (kind, name) in &self.missing_since {
@@ -360,7 +478,14 @@ impl CheckReport {
     }
 }
 
-fn check(lua_src: &str, ipc_src: &str, schema_toml: &str, doc_md: &str) -> Result<CheckReport> {
+fn check(
+    lua_src: &str,
+    ipc_src: &str,
+    cli_src: &str,
+    schema_toml: &str,
+    doc_md: &str,
+    readme_md: &str,
+) -> Result<CheckReport> {
     let schema: Schema = toml::from_str(schema_toml).context("parsing api-schema.toml")?;
 
     let mut report = CheckReport::default();
@@ -383,7 +508,7 @@ fn check(lua_src: &str, ipc_src: &str, schema_toml: &str, doc_md: &str) -> Resul
     let code_lua = extract_lua_bindings(lua_src);
     let schema_lua: BTreeSet<(String, String)> = schema_set
         .iter()
-        .filter(|(kind, _)| kind != "ipc_method")
+        .filter(|(kind, _)| kind == "lua_function" || kind == "lua_table")
         .cloned()
         .collect();
 
@@ -413,12 +538,32 @@ fn check(lua_src: &str, ipc_src: &str, schema_toml: &str, doc_md: &str) -> Resul
             .push(("ipc_method".to_string(), name.clone()));
     }
 
-    // --- schema vs Documentation.md ---
+    // --- code vs schema: CLI ---
+    let code_cli = extract_cli_commands(cli_src);
+    let schema_cli: BTreeSet<String> = schema_set
+        .iter()
+        .filter(|(kind, _)| kind == "cli_command")
+        .map(|(_, name)| name.clone())
+        .collect();
+
+    for name in code_cli.difference(&schema_cli) {
+        report
+            .missing_from_schema
+            .push(("cli_command".to_string(), name.clone()));
+    }
+    for name in schema_cli.difference(&code_cli) {
+        report
+            .stale_in_schema
+            .push(("cli_command".to_string(), name.clone()));
+    }
+
+    // --- schema vs Documentation.md (lua_function/lua_table/ipc_method only —
+    // cli_command is checked against README.md separately, below) ---
     let lua_section = lua_api_section(doc_md);
     let ipc_tbl_section = ipc_section(doc_md);
     for entry in &schema.entry {
-        if !VALID_KINDS.contains(&entry.kind.as_str()) {
-            continue; // already reported above
+        if !VALID_KINDS.contains(&entry.kind.as_str()) || entry.kind == "cli_command" {
+            continue; // already reported above, or checked against README instead
         }
         let documented = if entry.kind == "ipc_method" {
             ipc_tbl_section.contains(&format!("`{}`", entry.name))
@@ -432,9 +577,24 @@ fn check(lua_src: &str, ipc_src: &str, schema_toml: &str, doc_md: &str) -> Resul
         }
     }
 
+    // --- schema vs README.md (cli_command only) ---
+    let readme_cli = readme_cli_section(readme_md);
+    for entry in &schema.entry {
+        if entry.kind != "cli_command" {
+            continue;
+        }
+        let cmd_text = format!("bread {}", entry.name.replace('.', " "));
+        if !readme_cli.contains(cmd_text.as_str()) {
+            report
+                .missing_from_readme
+                .push((entry.kind.clone(), entry.name.clone()));
+        }
+    }
+
     report.missing_from_schema.sort();
     report.stale_in_schema.sort();
     report.undocumented.sort();
+    report.missing_from_readme.sort();
     report.bad_kind.sort();
     report.missing_since.sort();
 
@@ -494,6 +654,43 @@ mod tests {
 | `events.subscribe` | - | Upgrade to streaming mode |
 "#;
 
+    /// Mirrors the real `bread-cli/src/main.rs` shape closely enough to
+    /// exercise both a flat leaf command (`Ping`) and a subcommand group
+    /// (`Modules` -> `ModulesCommand`), including a struct-style variant
+    /// with fields (`Info { name: String }`).
+    const CLI_SRC: &str = r#"
+enum Commands {
+    /// Health check daemon connectivity
+    Ping,
+    /// Manage installed Lua modules
+    Modules {
+        #[command(subcommand)]
+        subcommand: ModulesCommand,
+    },
+}
+
+enum ModulesCommand {
+    /// List all installed modules
+    List,
+    /// Show full manifest details for a module
+    Info { name: String },
+}
+"#;
+
+    const README_MD: &str = r#"
+## CLI reference
+
+```bash
+bread ping
+bread modules list
+bread modules info <name>
+```
+
+---
+
+## Module system
+"#;
+
     fn schema_toml_for(entries: &[(&str, &str, &str)]) -> String {
         let mut out = String::new();
         for (name, kind, since) in entries {
@@ -517,6 +714,9 @@ mod tests {
             ("ping", "ipc_method", "1.0"),
             ("emit", "ipc_method", "1.0"),
             ("events.subscribe", "ipc_method", "1.0"),
+            ("ping", "cli_command", "0.7"),
+            ("modules.list", "cli_command", "0.7"),
+            ("modules.info", "cli_command", "0.7"),
         ])
     }
 
@@ -554,7 +754,7 @@ mod tests {
 
     #[test]
     fn clean_state_passes() {
-        let report = check(LUA_SRC, IPC_SRC, &full_schema(), DOC_MD).unwrap();
+        let report = check(LUA_SRC, IPC_SRC, CLI_SRC, &full_schema(), DOC_MD, README_MD).unwrap();
         assert!(report.is_clean(), "{report:#?}");
     }
 
@@ -564,7 +764,15 @@ mod tests {
         // updating api-schema.toml: schema still says "debounce", code no
         // longer does (only "debounce_v2" now exists).
         let renamed_lua_src = LUA_SRC.replace("bread.debounce", "bread.debounce_v2");
-        let report = check(&renamed_lua_src, IPC_SRC, &full_schema(), DOC_MD).unwrap();
+        let report = check(
+            &renamed_lua_src,
+            IPC_SRC,
+            CLI_SRC,
+            &full_schema(),
+            DOC_MD,
+            README_MD,
+        )
+        .unwrap();
         assert!(!report.is_clean());
         assert!(report
             .missing_from_schema
@@ -577,7 +785,15 @@ mod tests {
     #[test]
     fn removed_ipc_method_is_caught_as_drift() {
         let without_emit = IPC_SRC.replacen("\"emit\" => {", "\"emit_removed\" => {", 1);
-        let report = check(LUA_SRC, &without_emit, &full_schema(), DOC_MD).unwrap();
+        let report = check(
+            LUA_SRC,
+            &without_emit,
+            CLI_SRC,
+            &full_schema(),
+            DOC_MD,
+            README_MD,
+        )
+        .unwrap();
         assert!(!report.is_clean());
         assert!(report
             .stale_in_schema
@@ -587,7 +803,15 @@ mod tests {
     #[test]
     fn missing_doc_heading_is_caught_as_drift() {
         let doc_without_spawn_heading = DOC_MD.replace("#### `bread.spawn(fn)`\n", "");
-        let report = check(LUA_SRC, IPC_SRC, &full_schema(), &doc_without_spawn_heading).unwrap();
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            CLI_SRC,
+            &full_schema(),
+            &doc_without_spawn_heading,
+            README_MD,
+        )
+        .unwrap();
         assert!(!report.is_clean());
         assert!(report
             .undocumented
@@ -597,10 +821,74 @@ mod tests {
     #[test]
     fn unknown_kind_is_rejected() {
         let bad_schema = schema_toml_for(&[("on", "lua_thing", "1.0")]);
-        let report = check(LUA_SRC, IPC_SRC, &bad_schema, DOC_MD).unwrap();
+        let report = check(LUA_SRC, IPC_SRC, CLI_SRC, &bad_schema, DOC_MD, README_MD).unwrap();
         assert!(!report.is_clean());
         assert!(report
             .bad_kind
             .contains(&("lua_thing".to_string(), "on".to_string())));
+    }
+
+    #[test]
+    fn kebab_converts_pascal_case_correctly() {
+        assert_eq!(kebab("Ping"), "ping");
+        assert_eq!(kebab("ProfileList"), "profile-list");
+        assert_eq!(kebab("InstallShell"), "install-shell");
+    }
+
+    #[test]
+    fn extracts_cli_commands_with_subcommand_groups_dotted() {
+        let got = extract_cli_commands(CLI_SRC);
+        let want: BTreeSet<String> = ["ping", "modules.list", "modules.info"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            got, want,
+            "flat leaf commands stay bare; subcommand-group members get `<group>.<sub>` names"
+        );
+    }
+
+    #[test]
+    fn renamed_cli_command_is_caught_as_drift() {
+        // Simulate a contributor renaming the `modules info` subcommand in
+        // code (e.g. to `Show`) without updating api-schema.toml.
+        let renamed_cli_src = CLI_SRC.replace("Info { name: String }", "Show { name: String }");
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            &renamed_cli_src,
+            &full_schema(),
+            DOC_MD,
+            README_MD,
+        )
+        .unwrap();
+        assert!(!report.is_clean());
+        assert!(report
+            .missing_from_schema
+            .contains(&("cli_command".to_string(), "modules.show".to_string())));
+        assert!(report
+            .stale_in_schema
+            .contains(&("cli_command".to_string(), "modules.info".to_string())));
+    }
+
+    #[test]
+    fn missing_readme_cli_line_is_caught_as_drift() {
+        // The exact class of drift this coverage exists to catch: a real
+        // command exists in code and api-schema.toml, but README's "CLI
+        // reference" section never got a line added for it.
+        let readme_without_modules_info = README_MD.replace("bread modules info <name>\n", "");
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            CLI_SRC,
+            &full_schema(),
+            DOC_MD,
+            &readme_without_modules_info,
+        )
+        .unwrap();
+        assert!(!report.is_clean());
+        assert!(report
+            .missing_from_readme
+            .contains(&("cli_command".to_string(), "modules.info".to_string())));
     }
 }
