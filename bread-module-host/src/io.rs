@@ -33,6 +33,10 @@ pub enum IoCommand {
     },
 }
 
+/// In-flight RPC calls awaiting a response, keyed by request id: each entry
+/// is the reply channel for the call that's blocked waiting on it.
+type PendingReplies = Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>>;
+
 /// Something the IO thread has for the Lua-driving thread: either an
 /// unsolicited push (a subscribed event fired, a timer fired) or "the
 /// connection is gone" (breadd exited, socket closed, etc).
@@ -148,8 +152,7 @@ pub fn run(
         // Lua-side call is blocked waiting for them; a dedicated thread
         // bridges the synchronous `cmd_rx` (fed from the Lua thread) onto an
         // async channel this task can select on.
-        let pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<Value, String>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: PendingReplies = Arc::new(Mutex::new(HashMap::new()));
 
         let (async_cmd_tx, mut async_cmd_rx) = tokio::sync::mpsc::unbounded_channel::<IoCommand>();
         std::thread::spawn(move || {

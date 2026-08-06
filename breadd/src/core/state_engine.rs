@@ -260,7 +260,7 @@ pub async fn run_state_engine(
                 }
 
                 if let (Some(before), Some(after)) = (before_snapshot, after_snapshot) {
-                    for (_id, path) in watches.iter() {
+                    for path in watches.values() {
                         let old_val = value_at_path(&before, path).unwrap_or(Value::Null);
                         let new_val = value_at_path(&after, path).unwrap_or(Value::Null);
                         if old_val != new_val {

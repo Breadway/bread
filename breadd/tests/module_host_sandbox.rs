@@ -137,10 +137,8 @@ enabled = false
     async fn wait_until_ready(&self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline {
-            if self.socket_path.exists() {
-                if self.send_request("ping", json!({})).await.is_ok() {
-                    return Ok(());
-                }
+            if self.socket_path.exists() && self.send_request("ping", json!({})).await.is_ok() {
+                return Ok(());
             }
             sleep(Duration::from_millis(100)).await;
         }

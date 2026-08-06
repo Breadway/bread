@@ -93,7 +93,7 @@ fn json_to_lua<'lua>(lua: &'lua Lua, value: &JsonValue) -> mlua::Result<LuaValue
         JsonValue::Bool(b) => LuaValue::Boolean(*b),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
-                LuaValue::Integer(i as i64)
+                LuaValue::Integer(i)
             } else {
                 LuaValue::Number(n.as_f64().unwrap_or(0.0))
             }
@@ -243,7 +243,7 @@ impl ModuleHostLua {
         let decode_fn = lua.create_function(|lua, s: String| {
             match serde_json::from_str::<JsonValue>(&s) {
                 Ok(v) => Ok((json_to_lua(lua, &v)?, LuaValue::Nil)),
-                Err(e) => Ok((LuaValue::Nil, LuaValue::String(lua.create_string(&e.to_string())?))),
+                Err(e) => Ok((LuaValue::Nil, LuaValue::String(lua.create_string(e.to_string())?))),
             }
         })?;
         json_tbl.set("decode", decode_fn)?;
