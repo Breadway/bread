@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use bread_shared::{now_unix_ms, AdapterSource, RawEvent};
 use serde_json::json;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
@@ -24,6 +24,13 @@ impl Adapter for HyprlandAdapter {
         debug!("hyprland adapter started");
         let socket = hyprland_event_socket()?;
         let stream = UnixStream::connect(&socket).await?;
+        // Snapshot current compositor topology *after* the event socket is
+        // connected so we don't miss a change that lands during the query,
+        // then apply the snapshot first so bread.state is populated before
+        // the live stream. Failure is non-fatal: live events still work.
+        if let Err(e) = emit_topology_snapshot(&tx).await {
+            warn!("hyprland topology snapshot failed: {e}");
+        }
         let reader = BufReader::new(stream);
         let mut lines = reader.lines();
 
@@ -81,6 +88,53 @@ fn hyprland_event_socket() -> Result<PathBuf> {
             Ok(sockets.remove(0))
         }
     }
+}
+
+/// Request socket sits next to `.socket2.sock` as `.socket.sock`.
+fn hyprland_request_socket() -> Result<PathBuf> {
+    let events = hyprland_event_socket()?;
+    let parent = events
+        .parent()
+        .ok_or_else(|| anyhow!("hyprland event socket has no parent dir"))?;
+    Ok(parent.join(".socket.sock"))
+}
+
+async fn hyprland_request_json(request: &str) -> Result<serde_json::Value> {
+    let path = hyprland_request_socket()?;
+    let mut stream = UnixStream::connect(&path).await?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.shutdown().await?;
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).await?;
+    serde_json::from_str(&buf)
+        .map_err(|e| anyhow!("hyprland {request} JSON: {e}"))
+}
+
+/// Query current monitors / workspaces / focus and emit one
+/// `hyprland.snapshot` RawEvent. The normalizer turns that into
+/// `bread.hyprland.snapshot`; the state engine replaces topology from it.
+async fn emit_topology_snapshot(tx: &mpsc::Sender<RawEvent>) -> Result<()> {
+    let monitors = hyprland_request_json("j/monitors").await.unwrap_or(json!([]));
+    let workspaces = hyprland_request_json("j/workspaces")
+        .await
+        .unwrap_or(json!([]));
+    let active_workspace = hyprland_request_json("j/activeworkspace").await.ok();
+    let active_window = hyprland_request_json("j/activewindow").await.ok();
+
+    tx.send(RawEvent {
+        source: AdapterSource::Hyprland,
+        kind: "hyprland.snapshot".to_string(),
+        payload: json!({
+            "monitors": monitors,
+            "workspaces": workspaces,
+            "active_workspace": active_workspace,
+            "active_window": active_window,
+        }),
+        timestamp: now_unix_ms(),
+    })
+    .await
+    .map_err(|_| anyhow!("raw channel closed during hyprland snapshot"))?;
+    Ok(())
 }
 
 fn parse_hyprland_line(line: &str) -> (String, String) {

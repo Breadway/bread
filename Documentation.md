@@ -43,7 +43,7 @@ The Lua API surface, the IPC method set, the event-name vocabulary, and the runt
 - **Since markers.** Additions made after the v1.0 baseline are marked inline with `*Since: vX.Y*`. Anything documented in this file without a marker is part of the v1.0 baseline.
 - **Version discovery.** The current API version is returned as `api_version` in the `health` IPC response (see [Dictionary: IPC protocol](#dictionary-ipc-protocol)), so a client — the CLI, a Lua module, or a sibling `bread*` app — can assert compatibility at connect time rather than discovering a mismatch mid-session.
 
-This matters because the moment sibling apps and community modules depend on this vocabulary, it becomes a contract that can break people. Treat this file, not `README.md` or `CLAUDE.md`, as the single source of truth — those files intentionally point back here rather than keeping their own copies, after a duplicated Lua API section in `README.md` was found to have already drifted from reality.
+This matters because the moment sibling apps and community modules depend on this vocabulary, it becomes a contract that can break people. Treat this file, not `README.md` or `AGENTS.md`, as the single source of truth — those files intentionally point back here rather than keeping their own copies, after a duplicated Lua API section in `README.md` was found to have already drifted from reality.
 
 ## Getting started
 
@@ -1466,6 +1466,7 @@ Every Hyprland-sourced event below is dual-emitted: the daemon fires both the le
 | `bread.window.moved` *(Deprecated: v1.5 — use `bread.hyprland.window.moved`)* | `{ address, workspace }` |
 | `bread.hyprland.window.moved` *(Since: v1.5)* | `{ address, workspace }` |
 | `bread.hyprland.event` | `{ kind, raw, data }` (unhandled kinds — already namespaced, not part of this migration) |
+| `bread.hyprland.snapshot` *(Since: v1.7.1)* | `{ monitors, workspaces, active_workspace, active_window }` — emitted once after the Hyprland event socket connects (and again after a reconnect). `bread.state` applies this event to replace compositor topology so monitors/workspaces/focus are populated before the next live event. Not dual-emitted under a legacy name. |
 
 ##### Compatibility: `[compat]` config
 
@@ -1765,4 +1766,5 @@ The `health` response's `api_version` field lets a client — the CLI, a Lua mod
 - *The unsourced path is tagged `AdapterSource::Manual`, not `System` — `System` is reserved for the daemon's own Rust-originated sends and can no longer be produced from data that arrived over the IPC socket.*
 - *The event name is rejected if its top-level dotted segment (the part right after `bread.`) is one of the reserved, adapter-owned domains in `bread_shared::apps::RESERVED_DOMAINS` — `terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow` (see [Namespaces](#namespaces)) — since a socket client emitting e.g. `bread.power.ac.connected` this way would otherwise be indistinguishable from the real power adapter observing it.*
 - *Since: v1.7 — well-formed `bread.command.<known-app>.<verb>` is an explicit exception to that reserved-domain reject (`command` stays reserved so it cannot be claimed as an app id). `bread.command.clip.clear` is accepted unsourced and as a sourced `AdapterSource::App` emit from another known app; `bread.command.power.off`, `bread.command.notanapp.x`, and `bread.hyprland.*` are still rejected. `API_VERSION` bumped from `1.6.0` to `1.7.0` for this addition.*
+- *Since: v1.7.1 — the state engine applies both legacy Hyprland names and `bread.hyprland.*` (so flipping `[compat] legacy_hyprland_event_names = false` no longer freezes monitors/workspace/window). `RuntimeState.workspaces` is written on `workspace.created`/`destroyed` and replaced by `bread.hyprland.snapshot`. `API_VERSION` bumped from `1.7.0` to `1.7.1`.*
 - *Freely-named custom/test event names (anything outside those reserved domains, including names with no `bread.` prefix at all) remain unrestricted — this is what keeps `bread emit <name>` useful for testing Lua handlers without unplugging cables, and what `bread-emit`'s fire-and-forget, no-reply-wait design still works against unchanged (a single JSON line write is still sufficient; no handshake was added).*

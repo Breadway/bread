@@ -395,55 +395,180 @@ fn value_at_path(value: &Value, path: &str) -> Option<Value> {
     Some(current.clone())
 }
 
+/// Logical Hyprland state key: both the legacy flat name and its
+/// `bread.hyprland.*` sibling collapse to the same suffix
+/// (`monitor.connected`, `workspace.changed`, …).
+fn hyprland_state_key(event: &str) -> Option<&str> {
+    if let Some(rest) = event.strip_prefix("bread.hyprland.") {
+        return Some(rest);
+    }
+    match event {
+        "bread.monitor.connected" => Some("monitor.connected"),
+        "bread.monitor.disconnected" => Some("monitor.disconnected"),
+        "bread.workspace.changed" => Some("workspace.changed"),
+        "bread.workspace.created" => Some("workspace.created"),
+        "bread.workspace.destroyed" => Some("workspace.destroyed"),
+        "bread.window.focus.changed" => Some("window.focus.changed"),
+        "bread.window.focused" => Some("window.focused"),
+        "bread.window.opened" => Some("window.opened"),
+        "bread.window.closed" => Some("window.closed"),
+        "bread.window.moved" => Some("window.moved"),
+        _ => None,
+    }
+}
+
+fn json_stringish(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(s) = value.as_str() {
+        return Some(s.to_string());
+    }
+    value.as_i64().map(|n| n.to_string())
+}
+
+fn workspace_id_from_data(data: &Value) -> Option<String> {
+    json_stringish(data.get("workspace"))
+        .or_else(|| json_stringish(data.get("id")))
+        .or_else(|| json_stringish(data.get("name")))
+        .or_else(|| {
+            data.get("data")
+                .and_then(Value::as_str)
+                .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+fn active_window_from_data(data: &Value) -> Option<String> {
+    json_stringish(data.get("window"))
+        .or_else(|| json_stringish(data.get("class")))
+        .or_else(|| json_stringish(data.get("address")))
+        .or_else(|| {
+            data.get("data")
+                .and_then(Value::as_str)
+                .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+}
+
+fn upsert_monitor(state: &mut RuntimeState, data: &Value) {
+    let Some(name) = data.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(m) = state.monitors.iter_mut().find(|m| m.name == name) {
+        m.connected = true;
+        if let Some(res) = data.get("resolution").and_then(Value::as_str) {
+            m.resolution = Some(res.to_string());
+        }
+        if let Some(pos) = data.get("position").and_then(Value::as_str) {
+            m.position = Some(pos.to_string());
+        }
+    } else {
+        state.monitors.push(crate::core::types::Monitor {
+            name: name.to_string(),
+            connected: true,
+            resolution: data
+                .get("resolution")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+            position: data
+                .get("position")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        });
+    }
+}
+
+fn apply_hyprland_snapshot(state: &mut RuntimeState, data: &Value) {
+    if let Some(arr) = data.get("monitors").and_then(Value::as_array) {
+        state.monitors = arr
+            .iter()
+            .filter_map(|m| {
+                let name = m.get("name").and_then(Value::as_str)?;
+                let width = m.get("width").and_then(Value::as_u64);
+                let height = m.get("height").and_then(Value::as_u64);
+                let x = m.get("x").and_then(Value::as_i64);
+                let y = m.get("y").and_then(Value::as_i64);
+                let disabled = m.get("disabled").and_then(Value::as_bool).unwrap_or(false);
+                Some(crate::core::types::Monitor {
+                    name: name.to_string(),
+                    connected: !disabled,
+                    resolution: match (width, height) {
+                        (Some(w), Some(h)) => Some(format!("{w}x{h}")),
+                        _ => None,
+                    },
+                    position: match (x, y) {
+                        (Some(x), Some(y)) => Some(format!("{x}x{y}")),
+                        _ => None,
+                    },
+                })
+            })
+            .collect();
+    }
+    if let Some(arr) = data.get("workspaces").and_then(Value::as_array) {
+        state.workspaces = arr
+            .iter()
+            .filter_map(|ws| {
+                let id = json_stringish(ws.get("id")).or_else(|| json_stringish(ws.get("name")))?;
+                Some(crate::core::types::Workspace {
+                    id,
+                    monitor: json_stringish(ws.get("monitor")),
+                })
+            })
+            .collect();
+    }
+    if let Some(aw) = data.get("active_workspace") {
+        state.active_workspace =
+            json_stringish(aw.get("name")).or_else(|| json_stringish(aw.get("id")));
+    }
+    if let Some(win) = data.get("active_window") {
+        state.active_window = json_stringish(win.get("address"))
+            .or_else(|| json_stringish(win.get("class")))
+            .or_else(|| json_stringish(win.get("title")));
+    }
+}
+
 fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
+    if event.event == "bread.hyprland.snapshot" {
+        apply_hyprland_snapshot(state, &event.data);
+        return;
+    }
+
+    if let Some(key) = hyprland_state_key(event.event.as_str()) {
+        match key {
+            "monitor.connected" => upsert_monitor(state, &event.data),
+            "monitor.disconnected" => {
+                if let Some(name) = event.data.get("name").and_then(Value::as_str) {
+                    if let Some(m) = state.monitors.iter_mut().find(|m| m.name == name) {
+                        m.connected = false;
+                    }
+                }
+            }
+            "workspace.changed" => {
+                state.active_workspace = workspace_id_from_data(&event.data);
+            }
+            "workspace.created" => {
+                if let Some(id) = workspace_id_from_data(&event.data) {
+                    if !state.workspaces.iter().any(|w| w.id == id) {
+                        state.workspaces.push(crate::core::types::Workspace {
+                            id,
+                            monitor: json_stringish(event.data.get("monitor")),
+                        });
+                    }
+                }
+            }
+            "workspace.destroyed" => {
+                if let Some(id) = workspace_id_from_data(&event.data) {
+                    state.workspaces.retain(|w| w.id != id);
+                }
+            }
+            "window.focus.changed" | "window.focused" => {
+                state.active_window = active_window_from_data(&event.data);
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match event.event.as_str() {
-        "bread.monitor.connected" => {
-            if let Some(name) = event.data.get("name").and_then(Value::as_str) {
-                if let Some(m) = state.monitors.iter_mut().find(|m| m.name == name) {
-                    m.connected = true;
-                } else {
-                    state.monitors.push(crate::core::types::Monitor {
-                        name: name.to_string(),
-                        connected: true,
-                        resolution: event
-                            .data
-                            .get("resolution")
-                            .and_then(Value::as_str)
-                            .map(ToString::to_string),
-                        position: event
-                            .data
-                            .get("position")
-                            .and_then(Value::as_str)
-                            .map(ToString::to_string),
-                    });
-                }
-            }
-        }
-        "bread.monitor.disconnected" => {
-            if let Some(name) = event.data.get("name").and_then(Value::as_str) {
-                if let Some(m) = state.monitors.iter_mut().find(|m| m.name == name) {
-                    m.connected = false;
-                }
-            }
-        }
-        "bread.workspace.changed" => {
-            let ws = event
-                .data
-                .get("workspace")
-                .or_else(|| event.data.get("id"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string);
-            state.active_workspace = ws;
-        }
-        "bread.window.focus.changed" | "bread.window.focused" => {
-            state.active_window = event
-                .data
-                .get("window")
-                .or_else(|| event.data.get("class"))
-                .or_else(|| event.data.get("address"))
-                .and_then(Value::as_str)
-                .map(ToString::to_string);
-        }
         "bread.device.connected" => {
             apply_device_change(state, &event.data, true);
         }
@@ -785,6 +910,67 @@ mod tests {
             &ev("bread.window.focused", json!({"address": "0xdeadbeef"})),
         );
         assert_eq!(state.active_window.as_deref(), Some("0xdeadbeef"));
+    }
+
+    #[test]
+    fn namespaced_hyprland_events_update_the_same_state() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.hyprland.monitor.connected",
+                json!({"name": "HDMI-A-1"}),
+            ),
+        );
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.hyprland.workspace.changed", json!({"id": 4})),
+        );
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.hyprland.window.focus.changed",
+                json!({"kind": "activewindow", "data": "kitty,foo"}),
+            ),
+        );
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.hyprland.workspace.created", json!({"workspace": "9"})),
+        );
+        assert_eq!(state.monitors.len(), 1);
+        assert_eq!(state.monitors[0].name, "HDMI-A-1");
+        assert_eq!(state.active_workspace.as_deref(), Some("4"));
+        assert_eq!(state.active_window.as_deref(), Some("kitty"));
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].id, "9");
+    }
+
+    #[test]
+    fn hyprland_snapshot_replaces_topology() {
+        let mut state = RuntimeState::default();
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.monitor.connected", json!({"name": "stale"})),
+        );
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.hyprland.snapshot",
+                json!({
+                    "monitors": [{"name": "eDP-1", "width": 1920, "height": 1200, "x": 0, "y": 0}],
+                    "workspaces": [{"id": 1, "name": "1", "monitor": "eDP-1"}],
+                    "active_workspace": {"id": 1, "name": "1"},
+                    "active_window": {"address": "0xabc", "class": "kitty"}
+                }),
+            ),
+        );
+        assert_eq!(state.monitors.len(), 1);
+        assert_eq!(state.monitors[0].name, "eDP-1");
+        assert_eq!(state.monitors[0].resolution.as_deref(), Some("1920x1200"));
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].id, "1");
+        assert_eq!(state.active_workspace.as_deref(), Some("1"));
+        assert_eq!(state.active_window.as_deref(), Some("0xabc"));
     }
 
     // ─── apply_device_change ──────────────────────────────────────────────

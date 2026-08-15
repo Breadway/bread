@@ -23,7 +23,9 @@ compositor backend — see `Documentation.md`'s
 
 **Current behavior:** both names fire by default (`[compat]
 legacy_hyprland_event_names = true`). Setting that flag to `false` suppresses
-the legacy names; only `bread.hyprland.*` fires.
+the legacy names; only `bread.hyprland.*` fires. The state engine applies
+*both* names (since v1.7.1), so disabling the legacy emit no longer freezes
+`bread.state` monitors / active workspace / active window.
 
 **Deferred follow-up (not yet scheduled):**
 

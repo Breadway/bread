@@ -196,6 +196,17 @@ impl EventNormalizer {
     }
 
     fn normalize_hyprland(&self, raw: &RawEvent) -> Vec<BreadEvent> {
+        if raw.kind == "hyprland.snapshot" {
+            return vec![BreadEvent {
+                event: "bread.hyprland.snapshot".to_string(),
+                timestamp: raw.timestamp,
+                source: AdapterSource::Hyprland,
+                id: bread_shared::new_event_id(),
+                caused_by: None,
+                data: raw.payload.clone(),
+            }];
+        }
+
         let kind = raw
             .payload
             .get("kind")

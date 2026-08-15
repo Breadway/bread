@@ -41,7 +41,7 @@ mod module_host_bridge;
 /// sourced `AdapterSource::App` emit may publish commands to another known
 /// app. `command` stays in `RESERVED_DOMAINS` so it cannot be claimed as
 /// an app id.
-const API_VERSION: &str = "1.7.0";
+const API_VERSION: &str = "1.7.1";
 
 #[derive(Clone)]
 pub struct Server {
