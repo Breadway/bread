@@ -382,6 +382,126 @@ async fn emit_with_app_source_rejects_wrong_namespace() -> Result<()> {
 }
 
 #[tokio::test]
+async fn emit_without_source_allows_well_formed_command_event() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // Unsourced `bread-emit bread.command.clip.clear` is the documented
+    // command-bus path — `command` is reserved so it cannot be an app id,
+    // but a well-formed command to a known app must still go through.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "event": "bread.command.clip.clear", "data": {} }),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "unsourced well-formed command event must be accepted: {result:?}"
+    );
+    assert_eq!(
+        result.unwrap().get("emitted").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_without_source_rejects_command_to_non_app() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // `power` is reserved and is not a known app — this must not sneak
+    // through the command-bus exception.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "event": "bread.command.power.off", "data": {} }),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "command to a reserved/non-app target must be rejected"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_without_source_still_rejects_hyprland_namespace() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let result = harness
+        .send_request(
+            "emit",
+            json!({ "event": "bread.hyprland.workspace.changed", "data": {} }),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "unsourced emit must still reject adapter-owned hyprland events"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_with_app_source_allows_command_to_another_app() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // An app may publish a command addressed to a different known app.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({
+                "source": "cast",
+                "kind": "bread.command.clip.clear",
+                "data": {}
+            }),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "sourced command to another known app must be accepted: {result:?}"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn emit_with_app_source_still_rejects_foreign_app_namespace() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    // `cast` must not be able to publish `bread.clip.*` events — only
+    // commands to clip, not clip's own inbound namespace.
+    let result = harness
+        .send_request(
+            "emit",
+            json!({
+                "source": "cast",
+                "kind": "bread.clip.copied",
+                "data": {}
+            }),
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "sourced emit must still reject a foreign app namespace"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn state_get_returns_specific_subtree() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
@@ -496,7 +616,10 @@ return M
         .await?;
     let entry = modules
         .as_array()
-        .and_then(|arr| arr.iter().find(|m| m.get("name").and_then(Value::as_str) == Some("scoped-test")))
+        .and_then(|arr| {
+            arr.iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("scoped-test"))
+        })
         .cloned()
         .ok_or_else(|| anyhow!("scoped-test module not found in modules state; dump: {modules}"))?;
 
@@ -511,7 +634,9 @@ return M
         "a module with a manifest that declares permissions must not be flagged ungated"
     );
 
-    let store = harness.trigger_and_await_result("test.scoped_result").await?;
+    let store = harness
+        .trigger_and_await_result("test.scoped_result")
+        .await?;
     assert_eq!(store.get("state_get_ok"), Some(&json!(true)));
     assert_eq!(
         store.get("fs_present"),
@@ -525,8 +650,16 @@ return M
     );
     assert_eq!(store.get("exec_capture_present"), Some(&json!(false)));
     assert_eq!(store.get("bluetooth_present"), Some(&json!(false)));
-    assert_eq!(store.get("json_present"), Some(&json!(true)), "baseline bread.json must still be present");
-    assert_eq!(store.get("log_present"), Some(&json!(true)), "baseline bread.log must still be present");
+    assert_eq!(
+        store.get("json_present"),
+        Some(&json!(true)),
+        "baseline bread.json must still be present"
+    );
+    assert_eq!(
+        store.get("log_present"),
+        Some(&json!(true)),
+        "baseline bread.log must still be present"
+    );
 
     harness.shutdown();
     Ok(())
@@ -568,7 +701,10 @@ return M
         .await?;
     let entry = modules
         .as_array()
-        .and_then(|arr| arr.iter().find(|m| m.get("name").and_then(Value::as_str) == Some("legacy-test")))
+        .and_then(|arr| {
+            arr.iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("legacy-test"))
+        })
         .cloned()
         .ok_or_else(|| anyhow!("legacy-test module not found in modules state; dump: {modules}"))?;
 
@@ -647,7 +783,9 @@ return M
                 .find(|m| m.get("name").and_then(Value::as_str) == Some("empty-perms-test"))
         })
         .cloned()
-        .ok_or_else(|| anyhow!("empty-perms-test module not found in modules state; dump: {modules}"))?;
+        .ok_or_else(|| {
+            anyhow!("empty-perms-test module not found in modules state; dump: {modules}")
+        })?;
 
     assert_eq!(entry.get("status").and_then(Value::as_str), Some("loaded"));
     assert_eq!(
@@ -656,7 +794,9 @@ return M
         "an explicit empty permissions list is a deliberate declaration, not 'undeclared'"
     );
 
-    let store = harness.trigger_and_await_result("test.empty_perms_result").await?;
+    let store = harness
+        .trigger_and_await_result("test.empty_perms_result")
+        .await?;
     assert_eq!(store.get("fs_present"), Some(&json!(false)));
     assert_eq!(store.get("state_present"), Some(&json!(false)));
 
@@ -969,7 +1109,10 @@ async fn event_causality_chain_threads_caused_by_across_handlers() -> Result<()>
     // Lua handler — its `caused_by` must be None. Everything downstream
     // (X, Y, Z) is emitted by `bread.emit()` from inside a running handler.
     harness
-        .send_request("emit", json!({ "event": "bread.chain.trigger", "data": {} }))
+        .send_request(
+            "emit",
+            json!({ "event": "bread.chain.trigger", "data": {} }),
+        )
         .await?;
 
     let mut events: HashMap<String, Value> = HashMap::new();
@@ -1038,10 +1181,14 @@ async fn event_causality_chain_threads_caused_by_across_handlers() -> Result<()>
         "Z should be caused_by Y's id"
     );
 
-    let ids: std::collections::HashSet<&str> =
-        [trigger_id.as_str(), x_id.as_str(), y_id.as_str(), z_id.as_str()]
-            .into_iter()
-            .collect();
+    let ids: std::collections::HashSet<&str> = [
+        trigger_id.as_str(),
+        x_id.as_str(),
+        y_id.as_str(),
+        z_id.as_str(),
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
         ids.len(),
         4,
@@ -1169,7 +1316,10 @@ async fn rules_toml_absent_is_a_no_op() -> Result<()> {
         rules_mod.get("status").and_then(Value::as_str),
         Some("loaded")
     );
-    assert!(rules_mod.get("last_error").and_then(Value::as_str).is_none());
+    assert!(rules_mod
+        .get("last_error")
+        .and_then(Value::as_str)
+        .is_none());
 
     harness.shutdown();
     Ok(())
@@ -1610,7 +1760,9 @@ enabled = false
         // breadd itself would.
         let deadline = Instant::now() + Duration::from_secs(55);
         while Instant::now() < deadline {
-            let modules = self.send_request("state.get", json!({"key": "modules"})).await?;
+            let modules = self
+                .send_request("state.get", json!({"key": "modules"}))
+                .await?;
             if let Some(arr) = modules.as_array() {
                 for m in arr {
                     if m.get("name").and_then(Value::as_str) == Some(name) {
@@ -1626,7 +1778,9 @@ enabled = false
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        Err(anyhow!("module '{name}' did not reach Loaded within timeout"))
+        Err(anyhow!(
+            "module '{name}' did not reach Loaded within timeout"
+        ))
     }
 
     /// Subscribe to `result_event`, send a `test.trigger` manual emit to

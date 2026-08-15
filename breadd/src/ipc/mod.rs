@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
-use bread_shared::apps::{event_domain, is_known_app, is_reserved_domain, validate_app_namespace};
+use bread_shared::apps::{
+    event_domain, is_known_app, is_reserved_domain, validate_app_namespace, validate_command_event,
+};
 use bread_shared::{now_unix_ms, AdapterSource, BreadEvent, RawEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -34,7 +36,12 @@ mod module_host_bridge;
 /// *Since 1.6.0* — Workstream G's `module_host.*` methods (hello handshake
 /// plus the RPC bridge a `bread-module-host` child uses in place of direct
 /// in-process `bread.*` bindings).
-const API_VERSION: &str = "1.6.0";
+/// *Since 1.7.0* — well-formed `bread.command.<known-app>.<verb>` is an
+/// explicit exception to the reserved-domain reject on unsourced emit, and
+/// sourced `AdapterSource::App` emit may publish commands to another known
+/// app. `command` stays in `RESERVED_DOMAINS` so it cannot be claimed as
+/// an app id.
+const API_VERSION: &str = "1.7.0";
 
 #[derive(Clone)]
 pub struct Server {
@@ -325,13 +332,17 @@ impl Server {
                     };
                     // For a sibling-app source, `kind` is the full dotted event
                     // name (e.g. "bread.clip.copied"), not a bare suffix — it
-                    // must live inside that app's own namespace.
+                    // must live inside that app's own namespace. Well-formed
+                    // `bread.command.<known-app>.<verb>` is the one exception:
+                    // an app may publish a command addressed to another known
+                    // app (see `validate_command_event`). Adapter namespaces
+                    // (`bread.power.*`, `bread.hyprland.*`, ...) stay rejected.
                     if let AdapterSource::App(app) = &source {
-                        if !validate_app_namespace(app, kind) {
+                        if !validate_app_namespace(app, kind) && !validate_command_event(kind) {
                             return Err((
                                 id,
                                 format!(
-                                    "event '{kind}' is not in the '{app}' namespace (must start with 'bread.{app}.')"
+                                    "event '{kind}' is not in the '{app}' namespace (must start with 'bread.{app}.') and is not a well-formed command event"
                                 ),
                             ));
                         }
@@ -363,7 +374,11 @@ impl Server {
                     // `bread.hyprland.*`, ...) — otherwise this path would
                     // let any same-UID process impersonate a real adapter
                     // event with nothing downstream able to tell the
-                    // difference.
+                    // difference. Well-formed `bread.command.<known-app>.<verb>`
+                    // is the documented exception: the command bus is
+                    // supposed to be publishable by any module or
+                    // `bread-emit` caller. Other reserved domains, and
+                    // `bread.command.<not-an-app>.*`, stay rejected.
                     let Some(event) = req.params.get("event").and_then(Value::as_str) else {
                         return Err((id, "missing event name".to_string()));
                     };
@@ -429,9 +444,9 @@ impl Server {
     /// impersonate a real adapter-owned event namespace.
     fn manual_emit(&self, event: &str, data: Value) -> std::result::Result<Value, String> {
         if let Some(domain) = event_domain(event) {
-            if is_reserved_domain(domain) {
+            if is_reserved_domain(domain) && !validate_command_event(event) {
                 return Err(format!(
-                    "event '{event}' claims the reserved '{domain}' domain — manual emit cannot impersonate an adapter-owned event; use a custom event name, or a sourced emit if this should go through the normalizer"
+                    "event '{event}' claims the reserved '{domain}' domain — manual emit cannot impersonate an adapter-owned event; use a custom event name, a well-formed bread.command.<app>.<verb>, or a sourced emit if this should go through the normalizer"
                 ));
             }
         }

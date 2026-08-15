@@ -19,7 +19,7 @@ file here.
 The service unit starts `breadd` as a user service after the graphical session is available.
 
 ```bash
-# Install and enable manually (if not using the PKGBUILD)
+# Install and enable manually (if not using bakery)
 mkdir -p ~/.config/systemd/user
 cp systemd/breadd.service ~/.config/systemd/user/
 systemctl --user daemon-reload

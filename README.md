@@ -42,10 +42,12 @@ return M
 ## Architecture
 
 ```
-breadd/          Rust daemon — event pipeline, state engine, IPC, adapter supervision
-bread-cli/       CLI frontend — talks to breadd over a Unix socket
-bread-shared/    Shared types — RawEvent, BreadEvent, AdapterSource
-packaging/       Arch PKGBUILD and systemd user service
+breadd/              Rust daemon — event pipeline, state engine, IPC, adapter supervision
+bread-cli/           CLI frontend — talks to breadd over a Unix socket
+bread-emit/          Tiny fire-and-forget IPC emitter (hooks / command bus)
+bread-module-host/   Out-of-process sandboxed Lua module runtime
+bread-shared/        Shared types — RawEvent, BreadEvent, AdapterSource
+packaging/           systemd user service unit (bakery installs this)
 ```
 
 The daemon is structured in four layers:
@@ -80,7 +82,7 @@ git clone https://git.breadway.dev/Breadway/bread.git
 cd bread
 ```
 
-Run the install script — it builds, symlinks `breadd` and `bread` into `~/.local/bin` (override with `BIN_DIR=…`), installs the systemd user service, and starts the daemon:
+Run the install script — it builds, symlinks `breadd`, `bread`, `bread-emit`, and `bread-module-host` into `~/.local/bin` (override with `BIN_DIR=…`), installs the systemd user service, and starts the daemon:
 
 ```bash
 bash scripts/install.sh
@@ -92,13 +94,16 @@ Or step by step (system-wide install):
 cargo build --release
 sudo install -Dm755 target/release/breadd /usr/bin/breadd
 sudo install -Dm755 target/release/bread /usr/bin/bread
+sudo install -Dm755 target/release/bread-emit /usr/bin/bread-emit
+sudo install -Dm755 target/release/bread-module-host /usr/bin/bread-module-host
 ```
 
-### Arch Linux (PKGBUILD)
+### Via bakery
+
+Prebuilt binaries ship through `bakery` (the bread-ecosystem package manager), not a PKGBUILD / pacman package:
 
 ```bash
-cd packaging/arch
-makepkg -si
+bakery install bread
 ```
 
 ### systemd user service

@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use bread_shared::{apps::validate_app_namespace, AdapterSource, BreadEvent, RawEvent};
+use bread_shared::{
+    apps::{validate_app_namespace, validate_command_event},
+    AdapterSource, BreadEvent, RawEvent,
+};
 use serde_json::{json, Value};
 
 /// How many multiples of `dedup_window_ms` an entry must be idle before eviction.
@@ -208,9 +211,11 @@ impl EventNormalizer {
             "workspace" | "workspacev2" => {
                 self.emit_hyprland_dual("bread.workspace.changed", raw.payload.clone(), raw)
             }
-            "createworkspace" => {
-                self.emit_hyprland_dual("bread.workspace.created", json!({ "workspace": data }), raw)
-            }
+            "createworkspace" => self.emit_hyprland_dual(
+                "bread.workspace.created",
+                json!({ "workspace": data }),
+                raw,
+            ),
             "destroyworkspace" => self.emit_hyprland_dual(
                 "bread.workspace.destroyed",
                 json!({ "workspace": data }),
@@ -589,7 +594,10 @@ impl EventNormalizer {
         let AdapterSource::App(app) = &raw.source else {
             return vec![];
         };
-        if !validate_app_namespace(app, &raw.kind) {
+        // Own-namespace events plus well-formed commands to another known
+        // app (the command bus). Anything else — including spoofed adapter
+        // namespaces — is dropped here even if it somehow crossed IPC.
+        if !validate_app_namespace(app, &raw.kind) && !validate_command_event(&raw.kind) {
             return vec![];
         }
         vec![BreadEvent {
@@ -997,7 +1005,11 @@ mod tests {
                 1,
             );
             let out = n.normalize(&ev);
-            assert_eq!(out.len(), 2, "kind {kind} should dual-emit exactly 2 events");
+            assert_eq!(
+                out.len(),
+                2,
+                "kind {kind} should dual-emit exactly 2 events"
+            );
             assert!(
                 out.iter().any(|e| &e.event == legacy_event),
                 "kind {kind} missing legacy event {legacy_event}"
@@ -1006,7 +1018,12 @@ mod tests {
                 out.iter().any(|e| &e.event == namespaced_event),
                 "kind {kind} missing namespaced event {namespaced_event}"
             );
-            let legacy_data = out.iter().find(|e| &e.event == legacy_event).unwrap().data.clone();
+            let legacy_data = out
+                .iter()
+                .find(|e| &e.event == legacy_event)
+                .unwrap()
+                .data
+                .clone();
             let namespaced_data = out
                 .iter()
                 .find(|e| &e.event == namespaced_event)
@@ -1450,6 +1467,65 @@ mod tests {
                 1
             );
         }
+    }
+
+    // ─── App / command bus ─────────────────────────────────────────────────
+
+    #[test]
+    fn app_own_namespace_passes_through() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::App("clip".into()),
+            "bread.clip.copied",
+            json!({"len": 4}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.clip.copied");
+    }
+
+    #[test]
+    fn app_command_to_another_known_app_passes_through() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::App("cast".into()),
+            "bread.command.clip.clear",
+            json!({}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.command.clip.clear");
+    }
+
+    #[test]
+    fn app_wrong_namespace_is_dropped() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&raw(
+            AdapterSource::App("cast".into()),
+            "bread.clip.copied",
+            json!({}),
+            1,
+        ));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn app_command_to_unknown_or_reserved_target_is_dropped() {
+        let n = EventNormalizer::new(0);
+        let power = n.normalize(&raw(
+            AdapterSource::App("cast".into()),
+            "bread.command.power.off",
+            json!({}),
+            1,
+        ));
+        assert!(power.is_empty());
+        let spoof = n.normalize(&raw(
+            AdapterSource::App("cast".into()),
+            "bread.hyprland.workspace.changed",
+            json!({}),
+            1,
+        ));
+        assert!(spoof.is_empty());
     }
 
     // ─── Helper ────────────────────────────────────────────────────────────

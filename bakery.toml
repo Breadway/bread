@@ -1,6 +1,6 @@
 name = "bread"
 description = "Reactive automation daemon and CLI for Linux desktops"
-binaries = ["breadd", "bread"]
+binaries = ["breadd", "bread", "bread-emit", "bread-module-host"]
 system_deps = ["systemd-libs", "openssl", "zlib"]
 optional_system_deps = ["bluez", "hyprland"]
 bread_deps = []
