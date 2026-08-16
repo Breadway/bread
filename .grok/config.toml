@@ -1,0 +1,12 @@
+# Copied from .claude/settings.local.json
+[permission]
+allow = [
+  "Bash(cargo test *)",
+  "Bash(/home/breadway/Projects/bread/target/debug/bread health *)",
+  "Bash(/home/breadway/Projects/bread/target/debug/bread sync *)",
+  "Bash(python3 *)",
+  "Bash(/home/breadway/Projects/bread/target/debug/bread modules *)",
+  "Bash(/home/breadway/Projects/bread/target/debug/bread doctor *)",
+  "Bash(/home/breadway/Projects/bread/target/debug/bread reload *)",
+  "Bash(cargo build *)",
+]
