@@ -28,7 +28,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           PKG_DIR="/srv/breadway-dl/bread/${VERSION}"
           mkdir -p "${PKG_DIR}"
-          for bin in breadd bread; do
+          for bin in breadd bread bread-emit bread-module-host; do
             cp "src/target/release/${bin}" "${PKG_DIR}/${bin}-x86_64"
             strip "${PKG_DIR}/${bin}-x86_64"
             sha256sum "${PKG_DIR}/${bin}-x86_64" | awk '{print $1}' \
@@ -48,9 +48,13 @@ jobs:
             echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set — refusing to regenerate index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone)"
             exit 1
           fi
-          rm -rf /tmp/bread-ecosystem-ci
-          git clone https://git.breadway.dev/Breadway/bread-ecosystem.git /tmp/bread-ecosystem-ci
-          bash /tmp/bread-ecosystem-ci/scripts/gen-index.sh
+          rm -rf /tmp/bread-ecosystem-ci-* 2>/dev/null || true
+          # mktemp: a fixed clone path races when multiple repos' release
+          # workflows run close together on the same self-hosted runner.
+          ECOSYSTEM_CI_DIR="$(mktemp -d /tmp/bread-ecosystem-ci-XXXXXX)"
+          git clone https://git.breadway.dev/Breadway/bread-ecosystem.git "${ECOSYSTEM_CI_DIR}"
+          bash "${ECOSYSTEM_CI_DIR}/scripts/gen-index.sh"
+          rm -rf "${ECOSYSTEM_CI_DIR}"
 
       - name: upload to GitHub Release
         env:
@@ -64,6 +68,10 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" --repo Breadway/bread \
             "${PKG_DIR}/breadd-x86_64" \
             "${PKG_DIR}/bread-x86_64" \
+            "${PKG_DIR}/bread-emit-x86_64" \
+            "${PKG_DIR}/bread-module-host-x86_64" \
             "${PKG_DIR}/breadd-x86_64.sha256" \
             "${PKG_DIR}/bread-x86_64.sha256" \
+            "${PKG_DIR}/bread-emit-x86_64.sha256" \
+            "${PKG_DIR}/bread-module-host-x86_64.sha256" \
             --clobber

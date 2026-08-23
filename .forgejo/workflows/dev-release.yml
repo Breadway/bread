@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           PKG_DIR="/srv/breadway-dl/dev/bread/${VERSION}"
           mkdir -p "${PKG_DIR}"
-          for bin in breadd bread; do
+          for bin in breadd bread bread-emit bread-module-host; do
             cp "src/target/release/${bin}" "${PKG_DIR}/${bin}-x86_64"
             strip "${PKG_DIR}/${bin}-x86_64"
             sha256sum "${PKG_DIR}/${bin}-x86_64" | awk '{print $1}' \
