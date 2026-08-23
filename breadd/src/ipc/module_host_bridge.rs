@@ -25,6 +25,7 @@
 //! directly from Lua bypasses every check in this file — that's the
 //! scenario the sandbox exists for, not this file.
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use bread_shared::{glob, ModuleHostHello, ModuleHostPush, ModulePermission, PermissionKind};
@@ -349,10 +350,7 @@ impl Server {
                 Ok(json!({ "ok": true }))
             }
             "module_host.fs_read" => {
-                if !permissions
-                    .iter()
-                    .any(|p| p.kind == PermissionKind::FsRead)
-                {
+                if !permissions.iter().any(|p| p.kind == PermissionKind::FsRead) {
                     return Err("fs.read not granted to this module".to_string());
                 }
                 let path = req
@@ -411,16 +409,17 @@ impl Server {
                     .and_then(Value::as_str)
                     .ok_or("missing cmd")?
                     .to_string();
-                if !bin_allowed(permissions, &cmd) {
-                    return Err("command is outside this module's granted exec bin scope".to_string());
-                }
+                let argv = exec_argv(permissions, &cmd)?;
                 tokio::task::spawn_blocking(move || {
-                    match std::process::Command::new("sh").arg("-c").arg(&cmd).status() {
+                    match std::process::Command::new(&argv[0])
+                        .args(&argv[1..])
+                        .status()
+                    {
                         Ok(status) if !status.success() => {
-                            warn!(cmd = %cmd, code = ?status.code(), "module_host.exec exited non-zero");
+                            warn!(cmd = %argv[0], code = ?status.code(), "module_host.exec exited non-zero");
                         }
                         Err(e) => {
-                            error!(cmd = %cmd, error = %e, "module_host.exec failed to spawn");
+                            error!(cmd = %argv[0], error = %e, "module_host.exec failed to spawn");
                         }
                         _ => {}
                     }
@@ -437,18 +436,17 @@ impl Server {
                     .and_then(Value::as_str)
                     .ok_or("missing cmd")?
                     .to_string();
-                if !bin_allowed(permissions, &cmd) {
-                    return Err("command is outside this module's granted exec bin scope".to_string());
-                }
+                let argv = exec_argv(permissions, &cmd)?;
                 let timeout_ms = req
                     .params
                     .get("timeout_ms")
                     .and_then(Value::as_u64)
                     .unwrap_or(2000);
-                let handle =
-                    tokio::task::spawn_blocking(move || {
-                        std::process::Command::new("sh").arg("-c").arg(&cmd).output()
-                    });
+                let handle = tokio::task::spawn_blocking(move || {
+                    std::process::Command::new(&argv[0])
+                        .args(&argv[1..])
+                        .output()
+                });
                 match tokio::time::timeout(Duration::from_millis(timeout_ms + 500), handle).await {
                     Ok(Ok(Ok(out))) => Ok(json!({
                         "ok": out.status.success(),
@@ -474,7 +472,9 @@ impl Server {
                     (
                         ModuleLoadState::LoadError,
                         ModuleHostOutcome::LoadError(
-                            error.clone().unwrap_or_else(|| "module load failed".to_string()),
+                            error
+                                .clone()
+                                .unwrap_or_else(|| "module load failed".to_string()),
                         ),
                     )
                 };
@@ -501,13 +501,14 @@ impl Server {
 
 /// Belt-and-suspenders path scoping for `fs_read`/`fs_write`: if the
 /// manifest declared a `path` hint for this permission kind, the requested
-/// path (after `~`-expansion) must fall under at least one granted prefix.
-/// No hint at all means this RPC-level check stays permissive (matching
-/// Workstream D's existing "un-hinted grant = ungated within that
-/// namespace" behavior) — Landlock's own ruleset (built independently in
-/// `module_host::apply_sandbox`) does NOT grant a filesystem rule for an
-/// un-hinted permission, so the direct `os`/`io` escape hatch remains
-/// kernel-denied for that case regardless of what this function returns.
+/// path (after `~`-expansion and canonicalize) must be a real descendant
+/// of at least one granted prefix. No hint at all means this RPC-level
+/// check stays permissive (matching Workstream D's existing "un-hinted
+/// grant = ungated within that namespace" behavior) — Landlock's own
+/// ruleset (built independently in `module_host::apply_sandbox`) does NOT
+/// grant a filesystem rule for an un-hinted permission, so the direct
+/// `os`/`io` escape hatch remains kernel-denied for that case regardless
+/// of what this function returns.
 fn path_allowed(permissions: &[ModulePermission], kind: PermissionKind, path: &str) -> bool {
     let hints: Vec<&String> = permissions
         .iter()
@@ -517,18 +518,93 @@ fn path_allowed(permissions: &[ModulePermission], kind: PermissionKind, path: &s
     if hints.is_empty() {
         return true;
     }
-    let expanded = bread_shared::expand_path(path);
+    let Some(requested) = resolve_scoped_path(path) else {
+        return false;
+    };
     hints.iter().any(|hint| {
-        let hint_expanded = bread_shared::expand_path(hint);
-        expanded.starts_with(&hint_expanded)
+        let Some(granted) = resolve_scoped_path(hint) else {
+            return false;
+        };
+        // Path::starts_with is component-wise; str::starts_with would let
+        // `/Wallpapers-evil` match a `/Wallpapers` grant.
+        requested.starts_with(&granted)
     })
 }
 
-/// Same idea as [`path_allowed`] for `exec`'s `bin` hint: compares by file
-/// name (so `bin = "hyprpaper"` matches a command invoking
-/// `/usr/bin/hyprpaper` as well as a bare `hyprpaper`) or an exact leading
-/// token match.
-fn bin_allowed(permissions: &[ModulePermission], cmd: &str) -> bool {
+/// Canonicalize for containment: existing paths resolve symlinks and `..`;
+/// new files canonicalize the parent then re-join the filename. Anything
+/// that still contains `..` after lexical normalization is rejected.
+fn resolve_scoped_path(path: &str) -> Option<PathBuf> {
+    let expanded = bread_shared::expand_path(path);
+    if let Ok(canon) = expanded.canonicalize() {
+        return Some(canon);
+    }
+    let parent = expanded.parent().filter(|p| !p.as_os_str().is_empty());
+    if let (Some(parent), Some(name)) = (parent, expanded.file_name()) {
+        if let Ok(parent_canon) = parent.canonicalize() {
+            return Some(parent_canon.join(name));
+        }
+    }
+    lexical_abs(&expanded)
+}
+
+fn lexical_abs(path: &Path) -> Option<PathBuf> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path).ok()?
+    };
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    return None;
+                }
+            }
+            rest => out.push(rest),
+        }
+    }
+    if out.components().any(|c| matches!(c, Component::ParentDir)) {
+        return None;
+    }
+    Some(out)
+}
+
+/// Split `cmd` into argv without a shell. Metacharacters are rejected so a
+/// hinted binary cannot smuggle extra commands (`hyprpaper; curl evil`).
+fn parse_exec_argv(cmd: &str) -> Option<Vec<String>> {
+    if cmd.chars().any(|c| {
+        matches!(
+            c,
+            '|' | ';' | '&' | '$' | '`' | '\n' | '\r' | '<' | '>' | '(' | ')'
+        )
+    }) {
+        return None;
+    }
+    let argv: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
+    if argv.is_empty() {
+        None
+    } else {
+        Some(argv)
+    }
+}
+
+/// Parse `cmd` and enforce the exec `bin` hint against argv[0].
+fn exec_argv(permissions: &[ModulePermission], cmd: &str) -> Result<Vec<String>, String> {
+    let argv = parse_exec_argv(cmd)
+        .ok_or_else(|| "command contains shell metacharacters or is empty".to_string())?;
+    if !bin_allowed(permissions, &argv[0]) {
+        return Err("command is outside this module's granted exec bin scope".to_string());
+    }
+    Ok(argv)
+}
+
+/// Same idea as [`path_allowed`] for `exec`'s `bin` hint: compares argv[0]
+/// by file name (so `bin = "hyprpaper"` matches `/usr/bin/hyprpaper` as
+/// well as a bare `hyprpaper`) or an exact path match.
+fn bin_allowed(permissions: &[ModulePermission], program: &str) -> bool {
     let hints: Vec<&String> = permissions
         .iter()
         .filter(|p| p.kind == PermissionKind::Exec)
@@ -537,16 +613,109 @@ fn bin_allowed(permissions: &[ModulePermission], cmd: &str) -> bool {
     if hints.is_empty() {
         return true;
     }
-    let first_word = cmd.split_whitespace().next().unwrap_or("");
-    let cmd_leaf = std::path::Path::new(first_word)
+    let cmd_leaf = Path::new(program)
         .file_name()
         .and_then(|f| f.to_str())
-        .unwrap_or(first_word);
+        .unwrap_or(program);
     hints.iter().any(|hint| {
-        let hint_leaf = std::path::Path::new(hint.as_str())
+        let hint_leaf = Path::new(hint.as_str())
             .file_name()
             .and_then(|f| f.to_str())
             .unwrap_or(hint.as_str());
-        cmd_leaf == hint_leaf || first_word == hint.as_str()
+        cmd_leaf == hint_leaf || program == hint.as_str()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fs_grant(kind: PermissionKind, path: &str) -> Vec<ModulePermission> {
+        vec![ModulePermission {
+            kind,
+            path: Some(path.to_string()),
+            bin: None,
+        }]
+    }
+
+    fn exec_grant(bin: &str) -> Vec<ModulePermission> {
+        vec![ModulePermission {
+            kind: PermissionKind::Exec,
+            path: None,
+            bin: Some(bin.to_string()),
+        }]
+    }
+
+    #[test]
+    fn path_allowed_denies_dotdot_escape_from_granted_prefix() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wallpapers = tmp.path().join("Wallpapers");
+        std::fs::create_dir(&wallpapers).unwrap();
+        let granted = wallpapers.to_str().unwrap();
+        let perms = fs_grant(PermissionKind::FsRead, granted);
+
+        let escape = wallpapers.join("../../.ssh/id_rsa");
+        assert!(
+            !path_allowed(&perms, PermissionKind::FsRead, escape.to_str().unwrap()),
+            "Wallpapers/../../.ssh/id_rsa must not match a Wallpapers grant"
+        );
+    }
+
+    #[test]
+    fn path_allowed_denies_string_prefix_sibling() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wallpapers = tmp.path().join("Wallpapers");
+        let evil = tmp.path().join("Wallpapers-evil");
+        std::fs::create_dir(&wallpapers).unwrap();
+        std::fs::create_dir(&evil).unwrap();
+        let secret = evil.join("secret");
+        std::fs::write(&secret, "x").unwrap();
+        let perms = fs_grant(PermissionKind::FsRead, wallpapers.to_str().unwrap());
+        assert!(!path_allowed(
+            &perms,
+            PermissionKind::FsRead,
+            secret.to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn path_allowed_accepts_real_descendant_and_new_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wallpapers = tmp.path().join("Wallpapers");
+        std::fs::create_dir(&wallpapers).unwrap();
+        let existing = wallpapers.join("bg.png");
+        std::fs::write(&existing, "x").unwrap();
+        let perms = fs_grant(PermissionKind::FsWrite, wallpapers.to_str().unwrap());
+        assert!(path_allowed(
+            &perms,
+            PermissionKind::FsWrite,
+            existing.to_str().unwrap()
+        ));
+        let new_file = wallpapers.join("new.png");
+        assert!(path_allowed(
+            &perms,
+            PermissionKind::FsWrite,
+            new_file.to_str().unwrap()
+        ));
+    }
+
+    #[test]
+    fn exec_argv_denies_shell_chaining_when_bin_hinted() {
+        let perms = exec_grant("hyprpaper");
+        assert!(exec_argv(&perms, "hyprpaper; curl evil").is_err());
+        assert!(exec_argv(&perms, "hyprpaper").is_ok());
+        assert!(exec_argv(&perms, "/usr/bin/hyprpaper --config x").is_ok());
+        assert!(exec_argv(&perms, "curl evil").is_err());
+    }
+
+    #[test]
+    fn parse_exec_argv_rejects_metacharacters() {
+        assert!(parse_exec_argv("hyprpaper; curl evil").is_none());
+        assert!(parse_exec_argv("hyprpaper | curl evil").is_none());
+        assert!(parse_exec_argv("hyprpaper && curl evil").is_none());
+        assert_eq!(
+            parse_exec_argv("hyprpaper --config x"),
+            Some(vec!["hyprpaper".into(), "--config".into(), "x".into()])
+        );
+    }
 }

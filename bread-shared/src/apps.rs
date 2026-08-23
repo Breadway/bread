@@ -32,7 +32,9 @@ pub const KNOWN_APPS: &[&str] = &[
 /// `workspace`, `window`, and `monitor` added (event families the Hyprland
 /// and Bluetooth adapters already published under, but that were missing
 /// from this list) when this became a spoofing-prevention boundary and not
-/// just an app-id-conflict one. Since: v1.7 — command-bus exception.*
+/// just an app-id-conflict one. Since: v1.7 — command-bus exception.
+/// `module`, `state`, `widget`, and `reload` are daemon-synthesized
+/// families and must stay unclaimable.*
 const RESERVED_DOMAINS: &[&str] = &[
     "terminal",
     "git",
@@ -53,6 +55,10 @@ const RESERVED_DOMAINS: &[&str] = &[
     "workspace",
     "window",
     "monitor",
+    "module",
+    "state",
+    "widget",
+    "reload",
 ];
 
 /// Whether `id` is a registered sibling-app id.
@@ -174,6 +180,10 @@ mod tests {
             "monitor",
             "window",
             "system",
+            "module",
+            "state",
+            "widget",
+            "reload",
         ] {
             assert!(
                 is_reserved_domain(domain),
