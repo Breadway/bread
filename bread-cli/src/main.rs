@@ -1,3 +1,4 @@
+mod init;
 mod hooks_git;
 mod hooks_shell;
 mod modules_mgmt;
@@ -98,6 +99,22 @@ enum Commands {
         /// Output raw JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Install bread's Hyprland compositor layer-rule integration
+    /// (breadbar/breadbox blur, ignore_alpha, animation) into
+    /// ~/.config/hypr/hyprland.lua, with consent, a backup, and full undo.
+    /// See bread-cli/src/init.rs for the design rationale.
+    Init {
+        /// Print the proposed diff and change nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation prompt (for scripted/image builds)
+        #[arg(long)]
+        yes: bool,
+        /// Remove the previously installed marked block instead of
+        /// installing it
+        #[arg(long)]
+        undo: bool,
     },
 }
 
@@ -223,6 +240,9 @@ async fn main() -> Result<()> {
             } else {
                 print_doctor(&socket).await?;
             }
+        }
+        Commands::Init { dry_run, yes, undo } => {
+            init::run(dry_run, yes, undo)?;
         }
     }
 
@@ -691,6 +711,7 @@ async fn print_doctor(socket: &Path) -> Result<()> {
         println!();
         println!("  start the daemon:   systemctl --user start breadd");
         println!("  view logs:          journalctl --user -u breadd -f");
+        print_compositor_doctor_section();
         return Ok(());
     }
 
@@ -774,6 +795,20 @@ fn render_doctor(health: &Value) {
                 println!("  {entry}");
             }
         }
+    }
+
+    print_compositor_doctor_section();
+}
+
+/// Compositor integration status — pure filesystem check, independent of
+/// the daemon, so it prints the same whether breadd is up or not. Reports
+/// only; `bread doctor` never installs anything (that's `bread init`'s
+/// job).
+fn print_compositor_doctor_section() {
+    println!();
+    println!("compositor");
+    for line in init::doctor_report(&init::hypr_dir()) {
+        println!("{line}");
     }
 }
 
