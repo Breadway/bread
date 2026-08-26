@@ -237,6 +237,12 @@ bread modules audit <name>            # Scan a module's Lua source and suggest a
 # Hooks
 bread hooks install-shell [shell]     # Install precmd/preexec/chpwd shell hooks (auto-detects $SHELL)
 bread hooks install-git               # Install git hooks (post-commit/checkout/merge) in the current repo
+
+# Compositor integration
+bread init                            # Install breadbar's Hyprland layer-rule integration (shows a diff, asks to confirm)
+bread init --dry-run                  # Print the proposed diff only, change nothing
+bread init --yes                      # Skip the confirmation prompt (scripted/image builds)
+bread init --undo                     # Remove the previously installed integration
 ```
 
 ---

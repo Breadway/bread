@@ -13,6 +13,20 @@
 //! user later doesn't want it, an rc-file edit is much harder to notice and
 //! undo than a printed snippet they chose to paste in.
 //!
+//! `bread init` (`init.rs`) looks like it breaks this rule — it does
+//! propose an edit to a user's own `hyprland.lua` — but it's a narrower,
+//! consent-gated exception, not a reversal of it. The difference is what's
+//! silent about the failure mode: a missing shell hook is invisible
+//! enrichment (no telemetry, nothing looks wrong), so leaving it to the
+//! user to paste in at their own pace is the right default. A missing
+//! compositor layer rule is not invisible — breadbar renders unblurred and
+//! with the wrong opacity, which reads as "this app is broken," not
+//! "optional feature not enabled," and there's no snippet a user could be
+//! expected to reverse-engineer for that. `init.rs` earns the edit by
+//! showing the exact diff, requiring explicit consent (prompt, `--yes`, or
+//! nothing at all without a TTY), backing up the file first, and shipping
+//! a real `--undo`. See `init.rs`'s module docs for the full rationale.
+//!
 //! # Why bread-emit, not `bread emit`
 //!
 //! The generated hooks shell out to the separate `bread-emit` binary
