@@ -822,9 +822,13 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
 
-    // Event emitted before any reload.
+    // Event emitted before any reload. A non-reserved event name: `reload` is
+    // an adapter-owned domain, so a manual `emit` of `bread.reload.*` is now
+    // rejected by the normalizer (see "Allow well-formed bread.command events
+    // on the emit bus"). The name here is incidental — this test only cares
+    // that events flow through the pipeline before and after a reload storm.
     harness
-        .send_request("emit", json!({"event": "bread.reload.before", "data": {}}))
+        .send_request("emit", json!({"event": "bread.reloadtest.before", "data": {}}))
         .await?;
 
     // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
@@ -845,7 +849,7 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // The pipeline must have resumed: an event emitted *after* the reloads
     // still flows through normalization into the replay buffer.
     harness
-        .send_request("emit", json!({"event": "bread.reload.after", "data": {}}))
+        .send_request("emit", json!({"event": "bread.reloadtest.after", "data": {}}))
         .await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -859,7 +863,7 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
         .filter_map(|e| e.get("event").and_then(Value::as_str))
         .collect();
     assert!(
-        names.contains(&"bread.reload.after"),
+        names.contains(&"bread.reloadtest.after"),
         "event pipeline did not resume after reload; got {names:?}"
     );
 
