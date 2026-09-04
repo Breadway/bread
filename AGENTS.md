@@ -25,7 +25,7 @@ Treat that file, not this one, as the source of truth.
 - `rc-release.yml` — `vX.Y.Z-rc.N` tag.
 - `release.yml` — other `v*` tags.
 
-All three run on the self-hosted hestia runner. Nothing else runs on
+All three run on the self-hosted runner. Nothing else runs on
 plain commits or PRs. Distribution is `bakery`, not a PKGBUILD.
 
 ## Local architecture (still true)
