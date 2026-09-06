@@ -59,7 +59,7 @@ enum Commands {
         /// Render events as a causality tree via `caused_by` instead of a
         /// flat stream (events emitted from inside a `bread.emit()` call
         /// made by another event's Lua handler are nested under it).
-        /// Overrides `--json` — tree rendering always uses the formatted view.
+        /// Overrides `--json`: tree rendering always uses the formatted view.
         #[arg(long)]
         tree: bool,
     },
@@ -336,10 +336,10 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
             println!("status:       {}", status);
             match &m.permissions {
                 None => println!(
-                    "permissions:  (none declared — full, ungated bread.* access; see 'bread doctor')"
+                    "permissions:  (none declared: full, ungated bread.* access; see 'bread doctor')"
                 ),
                 Some(perms) if perms.is_empty() => {
-                    println!("permissions:  (declared empty — baseline access only)")
+                    println!("permissions:  (declared empty: baseline access only)")
                 }
                 Some(perms) => {
                     println!("permissions:");
@@ -366,7 +366,7 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
             let suggested = modules_mgmt::audit_module(&module_dir)?;
             if suggested.is_empty() {
                 println!(
-                    "bread: no capability-gated bread.* calls found in '{}' — \
+                    "bread: no capability-gated bread.* calls found in '{}': \
                      it appears to only use baseline APIs (events, timers, json, \
                      logging). Declaring `permissions = []` in bread.module.toml \
                      documents that intentionally and avoids the 'no permissions \
@@ -376,7 +376,7 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
                 return Ok(());
             }
             println!(
-                "bread: suggested permissions for '{}' (best-effort static scan — \
+                "bread: suggested permissions for '{}' (best-effort static scan: \
                  review before pasting into bread.module.toml; false positives \
                  are possible, missing an actually-needed permission should be rare \
                  for direct bread.exec()-style call sites):\n",
@@ -461,7 +461,7 @@ async fn stream_events(
     tree: bool,
 ) -> Result<()> {
     // Tree rendering needs `id`/`caused_by` visible in a consistent shape,
-    // so it always uses the formatted view — a live-streaming-friendly
+    // so it always uses the formatted view: a live-streaming-friendly
     // indent-as-you-go tree rather than buffering the whole stream.
     let mut causality = CausalityTracker::default();
 
@@ -527,8 +527,8 @@ async fn stream_events(
 }
 
 /// Tracks `id` -> `caused_by` for events seen so far in this stream/replay
-/// batch, so each new event can be indented under its parent as it arrives
-/// — no buffering, no waiting for the stream to end. An event whose parent
+/// batch, so each new event can be indented under its parent as it arrives:
+/// no buffering, no waiting for the stream to end. An event whose parent
 /// hasn't been seen yet (e.g. the parent predates a replay window, or the
 /// causing event is filtered out by the subscription pattern) is rendered
 /// as its own root rather than blocking on a parent that may never show up.
@@ -766,7 +766,7 @@ fn render_doctor(health: &Value) {
             if ungated {
                 ungated_count += 1;
                 println!(
-                    "    └ ⚠ running with full, ungated access — no permissions \
+                    "    └ ⚠ running with full, ungated access: no permissions \
                      manifest declared (add `[[permissions]]` to its \
                      bread.module.toml, or run `bread modules audit {name}` \
                      for a suggested block)"
@@ -776,7 +776,7 @@ fn render_doctor(health: &Value) {
         if ungated_count > 0 {
             println!();
             println!(
-                "  {ungated_count} module(s) running with full, ungated bread.* access — \
+                "  {ungated_count} module(s) running with full, ungated bread.* access: \
                  see above"
             );
         }
@@ -800,7 +800,7 @@ fn render_doctor(health: &Value) {
     print_compositor_doctor_section();
 }
 
-/// Compositor integration status — pure filesystem check, independent of
+/// Compositor integration status: pure filesystem check, independent of
 /// the daemon, so it prints the same whether breadd is up or not. Reports
 /// only; `bread doctor` never installs anything (that's `bread init`'s
 /// job).

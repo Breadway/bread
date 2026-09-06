@@ -125,7 +125,7 @@ mod tests {
         t.add_with_id(SubscriptionId(2), "b".into(), false);
         t.add_with_id(SubscriptionId(3), "c".into(), false);
 
-        // Remove the middle entry — swap_remove will move entry 3 into the slot.
+        // Remove the middle entry: swap_remove will move entry 3 into the slot.
         assert!(t.remove(SubscriptionId(2)));
 
         // Subsequent removes still work, proving the by_id index was kept consistent.

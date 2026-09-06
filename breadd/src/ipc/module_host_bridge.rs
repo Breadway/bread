@@ -1,14 +1,14 @@
 //! The `module_host.*` side of the IPC protocol (Workstream G): once a
 //! connection presents a valid one-time token via `module_host.hello`, this
-//! module takes over its remaining lifetime as a bidirectional RPC bridge —
-//! ordinary request/response lines interleaved with unsolicited
-//! event/timer pushes — for exactly one `bread-module-host` child.
+//! module takes over its remaining lifetime as a bidirectional RPC bridge
+//! (ordinary request/response lines interleaved with unsolicited
+//! event/timer pushes) for exactly one `bread-module-host` child.
 //!
 //! # Wire shape
 //!
 //! Requests/responses reuse the existing `IpcRequest`/`IpcResponse`
 //! envelope unchanged. Pushes are a separate, `"push"`-tagged envelope
-//! (`bread_shared::ModuleHostPush`) that never collides with a response —
+//! (`bread_shared::ModuleHostPush`) that never collides with a response:
 //! see that type's doc comment. A single `mpsc` channel (`out_tx`/`out_rx`)
 //! feeds one writer task so both kinds of outgoing line interleave safely
 //! on the one underlying socket without any extra locking.
@@ -16,13 +16,13 @@
 //! # Where the "belt" is, relative to the "suspenders"
 //!
 //! Every method here re-checks the module's granted `PermissionKind`s
-//! before doing anything — `fs_read`/`fs_write`/`exec`/`exec_capture`
+//! before doing anything: `fs_read`/`fs_write`/`exec`/`exec_capture`
 //! additionally check the manifest's `path`/`bin` scoping hint. This is
 //! the belt; `module_host::apply_sandbox`'s Landlock ruleset (enforced by
 //! the kernel on the child process directly, independent of whether the
 //! child even uses this RPC bridge at all) is the suspenders. A module
 //! that skips this bridge entirely and calls `os.execute`/`io.open`
-//! directly from Lua bypasses every check in this file — that's the
+//! directly from Lua bypasses every check in this file: that's the
 //! scenario the sandbox exists for, not this file.
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -181,7 +181,7 @@ impl Server {
 
         // The connection dropped before the module ever reported
         // load-success/load-failure (e.g. it crashed mid-`init.lua`, or
-        // never got that far) — unblock whatever's still waiting in
+        // never got that far): unblock whatever's still waiting in
         // `spawn_module_host` rather than leaving it to time out.
         if let Some(tx) = outcome_tx.take() {
             let _ = tx.send(ModuleHostOutcome::LoadError(format!(
@@ -504,7 +504,7 @@ impl Server {
 /// path (after `~`-expansion and canonicalize) must be a real descendant
 /// of at least one granted prefix. No hint at all means this RPC-level
 /// check stays permissive (matching Workstream D's existing "un-hinted
-/// grant = ungated within that namespace" behavior) — Landlock's own
+/// grant = ungated within that namespace" behavior): Landlock's own
 /// ruleset (built independently in `module_host::apply_sandbox`) does NOT
 /// grant a filesystem rule for an un-hinted permission, so the direct
 /// `os`/`io` escape hatch remains kernel-denied for that case regardless

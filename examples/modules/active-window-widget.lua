@@ -1,11 +1,11 @@
--- active-window-widget — shows the focused app right next to the
+-- active-window-widget: shows the focused app right next to the
 -- workspace pills, live-updated via bread.state.watch (no polling, no
 -- bread.on needed).
 --
 -- Demonstrates: WidgetPlacement "right_of_workspaces", a state-watch-driven
 -- widget (as opposed to a timer or event handler), and calling
 -- bread.widget.update from inside the watch callback. breadbar's own bar
--- doesn't show the focused window anywhere today — this adds that for free.
+-- doesn't show the focused window anywhere today: this adds that for free.
 --
 -- Drop-in: copy into ~/.config/bread/modules/. Zero configuration.
 
@@ -13,7 +13,7 @@ local M = bread.module({ name = "active-window-widget", version = "1.0.0" })
 
 local function label_for(window)
     -- A JSON null (no window focused) doesn't necessarily arrive as Lua nil
-    -- through bread.state.* — mlua's serde bridge can hand back a distinct
+    -- through bread.state.*: mlua's serde bridge can hand back a distinct
     -- null sentinel instead, which `not window` won't catch. Guard on the
     -- type directly so any non-string value (nil, the sentinel, ...) falls
     -- through to the placeholder rather than crashing on #window below.

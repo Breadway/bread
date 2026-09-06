@@ -24,7 +24,7 @@ pub use permissions::{ModulePermission, PermissionKind};
 ///
 /// Not `Copy`: the [`App`](AdapterSource::App) variant carries an owned
 /// `String` (a sibling `bread*` app id), so callers that used to copy a
-/// `AdapterSource` by value now `.clone()` it — see `breadd/src/core/normalizer.rs`
+/// `AdapterSource` by value now `.clone()` it; see `breadd/src/core/normalizer.rs`
 /// for the (small, compiler-driven) set of call sites this touches.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -41,18 +41,18 @@ pub enum AdapterSource {
     /// Rust-code-originated sends via `emit_tx` (e.g. `bread.system.startup`,
     /// `bread.profile.activated`, `bread.state.changed.*`, and Lua's
     /// `bread.emit()` binding). Never assignable from data that arrived
-    /// over the IPC socket — see [`Manual`](AdapterSource::Manual) for that
-    /// case. *Since: v1.5 — this constraint is now enforced; previously the
+    /// over the IPC socket; see [`Manual`](AdapterSource::Manual) for that
+    /// case. *Since: v1.5, this constraint is now enforced; previously the
     /// IPC `emit` method's no-`source` path could also tag events `System`.*
     System,
-    /// A manual `emit` IPC request with no `source` param — a human or
+    /// A manual `emit` IPC request with no `source` param: a human or
     /// script poked the daemon's Unix socket directly (e.g. `bread emit
     /// <event>` for testing Lua handlers without unplugging cables).
     /// Distinct from [`System`](AdapterSource::System) so downstream Lua
     /// modules and tooling can tell "someone manually injected this event"
     /// apart from "a real adapter observed this" or "the daemon itself
     /// produced this." The IPC boundary restricts which event names may be
-    /// tagged this way — it may not claim an adapter-owned namespace (see
+    /// tagged this way; it may not claim an adapter-owned namespace (see
     /// `apps::is_reserved_domain`), but is otherwise free for custom/test
     /// event names. *Since: v1.5*
     Manual,
@@ -72,7 +72,7 @@ pub enum AdapterSource {
     Remote,
     /// A sibling `bread*` application (breadclip, breadpad, ...), identified
     /// by its registered app id (see [`apps::KNOWN_APPS`]). Confined to the
-    /// `bread.<app>.*` event namespace — enforced at the IPC boundary via
+    /// `bread.<app>.*` event namespace; enforced at the IPC boundary via
     /// [`apps::validate_app_namespace`], not by this type itself.
     App(String),
 }
@@ -89,7 +89,7 @@ pub struct RawEvent {
     pub source: AdapterSource,
     /// Adapter-specific event kind (e.g. `"workspace"`, `"add"`, `"battery"`).
     pub kind: String,
-    /// Adapter-specific JSON payload — not stable across versions.
+    /// Adapter-specific JSON payload, not stable across versions.
     pub payload: serde_json::Value,
     /// Unix epoch milliseconds when the event was observed.
     pub timestamp: u64,
@@ -113,7 +113,7 @@ pub struct BreadEvent {
     pub data: serde_json::Value,
     /// Unique id for this specific event instance, assigned at construction.
     ///
-    /// *Since: v1.5* — enables causality tracking (`caused_by`) across chains
+    /// *Since: v1.5*, enables causality tracking (`caused_by`) across chains
     /// of Lua modules that re-emit events from inside `bread.on` handlers.
     pub id: String,
     /// The `id` of the event whose Lua handler emitted this event via
@@ -123,7 +123,7 @@ pub struct BreadEvent {
     /// (adapter-normalized events, IPC `emit`, daemon-internal sends like
     /// `bread.system.startup` / `bread.profile.activated`). Populated only
     /// when the event was constructed by `bread.emit()` while a subscriber
-    /// callback was synchronously running — see the "current dispatch id"
+    /// callback was synchronously running; see the "current dispatch id"
     /// mechanism on `breadd`'s Lua engine.
     ///
     /// *Since: v1.5*
@@ -142,7 +142,7 @@ impl BreadEvent {
     /// normalizer, which carries `RawEvent::timestamp` through unchanged.
     ///
     /// Like [`BreadEvent::new`], this always assigns a fresh `id` and leaves
-    /// `caused_by` unset — callers that need to thread causality set
+    /// `caused_by` unset; callers that need to thread causality set
     /// `caused_by` on the returned value themselves.
     pub fn with_timestamp(
         event: impl Into<String>,
@@ -199,7 +199,7 @@ struct SocketPathConfig {
 ///
 /// Shared by every socket client that lives outside the daemon itself (`bread-emit`, and
 /// `bread-client` in `bread-ecosystem/bread-utils`) so they can't drift from how the daemon
-/// actually resolves its own socket — before this existed, `bread-emit` carried its own
+/// actually resolves its own socket. Before this existed, `bread-emit` carried its own
 /// hand-rolled copy of this exact logic.
 pub fn resolve_socket_path() -> std::path::PathBuf {
     if let Some(home) = dirs::home_dir() {

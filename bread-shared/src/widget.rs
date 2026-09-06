@@ -77,14 +77,14 @@ fn default_orientation() -> Orientation {
     Orientation::Horizontal
 }
 
-/// A bounded, typed vocabulary for a node's appearance — the alternative to
+/// A bounded, typed vocabulary for a node's appearance: the alternative to
 /// letting Lua hand the renderer a raw CSS/style string. Every field is a
 /// small closed enum, so an invalid value is simply a deserialization error,
 /// the same as any other malformed field; there is no free-text surface here
 /// for a module to smuggle style-string injection through.
 ///
 /// Fields left `None` mean "renderer default" (see `render.rs`'s `build_node`
-/// for what that default looks like), not "no style" — a node with no
+/// for what that default looks like), not "no style": a node with no
 /// `style` at all is fully equivalent to one whose every field is `None`.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 pub struct WidgetStyle {
@@ -105,7 +105,7 @@ pub struct WidgetStyle {
 pub enum SemanticColor {
     /// Foreground / body text color.
     Fg,
-    /// Muted foreground — the existing `.dim` look, formalized.
+    /// Muted foreground: the existing `.dim` look, formalized.
     Dim,
     Accent,
     Red,
@@ -123,10 +123,10 @@ pub enum FontWeight {
     Bold,
 }
 
-/// Text size scale (10/12/14/16/20px) — `sm`/`md` match `bread-theme::tokens`'
+/// Text size scale (10/12/14/16/20px): `sm`/`md` match `bread-theme::tokens`'
 /// existing `FONT_SIZE_SECONDARY`/`FONT_SIZE_BASE` rather than inventing a
 /// second set of magic numbers; `xs`/`lg`/`xl` fill out the rest of the scale
-/// (the spacing scale's 4/8/12/16/20px is for padding/radius, not text —
+/// (the spacing scale's 4/8/12/16/20px is for padding/radius, not text:
 /// applying it directly to `font-size` renders illegibly at the small end).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -245,7 +245,7 @@ impl std::fmt::Display for WidgetValidationError {
 impl std::error::Error for WidgetValidationError {}
 
 /// A CSS class is restricted to a conservative identifier shape so widget
-/// styling can only opt into classes predefined in breadbar's stylesheet —
+/// styling can only opt into classes predefined in breadbar's stylesheet:
 /// there is no raw style/CSS injection surface from Lua.
 fn is_valid_class(class: &str) -> bool {
     let mut chars = class.chars();
@@ -260,7 +260,7 @@ fn is_valid_class(class: &str) -> bool {
 }
 
 impl WidgetNode {
-    /// The node's CSS class hook, if any — a renderer should apply this via
+    /// The node's CSS class hook, if any: a renderer should apply this via
     /// its GTK equivalent of `add_css_class` rather than injecting raw style.
     pub fn class(&self) -> Option<&str> {
         match self {
@@ -271,7 +271,7 @@ impl WidgetNode {
         }
     }
 
-    /// The node's typed style vocabulary, if any — a renderer maps each
+    /// The node's typed style vocabulary, if any: a renderer maps each
     /// `Some` field to a predefined CSS class (see `render.rs`'s
     /// `apply_style`), never to raw injected CSS.
     pub fn style(&self) -> Option<&WidgetStyle> {
@@ -283,7 +283,7 @@ impl WidgetNode {
         }
     }
 
-    /// The node's opaque click payload, if any — a renderer attaches a click
+    /// The node's opaque click payload, if any: a renderer attaches a click
     /// handler that reports this value back verbatim (see the Lua API's
     /// "Click events" contract in `Documentation.md`), it never interprets it.
     pub fn on_click(&self) -> Option<&Value> {

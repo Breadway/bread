@@ -1,7 +1,7 @@
 //! Polls a configured set of project roots for git dirty/clean transitions
 //! and ahead/behind-upstream changes.
 //!
-//! Scope note: this adapter owns exactly two event families —
+//! Scope note: this adapter owns exactly two event families:
 //! `state.dirty`/`state.clean` and `ahead_behind.changed`. It deliberately
 //! does **not** emit anything for HEAD changes as such (commits, checkouts,
 //! branch switches), even though `git status`/`rev-list` are re-run against
@@ -11,7 +11,7 @@
 //! `bread.git.branch.changed`; if this poller also emitted on the same
 //! transitions, both paths would fire for one real-world event. (An earlier
 //! version of this file tried to skip the subprocess check on ticks where
-//! `.git/HEAD`/`.git/index` hadn't changed mtime, as an optimization — that
+//! `.git/HEAD`/`.git/index` hadn't changed mtime, as an optimization; that
 //! silently broke the primary use case, since a plain working-tree edit
 //! never touches either file. Every repo is checked every tick now; see the
 //! comment at the top of the poll loop below.)
@@ -19,7 +19,7 @@
 //! Structurally this mirrors `power.rs`: a plain `tokio::time::interval`
 //! poll loop with no external socket, looping forever and relying on the
 //! supervisor's outer `tokio::select!` (in `Manager::spawn_adapter`) against
-//! `shutdown_rx` to cancel the future — this adapter does not check
+//! `shutdown_rx` to cancel the future; this adapter does not check
 //! `tx.is_closed()` itself, and channel-send failures are propagated with
 //! `?` exactly as `power.rs` does.
 
@@ -76,7 +76,7 @@ impl GitAdapter {
         )
     }
 
-    /// Same as [`GitAdapter::new`] but with an explicit poll interval —
+    /// Same as [`GitAdapter::new`] but with an explicit poll interval,
     /// primarily for tests, but also available if a future config key wants
     /// to expose it.
     pub fn with_interval(root_patterns: Vec<String>, poll_interval: Duration) -> Self {
@@ -185,7 +185,7 @@ impl Adapter for GitAdapter {
                             .await?;
                         }
                     }
-                    // No upstream configured for the current branch — not an
+                    // No upstream configured for the current branch: not an
                     // error, just nothing to report for this repo this tick.
                     Ok(None) => {}
                     Err(e) => debug!(
@@ -200,7 +200,7 @@ impl Adapter for GitAdapter {
 
 /// Per-repo tracking state carried between poll ticks.
 struct RepoTrack {
-    /// Worktree root — what gets passed to `git -C <path>` and reported in
+    /// Worktree root: what gets passed to `git -C <path>` and reported in
     /// event payloads.
     path: PathBuf,
     last_dirty: Option<bool>,
@@ -219,7 +219,7 @@ impl RepoTrack {
 
 /// Expands configured root patterns and resolves each concrete root to a
 /// [`RepoTrack`] if (and only if) it's a recognizable git checkout. Roots
-/// that aren't git repos are skipped with a debug log, not an error — the
+/// that aren't git repos are skipped with a debug log, not an error; the
 /// configured glob is expected to sweep up non-repo directories routinely
 /// (e.g. `~/Projects/*` catching a README-only folder).
 fn discover_repos(root_patterns: &[String]) -> Vec<RepoTrack> {
@@ -238,7 +238,7 @@ fn discover_repos(root_patterns: &[String]) -> Vec<RepoTrack> {
 
 /// Expands `~` (via `bread_shared::expand_path`) and a single trailing `*`
 /// path segment (via a one-level `std::fs::read_dir` on the parent
-/// directory — no glob crate). Patterns without a trailing `*` are used
+/// directory, no glob crate). Patterns without a trailing `*` are used
 /// literally. Only directories are kept when expanding a `*`.
 fn expand_roots(patterns: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -266,9 +266,9 @@ fn expand_roots(patterns: &[String]) -> Vec<PathBuf> {
 
 /// Resolves `<root>/.git` to the actual git directory to use for `HEAD`/
 /// `index` stats, handling both shapes:
-/// - a plain directory (the common case) — used as-is;
-/// - a `.git` *file* containing `gitdir: <path>` (worktrees and submodules)
-///   — the pointer is read and resolved (relative to `root` if not
+/// - a plain directory (the common case), used as-is;
+/// - a `.git` *file* containing `gitdir: <path>` (worktrees and submodules):
+///   the pointer is read and resolved (relative to `root` if not
 ///   absolute), and canonicalized on a best-effort basis.
 ///
 /// Chose to fully resolve the worktree/submodule case rather than skip it,
@@ -379,7 +379,7 @@ async fn check_ahead_behind(repo: &Path) -> Result<Option<(String, u32, u32)>> {
 ///
 /// With `HEAD...@{upstream}`, `HEAD` is the left side and `@{upstream}` is
 /// the right side, so `--left-right --count` prints "<left-only-count>
-/// <right-only-count>" — i.e. "<ahead> <behind>", in that order,
+/// <right-only-count>", i.e. "<ahead> <behind>", in that order,
 /// whitespace-separated (typically a single tab).
 fn parse_ahead_behind(output: &str) -> Option<(u32, u32)> {
     let mut parts = output.split_whitespace();

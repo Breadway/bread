@@ -127,7 +127,7 @@ pub struct ModuleStatus {
     /// `bread.*` access because its `bread.module.toml` declares no
     /// `permissions` at all (or the module has no manifest on disk). Always
     /// `false` for builtin modules, which are never subject to capability
-    /// scoping in the first place — see the "Capability-scoped modules"
+    /// scoping in the first place; see the "Capability-scoped modules"
     /// section of `Documentation.md`. `bread doctor` surfaces this as a
     /// warning so an ungated module doesn't stay invisible forever.
     #[serde(default)]
@@ -145,7 +145,7 @@ pub enum ModuleLoadState {
 }
 
 /// Introspectable state for a `bread.workflow` instance, surfaced via the
-/// `workflows.list` IPC method. One entry per workflow *name* — starting a
+/// `workflows.list` IPC method. One entry per workflow *name*: starting a
 /// workflow with a name that's already running replaces its entry (this is
 /// a live-status registry, not a run history).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +170,7 @@ pub enum WorkflowState {
     /// The `opts.deadline` timer fired before the workflow reached a
     /// terminal state. Note: since a suspended coroutine isn't forcibly
     /// killed, it's possible (rare) for a workflow to still complete after
-    /// this and overwrite the status again — this is a status marker, not
+    /// this and overwrite the status again; this is a status marker, not
     /// a hard cancellation.
     TimedOut,
 }

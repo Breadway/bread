@@ -20,7 +20,7 @@ const PROPS_IFACE: &str = "org.freedesktop.DBus.Properties";
 /// Watches an allowlist of `systemd --user` units on the session bus and emits
 /// start/stop/failure lifecycle events.
 ///
-/// Only units named in the allowlist are tracked — subscribing to every user
+/// Only units named in the allowlist are tracked: subscribing to every user
 /// unit's transitions is noisy (timers, transient scopes, etc. fire
 /// constantly), so we filter down to what the user's config explicitly named.
 #[derive(Clone, Debug)]
@@ -63,7 +63,7 @@ impl Adapter for SystemdAdapter {
         // PropertiesChanged messages (which arrive addressed by path, not name)
         // can be matched back to a unit without a lookup on every message. A
         // unit that fails to resolve (not currently loaded, typo'd name, etc.)
-        // is skipped rather than failing the whole adapter — it simply won't be
+        // is skipped rather than failing the whole adapter; it simply won't be
         // watched for `unit.failed` until the adapter restarts.
         let mut path_to_unit: HashMap<String, String> = HashMap::new();
         for unit in &self.units {
@@ -199,7 +199,7 @@ async fn handle_message(
 }
 
 /// Map a unit's `ActiveState` to the lifecycle event kind it represents.
-/// `"failed"` is intentionally excluded — that transition is reported via the
+/// `"failed"` is intentionally excluded: that transition is reported via the
 /// dedicated `PropertiesChanged` branch instead, so it isn't double-reported
 /// once here and once there. Intermediate states (`activating`, `deactivating`,
 /// `reloading`) aren't a resting state yet, so they're ignored too.

@@ -1,4 +1,4 @@
--- external-monitors — behave like a normal laptop desktop
+-- external-monitors: behave like a normal laptop desktop
 --
 -- Plug in any display (HDMI, DisplayPort, USB-C dock, a random TV) and
 -- the session just works. No output names to edit.

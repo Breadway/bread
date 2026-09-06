@@ -188,7 +188,7 @@ struct TimerEntry {
     cancel_tx: watch::Sender<bool>,
     /// The module active when `bread.after`/`bread.every` registered this
     /// timer, so `handle_timer` can restore module context for the callback
-    /// (needed by module-scoped APIs like `bread.widget.*`) — same
+    /// (needed by module-scoped APIs like `bread.widget.*`), same
     /// `current_module` capture used for `bread.on`'s `HandlerEntry.module`.
     module: Option<String>,
 }
@@ -206,7 +206,7 @@ struct ModuleDecl {
     /// builtins, which never go through manifest-based scoping at all).
     ///
     /// `None` here also covers the third-party, no-manifest-at-all and
-    /// manifest-with-no-permissions-key cases — both mean "not declared",
+    /// manifest-with-no-permissions-key cases, both mean "not declared",
     /// which `load_scoped_lua_file` treats as full, ungated access for
     /// backward compatibility (see `Documentation.md`). `Some(vec![])` is a
     /// deliberate "baseline only" declaration and is scoped down for real.
@@ -234,7 +234,7 @@ struct LuaEngine {
     /// `caused_by`. The Lua engine runs single-threaded/cooperatively (one
     /// engine instance processes `LuaMessage`s serially on a dedicated
     /// thread), so a callback invocation and any `bread.emit()` inside it
-    /// happen synchronously within one `handle_event` call — no additional
+    /// happen synchronously within one `handle_event` call; no additional
     /// synchronization beyond the existing `Mutex` (mirroring
     /// `current_module` above) is needed.
     current_dispatch_id: Arc<Mutex<Option<String>>>,
@@ -486,7 +486,7 @@ impl LuaEngine {
                             .from_value::<serde_json::Value>(other)
                             .unwrap_or_else(|_| serde_json::json!({})),
                     };
-                    // Daemon-internal emit — same trusted path as adapter/IPC
+                    // Daemon-internal emit, same trusted path as adapter/IPC
                     // construction, tagged System. If this runs synchronously
                     // inside a subscriber callback (see `handle_event`), thread
                     // the currently-dispatching event's id through as
@@ -637,13 +637,13 @@ impl LuaEngine {
         // fast local command and read its stdout back into Lua" case (e.g.
         // `git -C <dir> rev-parse --abbrev-ref HEAD`). It blocks the calling
         // Lua callback for real, so it's only appropriate for quick
-        // commands — hence the timeout. The subprocess itself runs on a
+        // commands; hence the timeout. The subprocess itself runs on a
         // plain std::thread (not spawn_blocking) so the Lua thread can wait
         // on a channel with a deadline; `Command::output()` drains stdout
         // internally as it reads, so a chatty command can't deadlock this by
         // filling a pipe buffer while nobody's reading it. On timeout the
         // spawned thread and its child are left to finish/exit on their own
-        // rather than force-killed — acceptable for the fast-command case
+        // rather than force-killed: acceptable for the fast-command case
         // this exists for, not worth the extra complexity for a rare hang.
         let exec_capture_fn =
             self.lua
@@ -994,7 +994,7 @@ impl LuaEngine {
         })?;
         bread.set("module", module_fn)?;
 
-        // bread.widget — declarative, live-updating widgets rendered by
+        // bread.widget: declarative, live-updating widgets rendered by
         // sibling bread* apps (breadbar) in their bar/popover free space.
         // Follows the same Rust-backed-registry pattern as bread.workflow
         // (see install_workflow_helpers / workflow_register below):
@@ -1110,7 +1110,7 @@ impl LuaEngine {
 
         bread.set("widget", widget_tbl)?;
 
-        // bread.machine — hostname/tags; reads an optional, externally-managed
+        // bread.machine: hostname/tags; reads an optional, externally-managed
         // ~/.config/bread/sync.toml if present (bread does not create it)
         let machine_tbl = self.lua.create_table()?;
 
@@ -1136,7 +1136,7 @@ impl LuaEngine {
 
         bread.set("machine", machine_tbl)?;
 
-        // bread.fs — file system helpers
+        // bread.fs: file system helpers
         let fs_tbl = self.lua.create_table()?;
 
         let write_fn = self
@@ -1166,7 +1166,7 @@ impl LuaEngine {
         fs_tbl.set("exists", exists_fn)?;
 
         // Distinct from `read`: `/proc/<pid>/cwd` and friends are symlinks
-        // whose *target path* is the payload, not a file to open and read —
+        // whose *target path* is the payload, not a file to open and read:
         // `std::fs::read_to_string` on one of those fails with "Is a
         // directory" (or reads the wrong thing for a symlink-to-file).
         let readlink_fn = self.lua.create_function(|_lua, path: String| {
@@ -1185,7 +1185,7 @@ impl LuaEngine {
 
         bread.set("fs", fs_tbl)?;
 
-        // bread.json — for parsing output from things like `kitty @ ls` or
+        // bread.json: for parsing output from things like `kitty @ ls` or
         // any other JSON-emitting CLI invoked via bread.exec_capture. Uses
         // the same null-handling as every other JSON entry point into Lua
         // (json_to_lua, not a bare to_value) so `nil` behaves as Lua nil,
@@ -1200,7 +1200,7 @@ impl LuaEngine {
         json_tbl.set("decode", decode_fn)?;
         bread.set("json", json_tbl)?;
 
-        // bread.bluetooth — BlueZ control
+        // bread.bluetooth: BlueZ control
         let bluetooth_tbl = self.lua.create_table()?;
 
         let power_fn = self.lua.create_function(move |_lua, enabled: bool| {
@@ -1403,7 +1403,7 @@ impl LuaEngine {
                             let quoted = shell_quote(&expanded.to_string_lossy());
                             tbl.set("run", quoted)?;
                         }
-                        // `exec` is a full shell command line — pass it
+                        // `exec` is a full shell command line: pass it
                         // through to `bread.exec()` verbatim, exactly like
                         // hand-written Lua calling `bread.exec()` directly.
                         RuleAction::Exec(cmd) => {
@@ -1452,7 +1452,7 @@ impl LuaEngine {
             let name = module_name_from_path(&self.module_path, &path);
             // bos-settings' module picker writes filenames (e.g.
             // "widget.lua") into `disable`, not the bare module name a file
-            // registers under via bread.module({name=...}) — match either
+            // registers under via bread.module({name=...}); match either
             // form so both conventions work rather than requiring the UI
             // and the daemon to agree on one exact string.
             let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
@@ -1466,7 +1466,7 @@ impl LuaEngine {
                 Ok(mut decl) => {
                     // Manifest lives beside the module's entry file
                     // (bread-cli's install_from_local always writes
-                    // <modules_dir>/<name>/{bread.module.toml,init.lua} —
+                    // <modules_dir>/<name>/{bread.module.toml,init.lua};
                     // see bread-cli/src/modules_mgmt.rs). A hand-authored
                     // flat file with no sibling manifest (e.g. the
                     // "Your first module" walkthrough's modules/hello.lua)
@@ -1507,7 +1507,7 @@ impl LuaEngine {
             // Static per-decl (not per-status-transition) property: whether
             // this module is running with full, ungated bread.* access. Only
             // ever true for a non-builtin module with no declared
-            // permissions — see ModuleDecl::permissions' doc comment.
+            // permissions; see ModuleDecl::permissions' doc comment.
             let ungated = !decl.builtin && decl.permissions.is_none();
             match self.load_module(&decl) {
                 Ok(()) => {
@@ -1538,17 +1538,17 @@ impl LuaEngine {
 
     fn load_module(&self, decl: &ModuleDecl) -> Result<()> {
         // Workstream G branch point: a third-party module that declared
-        // `[[permissions]]` (opted into the D capability-manifest system —
+        // `[[permissions]]` (opted into the D capability-manifest system:
         // `decl.permissions.is_some()`, including `Some(&[])`) gets spawned
         // as a separate, OS-sandboxed `bread-module-host` process instead of
         // being loaded into this Lua VM at all. Its Lua state, `bread.on`
         // handlers, timers, etc. all live in that other process from here
-        // on — none of this engine's module-table/on_load bookkeeping below
+        // on; none of this engine's module-table/on_load bookkeeping below
         // applies to it, hence the early return.
         //
         // `decl.permissions.is_none()` (no manifest, or a manifest with no
         // `permissions` key) falls through to the unchanged in-process,
-        // unscoped path for backward compatibility — see
+        // unscoped path for backward compatibility; see
         // `ModuleDecl::permissions`'s doc comment and `Documentation.md`'s
         // "Workstream G" section for why this is a deliberate scope
         // decision rather than an oversight: Landlock needs concrete rules
@@ -1561,7 +1561,7 @@ impl LuaEngine {
 
         self.set_current_module(Some(decl.name.clone()));
         let result = if let Some(source) = decl.source {
-            // Builtins (bread.monitors/devices/workspaces/binds) — embedded
+            // Builtins (bread.monitors/devices/workspaces/binds): embedded
             // source, always the full ambient bread table, never scoped.
             self.load_lua_source(source, &decl.name)
         } else {
@@ -1580,7 +1580,7 @@ impl LuaEngine {
     }
 
     /// Spawn (or respawn, on `bread reload`) a sandboxed `bread-module-host`
-    /// child for `decl` and block until it reports ready or fails — see
+    /// child for `decl` and block until it reports ready or fails; see
     /// `crate::module_host::spawn_module_host`. Blocking here (rather than
     /// making `load_module` async) keeps `load_module`'s existing
     /// synchronous "a module either loaded or it didn't" contract intact
@@ -1608,7 +1608,7 @@ impl LuaEngine {
 
     /// Load `init.lua` (the trusted entry point) or any other file that
     /// should see the real, unscoped `bread` global exactly like today.
-    /// Not used for third-party modules — see [`load_scoped_lua_file`].
+    /// Not used for third-party modules; see [`load_scoped_lua_file`].
     fn load_lua_file(&self, path: &Path, module_name: &str, builtin: bool) -> Result<()> {
         if !path.exists() {
             warn!(path = %path.display(), "lua file does not exist; skipping");
@@ -1634,7 +1634,7 @@ impl LuaEngine {
     ///
     /// `permissions: None` means the module's manifest declared no
     /// `permissions` at all (no manifest on disk, or a manifest predating
-    /// this field) — backward compat: full, ungated access, identical to
+    /// this field); backward compat: full, ungated access, identical to
     /// `load_lua_file`. `Some(perms)` (including `Some(&[])`) builds a fresh
     /// `bread` table containing only the baseline bindings plus whatever
     /// `perms` grants, and sets it as the chunk's environment. See
@@ -1680,17 +1680,17 @@ impl LuaEngine {
     ///
     /// Shape: a table whose own `bread` key is a *new* table containing only
     /// the baseline bindings (event subscription, timers, json, module/
-    /// store, logging, and the pure-Lua sugar built on top of those —
+    /// store, logging, and the pure-Lua sugar built on top of those:
     /// debounce/spawn/wait*/workflow) plus whichever gated namespaces
     /// `perms` grants (fs, exec, notify, machine, hyprland, widget,
-    /// bluetooth, state, profile — split at the granularity the manifest
+    /// bluetooth, state, profile; split at the granularity the manifest
     /// schema exposes, e.g. `fs.read` without `fs.write` yields a `bread.fs`
     /// table with `.read`/`.exists`/`.readlink`/`.expand` but no `.write`).
     /// A permission that isn't granted means the corresponding key is
     /// genuinely absent (`bread.fs == nil`), not present-but-erroring.
     ///
-    /// Everything else — `pairs`, `string`, `table`, `math`, `pcall`,
-    /// `coroutine`, `require`, `package`, ... — is reached through a
+    /// Everything else (`pairs`, `string`, `table`, `math`, `pcall`,
+    /// `coroutine`, `require`, `package`, ...) is reached through a
     /// metatable `__index` that falls back to the real global table, so
     /// `require("bread.devices")` still works: `require` is the real global
     /// function operating on the real global `package.loaded`, which
@@ -1698,8 +1698,8 @@ impl LuaEngine {
     /// third-party module loads (builtins load first). That module table's
     /// own methods (`devices.on()` etc.) were themselves defined while
     /// `bread.devices` was loaded unscoped, so they close over the *real*
-    /// `bread` table as an upvalue — Lua closures capture their defining
-    /// environment lexically, not the caller's — which is exactly why
+    /// `bread` table as an upvalue: Lua closures capture their defining
+    /// environment lexically, not the caller's, which is exactly why
     /// `require("bread.devices")` keeps working from inside a scoped module
     /// with no special-casing needed here.
     ///
@@ -1713,12 +1713,12 @@ impl LuaEngine {
     ///
     /// What this does **not** do: strip `os`/`io`/`debug` from the
     /// fallback. Those remain reachable from a scoped module exactly as
-    /// they are from an unscoped one — `os.execute`/`io.open` bypass
+    /// they are from an unscoped one: `os.execute`/`io.open` bypass
     /// `bread.exec`/`bread.fs` gating entirely if a module chooses to use
     /// them directly. This mechanism gates the documented `bread.*` API
     /// surface (so a well-behaved module naturally degrades, and an
     /// accidental over-reach is caught), it is not a hard security boundary
-    /// against a deliberately malicious script — that's what the
+    /// against a deliberately malicious script: that's what the
     /// out-of-process module sandboxing workstream this manifest schema
     /// exists for is for.
     fn build_scoped_env(&self, perms: &[ModulePermission]) -> Result<Table<'_>> {
@@ -1729,7 +1729,7 @@ impl LuaEngine {
 
         let scoped_bread = self.lua.create_table()?;
 
-        // Baseline — always available, no manifest entry required.
+        // Baseline: always available, no manifest entry required.
         const BASELINE_KEYS: &[&str] = &[
             "on", "once", "filter", "off", "emit", "after", "every", "cancel", "json", "module",
             "log", "warn", "error", "debounce", "spawn", "wait", "wait_any", "wait_all",
@@ -1950,7 +1950,7 @@ impl LuaEngine {
                 // caller (load_module, via load_init_and_modules) is the
                 // single place that decides Loaded vs LoadError for a
                 // module, so this failure isn't immediately clobbered back
-                // to Loaded by that outer Ok(()) branch — which is exactly
+                // to Loaded by that outer Ok(()) branch, which is exactly
                 // what used to happen when this function swallowed the
                 // error and always returned successfully.
                 return Err(anyhow!(err.to_string()));
@@ -2097,7 +2097,7 @@ impl LuaEngine {
     /// Set the "currently dispatching" event id, returning whatever id was
     /// there before. Callers restore the previous value (rather than
     /// clearing to `None`) when the handler invocation finishes, so nested/
-    /// reentrant dispatch unwinds correctly — see `current_dispatch_id`'s
+    /// reentrant dispatch unwinds correctly; see `current_dispatch_id`'s
     /// doc comment on the struct definition.
     fn set_current_dispatch_id(&self, id: Option<String>) -> Option<String> {
         match self.current_dispatch_id.lock() {
@@ -2225,7 +2225,7 @@ impl LuaEngine {
                 source: None,
                 builtin: false,
                 // Populated afterwards by the caller (load_init_and_modules),
-                // which reads bread.module.toml from disk — scan_module_decl
+                // which reads bread.module.toml from disk; scan_module_decl
                 // only cares about the bread.module({...}) declaration itself.
                 permissions: None,
             });
@@ -2359,7 +2359,7 @@ impl LuaEngine {
     /// wait helpers `bread.wait_any`/`bread.wait_all`. Composition (spawning,
     /// yielding, timeouts) is plain Lua built on the existing `bread.spawn`/
     /// `bread.on`/`bread.once`/`bread.after`/`bread.cancel`/`bread.off`
-    /// primitives from [`install_wait_helper`](Self::install_wait_helper) —
+    /// primitives from [`install_wait_helper`](Self::install_wait_helper),
     /// mirroring how that method itself works. Only the *introspectable
     /// status* piece needs a Rust host bridge (the `__workflow_*` functions
     /// below), since `workflows.list` is served over IPC from the async side
@@ -2723,7 +2723,7 @@ struct WidgetRegisterArgs {
     root: WidgetNode,
 }
 
-/// Table shape accepted by `bread.widget.update` — every field optional, so
+/// Table shape accepted by `bread.widget.update`, every field optional, so
 /// a caller can patch just what changed (typically just `root` on a timer).
 #[derive(Debug, Default, Deserialize)]
 struct WidgetUpdateArgs {
@@ -2932,13 +2932,13 @@ fn is_lib_path(module_root: &Path, path: &Path) -> bool {
 /// `bread-cli`'s `install_from_local` always lays a module out as
 /// `<modules_dir>/<name>/{bread.module.toml,init.lua,...}` (see
 /// `bread-cli/src/modules_mgmt.rs`), so the manifest is always the entry
-/// file's parent directory + `bread.module.toml`. Returns `None` — meaning
+/// file's parent directory + `bread.module.toml`. Returns `None`, meaning
 /// "not declared", handled as full ungated backward-compat access by
-/// `load_scoped_lua_file` — whenever: the module has no directory-level
+/// `load_scoped_lua_file`, whenever: the module has no directory-level
 /// manifest at all (a hand-authored flat file, e.g. the "Your first
 /// module" walkthrough's `modules/hello.lua`); the manifest exists but has
 /// no `permissions` key; or the manifest fails to parse (logged, not
-/// treated as a load error — a broken manifest shouldn't also break the
+/// treated as a load error: a broken manifest shouldn't also break the
 /// module load path it's unrelated to).
 fn read_module_permissions(module_file: &Path) -> Option<Vec<ModulePermission>> {
     #[derive(serde::Deserialize)]
@@ -2969,7 +2969,7 @@ fn read_module_permissions(module_file: &Path) -> Option<Vec<ModulePermission>> 
 
 /// `lua.to_value()`'s default `Options` map JSON null / Rust `Option::None`
 /// to a distinct `lua.null()` sentinel rather than real Lua `nil`, to
-/// preserve JSON round-trip fidelity — but bread never round-trips a Lua
+/// preserve JSON round-trip fidelity, but bread never round-trips a Lua
 /// value back into JSON through mlua, so that distinction buys nothing here
 /// and only sets a trap for the ordinary Lua idiom `if not value then ...`,
 /// which silently doesn't catch the sentinel (found via a module crashing
@@ -3080,7 +3080,7 @@ fn lua_expand_path(path: &str) -> std::path::PathBuf {
 }
 
 /// POSIX single-quotes `s` for safe embedding as one token in a `sh -c`
-/// command line — used for `rules.toml`'s `run = "<script path>"` action
+/// command line: used for `rules.toml`'s `run = "<script path>"` action
 /// (see `LuaEngine::load_rules_toml`), which is meant to name exactly one
 /// program regardless of spaces in its path, unlike `exec = "..."` which is
 /// a full command line handed to the shell as-is.
@@ -3376,19 +3376,19 @@ end
 return M
 "#;
 
-// `bread.rules` — the Lua half of the `rules.toml` declarative automation
+// `bread.rules`: the Lua half of the `rules.toml` declarative automation
 // layer (see `crate::core::rules` for TOML parsing/validation). This module
 // itself is static like the other built-ins; the *data* it acts on is
 // dynamic (parsed from the user's rules.toml each reload), so it's threaded
 // through via `__rules_data` / `__rules_fatal` / `__rules_warning` globals
 // that `load_rules_toml()` sets just before `load_init_and_modules()` runs
-// this module's `on_load()` — the same "stash data in a global, consume it
+// this module's `on_load()`, the same "stash data in a global, consume it
 // from a lifecycle hook, then clear it" technique `load_profiles()` already
 // uses for `__profiles_path`.
 //
 // A fatal problem (rules.toml unreadable or not valid TOML) is surfaced by
 // calling Lua's `error()`, which `run_on_load()` propagates back to
-// `load_module()` exactly like any other module's `on_load` failure — so it
+// `load_module()` exactly like any other module's `on_load` failure, so it
 // shows up in `bread doctor` / `modules.list` as `bread.rules` in
 // `load_error` state with a `last_error`, the same path a broken
 // hand-written Lua module's error already takes. A handful of individually
@@ -3466,7 +3466,7 @@ fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
             source: Some(source),
             builtin: true,
             // Builtins never go through manifest-based scoping (or the
-            // "ungated" doctor warning) — they always get the full ambient
+            // "ungated" doctor warning), they always get the full ambient
             // bread table, by design.
             permissions: None,
         });

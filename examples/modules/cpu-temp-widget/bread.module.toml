@@ -6,7 +6,7 @@ source = "local"
 installed_at = ""
 
 # This module only ever calls bread.fs.read (never .write) and
-# bread.widget.register/update — declaring exactly that is what makes
+# bread.widget.register/update: declaring exactly that is what makes
 # bread.exec, bread.bluetooth, bread.hyprland, bread.machine, bread.notify,
 # and bread.state all genuinely absent (nil) from its `bread` table at
 # runtime, rather than merely unused. `source`/`installed_at` above get

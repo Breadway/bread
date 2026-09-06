@@ -4,7 +4,7 @@
 //! between `bread-cli` (which parses/writes the manifest on `bread modules
 //! install`/`audit`) and `breadd` (which reads the same manifest to build a
 //! capability-scoped Lua environment for third-party modules) so the two
-//! never drift on what a permission "type" string means — see
+//! never drift on what a permission "type" string means: see
 //! `Documentation.md`'s "Capability-scoped modules" section for the full
 //! baseline-vs-gated taxonomy this enum encodes.
 
@@ -20,12 +20,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// `path`/`bin` are optional scoping metadata (a filesystem path prefix, a
 /// state-tree path, or a binary name). **They are not enforced by the
-/// in-process Lua environment scoping `breadd` builds today** — that
+/// in-process Lua environment scoping `breadd` builds today**: that
 /// mechanism only gates *presence* of a `bread.*` binding (a module without
 /// `fs.read` sees `bread.fs == nil`, full stop). Recording the scoping
 /// metadata now means manifests won't need a second migration when the
 /// planned out-of-process module sandboxing workstream lands and actually
-/// enforces path/bin matching per call — that enforcement is explicitly out
+/// enforces path/bin matching per call: that enforcement is explicitly out
 /// of scope here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModulePermission {
@@ -33,11 +33,11 @@ pub struct ModulePermission {
     pub kind: PermissionKind,
     /// Scoping hint for `fs.read`/`fs.write` (a path prefix) or
     /// `state.read`/`state.watch` (a dotted state-tree path, e.g.
-    /// `"monitors"`). Advisory only — see the struct-level doc.
+    /// `"monitors"`). Advisory only: see the struct-level doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// Scoping hint for `exec` (the binary name the module intends to run,
-    /// e.g. `"hyprpaper"`). Advisory only — see the struct-level doc.
+    /// e.g. `"hyprpaper"`). Advisory only: see the struct-level doc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bin: Option<String>,
 }
@@ -46,7 +46,7 @@ pub struct ModulePermission {
 /// binding.
 ///
 /// Not covered here because they're **baseline** (always available to every
-/// module, gated or not — no real side effect, or a side effect a module
+/// module, gated or not: no real side effect, or a side effect a module
 /// can't function at all without): `bread.on`/`once`/`filter`/`off`/`emit`
 /// (event subscription is how a module does anything), `bread.after`/
 /// `every`/`cancel` (timers), `bread.json` (pure decode), `bread.module`
@@ -59,46 +59,46 @@ pub struct ModulePermission {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PermissionKind {
     /// `bread.state.get`/`.monitors`/`.active_workspace`/`.active_window`/
-    /// `.devices`/`.power`/`.network`/`.profile` — read-only snapshots of
+    /// `.devices`/`.power`/`.network`/`.profile`: read-only snapshots of
     /// daemon-maintained runtime state.
     #[serde(rename = "state.read")]
     StateRead,
-    /// `bread.state.watch` — a standing subscription to state changes,
+    /// `bread.state.watch`: a standing subscription to state changes,
     /// gated separately from `state.read` since a long-lived watch is a
     /// more persistent capability than a one-off read.
     #[serde(rename = "state.watch")]
     StateWatch,
-    /// `bread.profile.activate` — switches the daemon's system-wide active
+    /// `bread.profile.activate`: switches the daemon's system-wide active
     /// profile, a real cross-module side effect.
     #[serde(rename = "profile.activate")]
     ProfileActivate,
-    /// `bread.exec` and `bread.exec_capture` — spawns an arbitrary shell
+    /// `bread.exec` and `bread.exec_capture`: spawns an arbitrary shell
     /// command.
     #[serde(rename = "exec")]
     Exec,
-    /// `bread.notify` — sends a desktop notification.
+    /// `bread.notify`: sends a desktop notification.
     #[serde(rename = "notify")]
     Notify,
-    /// `bread.machine.name`/`.tags`/`.has_tag` — reads hostname/tags,
+    /// `bread.machine.name`/`.tags`/`.has_tag`: reads hostname/tags,
     /// including an optional on-disk `sync.toml`.
     #[serde(rename = "machine")]
     Machine,
-    /// `bread.hyprland.*` — compositor IPC (dispatch/keyword/eval read and
+    /// `bread.hyprland.*`: compositor IPC (dispatch/keyword/eval read and
     /// control the running Hyprland session).
     #[serde(rename = "hyprland")]
     Hyprland,
-    /// `bread.widget.*` — registers/updates/removes a rendered widget in a
+    /// `bread.widget.*`: registers/updates/removes a rendered widget in a
     /// sibling `bread*` app (breadbar).
     #[serde(rename = "widget")]
     Widget,
-    /// `bread.fs.read`/`.exists`/`.readlink`/`.expand` — read-only
+    /// `bread.fs.read`/`.exists`/`.readlink`/`.expand`: read-only
     /// filesystem access.
     #[serde(rename = "fs.read")]
     FsRead,
-    /// `bread.fs.write` — filesystem writes.
+    /// `bread.fs.write`: filesystem writes.
     #[serde(rename = "fs.write")]
     FsWrite,
-    /// `bread.bluetooth.*` — BlueZ control (power/connect/disconnect/scan).
+    /// `bread.bluetooth.*`: BlueZ control (power/connect/disconnect/scan).
     #[serde(rename = "bluetooth")]
     Bluetooth,
 }

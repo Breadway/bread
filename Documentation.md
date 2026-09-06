@@ -26,11 +26,11 @@
 
 Bread is a reactive automation fabric for Linux desktops. The daemon (`breadd`) normalizes external signals into semantic events, maintains runtime state, and dispatches events to Lua modules that implement automation.
 
-- **Daemon** (`breadd`) — long-running Rust process; source of truth for runtime state
-- **Lua runtime** — dedicated thread inside the daemon; automation logic lives here
-- **CLI** (`bread`) — talks to the daemon over a Unix socket
+- **Daemon** (`breadd`): long-running Rust process; source of truth for runtime state
+- **Lua runtime**: dedicated thread inside the daemon; automation logic lives here
+- **CLI** (`bread`): talks to the daemon over a Unix socket
 
-Adapters currently supported: Hyprland compositor IPC, Linux udev/netlink, UPower/sysfs power, rtnetlink/sysfs network, BlueZ Bluetooth, shell precmd/preexec hooks (terminal), git hooks + a dirty-state poller, project-root filesystem watches, `systemd --user` unit state, Podman container events, and SSH/remote session detection. Sibling `bread*` applications (breadclip, breadpad, and others across the BOS ecosystem) integrate through the same pipeline under a reserved `bread.<app>.*` namespace — see [Namespaces](#namespaces).
+Adapters currently supported: Hyprland compositor IPC, Linux udev/netlink, UPower/sysfs power, rtnetlink/sysfs network, BlueZ Bluetooth, shell precmd/preexec hooks (terminal), git hooks + a dirty-state poller, project-root filesystem watches, `systemd --user` unit state, Podman container events, and SSH/remote session detection. Sibling `bread*` applications (breadclip, breadpad, and others across the BOS ecosystem) integrate through the same pipeline under a reserved `bread.<app>.*` namespace: see [Namespaces](#namespaces).
 
 If you are new to Bread, start with the quick walkthrough below, then jump to the full dictionary when you need exact API details.
 
@@ -41,9 +41,9 @@ The Lua API surface, the IPC method set, the event-name vocabulary, and the runt
 - **Additive-only within a major version.** New bindings, new events, new state fields, and new optional IPC params may be added in a minor release. Existing binding signatures, event names, event `data` shapes, state field meanings, and IPC method contracts do not change or disappear within v1.
 - **Deprecation window.** Anything slated for removal is marked `Deprecated` in this file for at least one minor release cycle and continues to function until the next major version (v2).
 - **Since markers.** Additions made after the v1.0 baseline are marked inline with `*Since: vX.Y*`. Anything documented in this file without a marker is part of the v1.0 baseline.
-- **Version discovery.** The current API version is returned as `api_version` in the `health` IPC response (see [Dictionary: IPC protocol](#dictionary-ipc-protocol)), so a client — the CLI, a Lua module, or a sibling `bread*` app — can assert compatibility at connect time rather than discovering a mismatch mid-session.
+- **Version discovery.** The current API version is returned as `api_version` in the `health` IPC response (see [Dictionary: IPC protocol](#dictionary-ipc-protocol)), so a client (the CLI, a Lua module, or a sibling `bread*` app) can assert compatibility at connect time rather than discovering a mismatch mid-session.
 
-This matters because the moment sibling apps and community modules depend on this vocabulary, it becomes a contract that can break people. Treat this file, not `README.md` or `AGENTS.md`, as the single source of truth — those files intentionally point back here rather than keeping their own copies, after a duplicated Lua API section in `README.md` was found to have already drifted from reality.
+This matters because the moment sibling apps and community modules depend on this vocabulary, it becomes a contract that can break people. Treat this file, not `README.md` or `AGENTS.md`, as the single source of truth: those files intentionally point back here rather than keeping their own copies, after a duplicated Lua API section in `README.md` was found to have already drifted from reality.
 
 ## Getting started
 
@@ -73,19 +73,19 @@ on = "device.keyboard.connected"
 exec = "xset r rate 200 40"
 ```
 
-Each `[[rule]]` needs exactly two things: an `on` (an event-name suffix —
+Each `[[rule]]` needs exactly two things: an `on` (an event-name suffix,
 `bread.` is implied, so `"device.dock.connected"` matches the real event
 `bread.device.dock.connected`; wildcards `*`/`**`/`?` work the same way they
 do in `bread.on()`) and exactly one action:
 
 | Action | Meaning |
 |--------|---------|
-| `run = "<path>"` | Run exactly one script/program at that path. The path is tilde-expanded and quoted as a single unit for you, so spaces in it are safe — it will *not* be word-split into a command plus arguments. |
-| `exec = "<command line>"` | Run a full shell command line via `bread.exec()`, exactly as if you'd typed it in a shell — quote/escape arguments yourself. |
+| `run = "<path>"` | Run exactly one script/program at that path. The path is tilde-expanded and quoted as a single unit for you, so spaces in it are safe: it will *not* be word-split into a command plus arguments. |
+| `exec = "<command line>"` | Run a full shell command line via `bread.exec()`, exactly as if you'd typed it in a shell: quote/escape arguments yourself. |
 | `notify = "<message>"` | Show a desktop notification with this text via `bread.notify()`. |
 
 `rules.toml` is entirely optional and purely additive alongside
-`init.lua` — both can coexist, rules load before user-defined modules, and
+`init.lua`: both can coexist, rules load before user-defined modules, and
 an absent file is not an error. A malformed rule (missing/empty `on`, or
 zero/multiple action keys set) doesn't stop the rest of the file from
 working: the other rules in the file still register, and the specific bad
@@ -95,7 +95,7 @@ the same way a broken Lua module's error would.
 This covers the common cases directly. For fuzzier matching (substring
 device-name matching, filtering by a list of monitors, etc.) or any logic
 beyond "run this one action," reach for `bread.devices` /
-`bread.monitors` or hand-written Lua in `init.lua` — see
+`bread.monitors` or hand-written Lua in `init.lua`: see
 [Dictionary: Built-in modules](#dictionary-built-in-modules) and the next
 section.
 
@@ -149,9 +149,9 @@ Key rules:
 - Use `bread.log` early to verify handlers are firing.
 
 A flat file like `modules/hello.lua` with no manifest gets full, unscoped
-`bread.*` access — exactly what you see above, unchanged. That's fine for a
+`bread.*` access: exactly what you see above, unchanged. That's fine for a
 personal one-off. Once you install a module properly (`bread modules
-install`), it's worth declaring what it actually uses — see
+install`), it's worth declaring what it actually uses: see
 [Capability-scoped modules](#capability-scoped-modules-since-v15).
 
 ## Run, reload, and watch
@@ -164,7 +164,7 @@ bread reload
 bread reload --watch
 ```
 
-If any module fails to load, `bread reload` prints the error with a full Lua stack trace. The daemon stays running — fix the file and reload again.
+If any module fails to load, `bread reload` prints the error with a full Lua stack trace. The daemon stays running: fix the file and reload again.
 
 ## Modules: install and manage
 
@@ -188,7 +188,7 @@ bread modules list
 bread modules info bread-wifi
 
 # Get a suggested [[permissions]] block from a static scan of the module's
-# Lua source — see "Capability-scoped modules" below
+# Lua source: see "Capability-scoped modules" below
 bread modules audit bread-wifi
 
 # Remove a module
@@ -214,24 +214,24 @@ bin = "nmcli"
 type = "notify"
 ```
 
-`permissions` is optional *(Since: v1.5)*. Omitting it entirely — every
+`permissions` is optional *(Since: v1.5)*. Omitting it entirely, every
 manifest written before v1.5, and any manifest an author just hasn't gotten
-around to annotating — means the module runs exactly like it always has:
+around to annotating, means the module runs exactly like it always has:
 full, unscoped `bread.*` access. See the next section for what declaring it
 actually buys you and the full permission taxonomy.
 
 ## Capability-scoped modules *(Since: v1.5)*
 
-By default every third-party module gets the full `bread` table — the same
+By default every third-party module gets the full `bread` table: the same
 one built-in modules and `init.lua` see. `[[permissions]]` in
 `bread.module.toml` narrows that: a module only sees the `bread.*` bindings
 it was granted, plus a fixed **baseline** every module gets regardless.
-Anything not granted is genuinely **absent** — `bread.fs == nil`, not
-`bread.fs.read()` throwing a permission error — so a module written
+Anything not granted is genuinely **absent**: `bread.fs == nil`, not
+`bread.fs.read()` throwing a permission error, so a module written
 defensively (`if bread.fs then ... end`) degrades exactly the way it would
 if, say, Bluetooth hardware weren't present.
 
-*Since: v1.6* — declaring `[[permissions]]` at all (even an empty list)
+*Since: v1.6*, declaring `[[permissions]]` at all (even an empty list)
 also determines **where** the module runs: see [Out-of-process module
 sandboxing](#out-of-process-module-sandboxing-since-v16) below. The
 `bread` table shape described in this section is what such a module sees
@@ -245,26 +245,26 @@ they're never gated: `bread.on`/`once`/`filter`/`off`/`emit`,
 `bread.after`/`every`/`cancel`. Also baseline: `bread.json` (pure decode,
 no I/O), `bread.module` (required just to register), `bread.log`/`warn`/
 `error` (diagnostics), and the pure-Lua sugar built entirely on top of the
-above — `bread.debounce`, `bread.spawn`/`wait`/`wait_any`/`wait_all`,
+above: `bread.debounce`, `bread.spawn`/`wait`/`wait_any`/`wait_all`,
 `bread.workflow.*`.
 
-### Gated — requires a matching `[[permissions]]` entry
+### Gated: requires a matching `[[permissions]]` entry
 
 | `type` | Grants | Notes |
 |--------|--------|-------|
-| `state.read` | `bread.state.get`/`.monitors`/`.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/`.profile` | Read-only snapshots of daemon state. `path` is an advisory scoping hint (e.g. `"monitors"`), not yet enforced per-call — see the note below. |
+| `state.read` | `bread.state.get`/`.monitors`/`.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/`.profile` | Read-only snapshots of daemon state. `path` is an advisory scoping hint (e.g. `"monitors"`), not yet enforced per-call: see the note below. |
 | `state.watch` | `bread.state.watch` | Split from `state.read`: a standing subscription is a more persistent capability than a one-off read. |
-| `profile.activate` | `bread.profile.activate` | Switches the daemon's system-wide active profile — a real cross-module side effect. |
+| `profile.activate` | `bread.profile.activate` | Switches the daemon's system-wide active profile: a real cross-module side effect. |
 | `exec` | `bread.exec`, `bread.exec_capture` | Spawns an arbitrary shell command. `bin` is an advisory hint (e.g. `"hyprpaper"`). |
 | `notify` | `bread.notify` | Desktop notifications. |
 | `machine` | `bread.machine.name`/`.tags`/`.has_tag` | Reads hostname/tags, including an optional on-disk `sync.toml`. |
-| `hyprland` | `bread.hyprland.*` | Compositor IPC — `dispatch`/`keyword`/`eval` control the session, `monitors`/`workspaces`/`clients`/`active_window`/`on_raw` observe it. Not split further; grant it for either. |
+| `hyprland` | `bread.hyprland.*` | Compositor IPC: `dispatch`/`keyword`/`eval` control the session, `monitors`/`workspaces`/`clients`/`active_window`/`on_raw` observe it. Not split further; grant it for either. |
 | `widget` | `bread.widget.register`/`.update`/`.remove`/`.list` | Registers UI in a sibling `bread*` app (breadbar). |
 | `fs.read` | `bread.fs.read`/`.exists`/`.readlink`/`.expand` | Read-only filesystem access. `path` is an advisory scoping hint. |
-| `fs.write` | `bread.fs.write` | Filesystem writes. Split from `fs.read` — a module that only reads shouldn't need to declare write access. |
-| `bluetooth` | `bread.bluetooth.*` | BlueZ control — power/connect/disconnect/scan/devices. |
+| `fs.write` | `bread.fs.write` | Filesystem writes. Split from `fs.read`: a module that only reads shouldn't need to declare write access. |
+| `bluetooth` | `bread.bluetooth.*` | BlueZ control: power/connect/disconnect/scan/devices. |
 
-Example — a module that switches wallpaper via `hyprpaper` based on the
+Example: a module that switches wallpaper via `hyprpaper` based on the
 current monitor layout, and reads images from one directory:
 
 ```toml
@@ -282,13 +282,13 @@ path = "~/Wallpapers"
 ```
 
 That module's `bread` table has `bread.exec`, `bread.state` (read
-functions only — no `bread.state.watch`), and `bread.fs` (read functions
-only — no `bread.fs.write`), plus the full baseline. `bread.hyprland`,
+functions only; no `bread.state.watch`), and `bread.fs` (read functions
+only; no `bread.fs.write`), plus the full baseline. `bread.hyprland`,
 `bread.bluetooth`, `bread.notify`, `bread.machine`, and `bread.widget` are
 all `nil`.
 
 An explicit empty list (`permissions = []`) is a deliberate "baseline only"
-declaration — different from omitting the key entirely. It scopes the
+declaration: different from omitting the key entirely. It scopes the
 module down for real but is *not* flagged by `bread doctor`, since the
 author made a conscious choice rather than just not knowing about this
 feature yet.
@@ -297,37 +297,37 @@ feature yet.
 
 This section describes the **in-process** scoping mechanism
 (`build_scoped_env` in `breadd/src/lua/mod.rs`), which only ever gated
-*presence* of a `bread.*` binding — the `path`/`bin` fields on each
+*presence* of a `bread.*` binding: the `path`/`bin` fields on each
 permission were recorded in the manifest but never checked against the
 actual arguments a module passed at runtime, and `os.execute`/`io.open`/
 `debug.*` remained fully reachable from Lua's standard library regardless
 of what a module's `bread` table contained. That's still exactly true for
 a module with **no manifest at all** (the legacy/backward-compat path,
-`ungated: true` in `modules.list`) — see [Out-of-process module
+`ungated: true` in `modules.list`): see [Out-of-process module
 sandboxing](#out-of-process-module-sandboxing-since-v16) below.
 
-*Since: v1.6* — a module that declares `[[permissions]]` (any, including
+*Since: v1.6*, a module that declares `[[permissions]]` (any, including
 an explicit empty list) no longer runs in-process at all. It's spawned as
 a separate, OS-sandboxed `bread-module-host` process instead, and for that
 process `path`/`bin` *are* enforced for real, at the kernel level, via a
-Landlock ruleset — independent of whether the module even uses the
+Landlock ruleset: independent of whether the module even uses the
 documented `bread.*` API or goes straight for `os.execute`/`io.open`. See
 the linked section for exactly what's covered and what's still deferred.
 
 ### `require("bread.devices")` still works from a scoped module
 
 Builtin library modules (`bread.devices`, `bread.monitors`, `bread.workspaces`,
-`bread.binds`) always load with the full ambient `bread` table — they're
+`bread.binds`) always load with the full ambient `bread` table: they're
 never subject to manifest-based scoping, regardless of what any third-party
 module that `require`s them declares. `require("bread.devices")` resolves
 via Lua's real `package.loaded` table (already populated by the time any
-third-party module loads, since builtins load first) — a real global,
+third-party module loads, since builtins load first): a real global,
 reachable from a scoped module through a metatable fallback to the true
 globals for everything that isn't `bread` itself (`pairs`, `string`,
 `table`, `require`, `package`, ...). The returned module's own functions
 (`devices.on()` etc.) were defined while `bread.devices` loaded unscoped,
-so they close over the *real* `bread` table as a Lua upvalue — closures
-capture their defining environment lexically, not the caller's — which is
+so they close over the *real* `bread` table as a Lua upvalue (closures
+capture their defining environment lexically, not the caller's), which is
 exactly why calling `devices.on(...)` from inside a scoped module works
 with no special-casing needed.
 
@@ -342,7 +342,7 @@ into `bread.module.toml`:
 bread modules audit bread-wifi
 ```
 
-This is a text scan, not a Lua parser — false positives (suggesting a
+This is a text scan, not a Lua parser: false positives (suggesting a
 permission the module doesn't strictly need) are expected and fine; false
 negatives on a plain `bread.exec("...")`-style call site should be rare,
 but dynamic/computed call sites (`bread[method_name](...)`) won't be
@@ -353,7 +353,7 @@ detected.
 ### The gap this closes
 
 Capability-scoped modules (above) gate the *documented* `bread.*` API
-surface — a module without `fs.read` sees `bread.fs == nil`. They never
+surface: a module without `fs.read` sees `bread.fs == nil`. They never
 gated Lua's own standard library: `os.execute`, `io.open`, `debug.*`
 remained fully reachable from a scoped module's chunk regardless of what
 its `bread` table contained, because that chunk still ran as ordinary Lua
@@ -364,8 +364,8 @@ a permission is missing; a deliberately adversarial one just calls
 nothing left to say about it.
 
 This workstream closes that gap for any module that declares
-`[[permissions]]` in `bread.module.toml` — including an explicit empty
-list — by running it in a **separate OS process**, sandboxed at the kernel
+`[[permissions]]` in `bread.module.toml`, including an explicit empty
+list, by running it in a **separate OS process**, sandboxed at the kernel
 level via [Landlock](https://docs.kernel.org/userspace-api/landlock.html),
 instead of inside `breadd`'s own process.
 
@@ -373,13 +373,13 @@ instead of inside `breadd`'s own process.
 
 A module with **no manifest at all** (no `bread.module.toml`, or one with
 no `permissions` key) keeps today's pre-v1.6 behavior unchanged: loaded
-in-process, full ungated `bread` table, `os`/`io`/`debug` reachable —
+in-process, full ungated `bread` table, `os`/`io`/`debug` reachable:
 surfaced as `"ungated": true` in `modules.list`/`state.get "modules"`,
 which is exactly what `bread doctor` reads to warn about it. This is a
 deliberate scope decision, not an oversight: Landlock needs concrete rules
 to build a ruleset from, and "no manifest at all" carries no information
 to build one. A module author who wants real OS-level isolation writes a
-manifest — that's the whole point of the capability system this reuses.
+manifest: that's the whole point of the capability system this reuses.
 Built-in modules (`bread.devices`/`monitors`/`workspaces`/`binds`) are
 completely unaffected either way; they never go through manifest-based
 scoping.
@@ -418,33 +418,33 @@ breadd (trusted)                    bread-module-host (sandboxed, per module)
 
 One `bread-module-host` process per out-of-process module. Its own
 dependency footprint is deliberately minimal (`mlua`, `tokio`,
-`serde_json`, `bread-shared`) — it's reviewable attack surface in its own
+`serde_json`, `bread-shared`): it's reviewable attack surface in its own
 right, running one module's untrusted Lua.
 
 ### The token/identity handshake
 
 Workstream A deliberately did not build a generic IPC connection-identity
-system — it closed a narrower spoofing gap instead — so there was no
+system, it closed a narrower spoofing gap instead, so there was no
 `module:<name>` identity concept to reuse. `breadd` generates a random
 one-time token (a v4 UUID) when spawning a module-host child and passes it
-via the `$BREAD_MODULE_TOKEN` **environment variable**, not argv — argv is
+via the `$BREAD_MODULE_TOKEN` **environment variable**, not argv: argv is
 visible to any process on the system via `/proc/<pid>/cmdline`, env vars
 are not without `/proc/<pid>/environ` and matching privileges. The child's
 first message on the IPC socket, `module_host.hello {token}`, presents
 that token; `breadd` looks up which module name/permission set the token
 was issued for (`ModuleHostRegistry::take_pending`, a one-time,
 consume-on-read lookup) and replies with that identity. The child never
-asserts its own name and has that trusted — an adversarial process holding
+asserts its own name and has that trusted: an adversarial process holding
 a *stolen or guessed* token still can't claim to be a different module
 than the one `breadd` actually spawned that token for, and a token is
 consumed on first use so it can't be replayed.
 
 Other env vars passed to the child: `$BREAD_MODULE_ENTRY` (absolute path
 to the module's `init.lua`) and `$BREAD_MODULE_SOCKET` (breadd's socket
-path, for test harnesses that override it — production defaults to the
+path, for test harnesses that override it; production defaults to the
 same `bread_shared::resolve_socket_path()` every other client uses).
 `$BREAD_MODULE_NAME` is also passed, but purely informational (early log
-lines before the hello handshake completes) — never trusted for identity
+lines before the hello handshake completes): never trusted for identity
 or permission lookup.
 
 ### The Landlock sandbox
@@ -457,15 +457,15 @@ setuid helper, no `CAP_SYS_ADMIN`), and fits this workspace's existing
 preference for native Rust crates over shelling out to external tools
 (same reasoning as `udev`/`zbus`/`rtnetlink` instead of CLI wrappers).
 `bubblewrap`-wrapping remains a documented fallback for a target kernel
-that lacks Landlock (pre-5.13, or compiled out) — not implemented, since
+that lacks Landlock (pre-5.13, or compiled out): not implemented, since
 Landlock covers this project's actual target.
 
 The ruleset is built in `breadd` (the parent) and applied via
-`Command::pre_exec` — the closure runs in the forked child, after
+`Command::pre_exec`: the closure runs in the forked child, after
 `fork()` but before `execve()`, so the restriction covers the module-host
 binary's own startup, not just the Lua that runs after. Because of that,
 `bread-module-host` itself needs **zero** Landlock-related code or
-dependency — by the time its `main()` runs, the restriction is already
+dependency: by the time its `main()` runs, the restriction is already
 active and inherited across the `execve()` that started it.
 
 What the ruleset grants, from `breadd/src/module_host.rs`'s
@@ -473,43 +473,43 @@ What the ruleset grants, from `breadd/src/module_host.rs`'s
 
 | Grant | Access | Why |
 |-------|--------|-----|
-| System library directories (`/usr/lib`, `/lib`, ...) + `/etc/ld.so.cache`/`.preload` | Read + **Execute** | The dynamic linker needs this to start *any* dynamically-linked binary at all — see the note below on why `Execute` is required here, not just `Read`. |
+| System library directories (`/usr/lib`, `/lib`, ...) + `/etc/ld.so.cache`/`.preload` | Read + **Execute** | The dynamic linker needs this to start *any* dynamically-linked binary at all: see the note below on why `Execute` is required here, not just `Read`. |
 | The `bread-module-host` binary's own resolved path | Read + Execute | The one `execve()` this process is expected to have already performed. |
-| The module's own directory (`init.lua`'s parent) | Read | So the bootstrap process can load the module's Lua at all — distinct from any `fs.read` grant, which governs the module's *own* runtime file I/O, not breadd's ability to hand it its own source. |
+| The module's own directory (`init.lua`'s parent) | Read | So the bootstrap process can load the module's Lua at all: distinct from any `fs.read` grant, which governs the module's *own* runtime file I/O, not breadd's ability to hand it its own source. |
 | `fs.read` with a `path` hint | Read, scoped to that (`~`-expanded) path prefix | Direct mapping from the manifest. |
 | `fs.write` with a `path` hint | Read + Write + create, scoped to that path prefix | Matches `bread.fs.write`'s own `create_dir_all` + `write` behavior. |
 | `exec` with a `bin` hint | Read + Execute, scoped to that binary's resolved path | Absolute paths used as-is; bare names resolved via a `$PATH` search, `which`-style. |
 
 **No `fs.read`/`fs.write`/`exec` granted at all means no corresponding
-Landlock rule exists, full stop** — the sandboxed process cannot read,
+Landlock rule exists, full stop**: the sandboxed process cannot read,
 write, or execute anything outside the fixed baseline above, regardless
 of what it tries via `os`/`io` directly.
 
 **A note on `Execute` and shared libraries**: an earlier version of this
 mechanism assumed Landlock's `Execute` right only gates `execve()`, and
 that plain `Read` would be enough for the dynamic linker's `mmap(...,
-PROT_EXEC, ...)` of `.so` files. That assumption was wrong — verified
+PROT_EXEC, ...)` of `.so` files. That assumption was wrong: verified
 empirically (not just reasoned about) by spawning a real sandboxed child:
 with library directories restricted to `Read`-only, even `/bin/sh -c
 "true"` failed to start at all (`EACCES` on `execve` before a single line
 of script ran); granting `Execute` on those directories too fixed it. The
 practical consequence: a module-host child's direct `os.execute`/`io.open`
 escape hatch, if it names a path under a system library directory
-specifically, is not denied the way an arbitrary path elsewhere is — the
+specifically, is not denied the way an arbitrary path elsewhere is: the
 baseline necessarily grants real `Execute` there. This is a materially
 smaller exposure than no sandbox at all (bounded to files already shipped
 in the system's own library directories, not the whole filesystem), but
 it's a real, known trade-off, not swept under the rug. See
 `breadd/src/module_host.rs`'s `apply_sandbox` doc comment for the full
 reasoning, including why a fully static (`x86_64-unknown-linux-musl`)
-build of `bread-module-host` — confirmed available on this project's dev
-machine — would remove the need for this baseline entirely, and why that
+build of `bread-module-host` (confirmed available on this project's dev
+machine) would remove the need for this baseline entirely, and why that
 wasn't attempted in this pass (a build/packaging change, not a sandbox
 logic change).
 
 **fs.read/fs.write with no `path` hint**: the RPC bridge's own
 belt-and-suspenders permission check still applies, but no Landlock rule
-is added — Landlock scoping needs a concrete path, and a hint-less grant
+is added: Landlock scoping needs a concrete path, and a hint-less grant
 carries none. A module author who wants the direct `os`/`io` escape hatch
 mediated at the kernel level too needs to declare a `path`.
 
@@ -526,8 +526,8 @@ in-process bindings. Covered:
 
 - **Baseline**, always present: `bread.on`/`.once`/`.off`/`.emit`,
   `bread.after`/`.every`/`.cancel`, `bread.json.decode`, `bread.module`
-  (with a process-local `.store` — see the note below), `bread.log`/
-  `.warn`/`.error`. Also `bread.spawn`/`bread.wait` — the same pure-Lua
+  (with a process-local `.store`; see the note below), `bread.log`/
+  `.warn`/`.error`. Also `bread.spawn`/`bread.wait`: the same pure-Lua
   coroutine sugar `breadd`'s own `install_wait_helper` uses, since it's
   built entirely on top of `on`/`once`/`after`/`cancel`, all of which are
   bridged; the source is currently duplicated between `breadd` and
@@ -539,22 +539,22 @@ in-process bindings. Covered:
 
 Events/timers are delivered as unsolicited, tagged push messages
 interleaved with ordinary request/response lines on the same connection
-(`bread_shared::module_host_ipc::ModuleHostPush`) — a subscription
+(`bread_shared::module_host_ipc::ModuleHostPush`): a subscription
 registered via `module_host.on`/`.once` is matched server-side against the
 same event broadcast every other IPC subscriber reads from.
 
-**Not yet bridged** (P1/P2 — see below): `bread.state.monitors`/
+**Not yet bridged** (P1/P2, see below): `bread.state.monitors`/
 `.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/
 `.profile` shorthands, `bread.state.watch`, `bread.fs.exists`/`.readlink`/
 `.expand`, `bread.profile.activate`, `bread.notify`, `bread.machine.*`,
 `bread.hyprland.*`, `bread.widget.*`, `bread.bluetooth.*`,
 `bread.wait_any`/`.wait_all`/`bread.workflow.*`. These namespaces are
 simply absent (`nil`) from an out-of-process module's `bread` table
-regardless of what the manifest grants — a real coverage gap versus the
+regardless of what the manifest grants: a real coverage gap versus the
 in-process mechanism, not a permission-check bug.
 
 **`bread.module().store` is process-local**, not synced back to `breadd`'s
-`RuntimeState` — a real, known limitation versus the in-process mechanism
+`RuntimeState`: a real, known limitation versus the in-process mechanism
 (where `M.store.set`/`.get` persists in daemon state and is visible to
 `bread modules info`/other tooling). Fine for a module's own private
 scratch state; not fine yet for anything expecting cross-process
@@ -564,9 +564,9 @@ use `bread.emit(...)` instead, which does cross the process boundary.
 ### Crash isolation
 
 Each spawned `bread-module-host` child is reaped by a dedicated thread in
-`breadd` (`std::process::Child::wait()`, blocking on that thread only —
-never blocking the IPC server or the Lua engine). On exit for any reason —
-clean shutdown, a Lua panic, `kill -9` — `breadd` emits
+`breadd` (`std::process::Child::wait()`, blocking on that thread only;
+never blocking the IPC server or the Lua engine). On exit for any reason
+(clean shutdown, a Lua panic, `kill -9`), `breadd` emits
 `bread.module.crashed` with `{ module, pid, reason, exit_code, signal }`
 and updates that module's status. Verified end-to-end
 (`breadd/tests/module_host_sandbox.rs`): killing a module-host child with
@@ -575,18 +575,18 @@ out-of-process) fully responsive, and the crash event fires with the
 correct module name and `signal: 9`.
 
 This is deliberately **detection and reporting**, not a restart/backoff
-policy — a crashed module-host stays down until the next `bread reload`
+policy: a crashed module-host stays down until the next `bread reload`
 (or daemon restart) respawns it. Richer supervision (auto-restart,
 backoff, a circuit breaker) is flagged as follow-up work, not attempted
 here.
 
 ### New IPC methods
 
-*Since: v1.6 — `API_VERSION` bumped from `1.5.0` to `1.6.0` in
+*Since: v1.6, `API_VERSION` bumped from `1.5.0` to `1.6.0` in
 `breadd/src/ipc/mod.rs` for this addition.* All new methods live under the
 `module_host.*` prefix and are only meaningful on a connection that has
 completed the `module_host.hello` handshake (see the token/identity
-section above) — see [Dictionary: IPC protocol](#dictionary-ipc-protocol)
+section above): see [Dictionary: IPC protocol](#dictionary-ipc-protocol)
 for the full list alongside the pre-existing methods.
 
 ### What's implemented vs. deferred
@@ -614,7 +614,7 @@ for the full list alongside the pre-existing methods.
 - `bread.state.get` (not originally required for the P0 minimum, added
   because a pre-existing capability-manifest test exercised it).
 
-**Deferred (P1 — do next if this workstream continues)**:
+**Deferred (P1, do next if this workstream continues)**:
 - `trust = "in-process"` manifest escape hatch for latency-sensitive
   modules that want to opt back into today's D-mechanism deliberately.
 - Extracting `bread.spawn`/`bread.wait`'s embedded Lua source (currently
@@ -624,10 +624,10 @@ for the full list alongside the pre-existing methods.
   `.monitors`/`.active_workspace`/etc. shorthands, `bread.fs.exists`/
   `.readlink`/`.expand`, `bread.profile.activate`, `bread.notify`,
   `bread.machine.*`, `bread.hyprland.*`, `bread.widget.*`,
-  `bread.bluetooth.*`, `bread.wait_any`/`.wait_all`/`bread.workflow.*` —
+  `bread.bluetooth.*`, `bread.wait_any`/`.wait_all`/`bread.workflow.*`:
   mechanically the same pattern as the ones already bridged.
 
-**Deferred (P2 — explicitly out of scope for this pass)**:
+**Deferred (P2, explicitly out of scope for this pass)**:
 - Network sandboxing / a `network` permission kind.
 - `bread modules info` showing the resolved sandbox profile.
 - Full restart/backoff supervision policy for crashed module-hosts.
@@ -638,7 +638,7 @@ for the full list alongside the pre-existing methods.
 ## Debugging tips
 
 - Run `bread events` to see live normalized events.
-- Run `bread events --tree` *(Since: v1.5)* to render events as a causality tree instead of a flat stream — events that a Lua handler emitted via `bread.emit()` in reaction to another event are nested underneath it, following the `caused_by` chain (see [Dictionary: Event reference](#dictionary-event-reference)). Useful for untangling "why did this event fire" when several modules chain-react to each other.
+- Run `bread events --tree` *(Since: v1.5)* to render events as a causality tree instead of a flat stream: events that a Lua handler emitted via `bread.emit()` in reaction to another event are nested underneath it, following the `caused_by` chain (see [Dictionary: Event reference](#dictionary-event-reference)). Useful for untangling "why did this event fire" when several modules chain-react to each other.
 - Run `bread state` to see full runtime state as JSON.
 - Run `bread doctor` to check adapter and module health, including modules
   running with full, ungated `bread.*` access because they have no
@@ -702,7 +702,7 @@ end, {
 Unsubscribe an event handler or state watch by ID.
 
 #### `bread.emit(event, data)`
-Emit a custom event into the system pipeline. Useful for cross-module communication. If called synchronously from inside a `bread.on` subscriber callback (i.e. in reaction to a matched event), the emitted event's `caused_by` *(Since: v1.5)* is set to the id of the event that triggered the callback, threading causality across chains of modules that react to each other — see [Dictionary: Event reference](#dictionary-event-reference).
+Emit a custom event into the system pipeline. Useful for cross-module communication. If called synchronously from inside a `bread.on` subscriber callback (i.e. in reaction to a matched event), the emitted event's `caused_by` *(Since: v1.5)* is set to the id of the event that triggered the callback, threading causality across chains of modules that react to each other: see [Dictionary: Event reference](#dictionary-event-reference).
 
 #### `bread.wait(pattern, opts) -> event | nil`
 Coroutine-only helper that suspends until a matching event arrives.
@@ -739,7 +739,7 @@ Coroutine-only. Resolves once every listed pattern has fired at least once, or `
 
 ### Workflows *(Since: v1.2)*
 
-Multi-step automations built on `bread.spawn`/`bread.wait` (and `wait_any`/`wait_all`), with status introspectable from outside the running coroutine — via Lua (`bread.workflow.status`/`.list`) or over IPC (`workflows.list`). See [Examples.md](Examples.md#example-4-multi-step-automation-workflows) for a full worked example.
+Multi-step automations built on `bread.spawn`/`bread.wait` (and `wait_any`/`wait_all`), with status introspectable from outside the running coroutine: via Lua (`bread.workflow.status`/`.list`) or over IPC (`workflows.list`). See [Examples.md](Examples.md#example-4-multi-step-automation-workflows) for a full worked example.
 
 #### `bread.workflow.define(name, fn)`
 Register a workflow body under `name`. `fn` receives one argument: whatever `opts.args` was passed to `.start()` (or `nil`).
@@ -749,13 +749,13 @@ Run the workflow registered as `name` (spawned as a coroutine, same mechanics as
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `deadline` | ms | If the workflow hasn't reached a terminal state by then, its status becomes `timed_out`. Independent of any per-`wait` timeout inside the body — a safety net for the whole run, not a replacement for step-level timeouts. |
+| `deadline` | ms | If the workflow hasn't reached a terminal state by then, its status becomes `timed_out`. Independent of any per-`wait` timeout inside the body: a safety net for the whole run, not a replacement for step-level timeouts. |
 | `args` | any | Passed through as the sole argument to the workflow body function. |
 
-Starting a workflow under a name that's already running **replaces** its registry entry — this is a live-status registry, not a run history.
+Starting a workflow under a name that's already running **replaces** its registry entry: this is a live-status registry, not a run history.
 
 #### `bread.workflow.step(label)`
-Call from inside a running workflow body to record "currently here." Purely observational — it does not affect control flow. Errors if called outside a running workflow body.
+Call from inside a running workflow body to record "currently here." Purely observational: it does not affect control flow. Errors if called outside a running workflow body.
 
 #### `bread.workflow.status(name) -> table | nil`
 Returns the current status for `name`, or `nil` if no workflow with that name has ever been started. Shape:
@@ -778,9 +778,9 @@ Returns an array of every workflow's current status, in the same shape as `bread
 
 ### Widgets *(Since: v1.3)*
 
-Declarative, live-updating widgets rendered by sibling `bread*` apps (breadbar) in their own bar/popover free space. A widget is a small tree of typed nodes — `box`, `label`, `icon`, `progress` — not raw markup: this keeps rendering generic across every consuming app and keeps a node's appearance confined to a bounded, typed `style` vocabulary the renderer already knows about (see `style` below), with no style/CSS injection surface from Lua.
+Declarative, live-updating widgets rendered by sibling `bread*` apps (breadbar) in their own bar/popover free space. A widget is a small tree of typed nodes (`box`, `label`, `icon`, `progress`), not raw markup: this keeps rendering generic across every consuming app and keeps a node's appearance confined to a bounded, typed `style` vocabulary the renderer already knows about (see `style` below), with no style/CSS injection surface from Lua.
 
-Widgets are registered per-module and are re-registered fresh on every hot reload (the whole registry is cleared right before the Lua VM resets, same as `bread.module`'s per-reload re-execution) — call `bread.widget.register` at module top level or in `on_load`, not somewhere that only runs once ever.
+Widgets are registered per-module and are re-registered fresh on every hot reload (the whole registry is cleared right before the Lua VM resets, same as `bread.module`'s per-reload re-execution): call `bread.widget.register` at module top level or in `on_load`, not somewhere that only runs once ever.
 
 #### `bread.widget.register(spec) -> ok, err`
 Registers (or replaces, if `spec.id` already exists for this module) a widget. `spec`:
@@ -788,7 +788,7 @@ Registers (or replaces, if `spec.id` already exists for this module) a widget. `
 | Key | Type | Description |
 |-----|------|-------------|
 | `id` | string | Local id, unique within your module. Stored/addressed elsewhere as `"<module>.<id>"`. |
-| `placement` | string | One of `tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats` — which fixed slot in the consuming app's layout this widget renders into. |
+| `placement` | string | One of `tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats`: which fixed slot in the consuming app's layout this widget renders into. |
 | `order` | number | Optional, default `0`. Sort priority within a placement; lower sorts first. |
 | `visible` | bool | Optional, default `true`. |
 | `tooltip` | string | Optional. |
@@ -798,16 +798,16 @@ Returns `true` on success, or `false, err` if `root` fails validation (tree too 
 
 ##### Node types
 
-Every node accepts an optional `style` (a bounded, typed vocabulary — see below; this is the primary way to control a node's appearance), an optional `class` (a small freeform escape hatch, see [Style vs. class](#style-vs-class) below), and an optional `on_click` (any Lua value, passed through opaquely — see Click events below).
+Every node accepts an optional `style` (a bounded, typed vocabulary, see below; this is the primary way to control a node's appearance), an optional `class` (a small freeform escape hatch, see [Style vs. class](#style-vs-class) below), and an optional `on_click` (any Lua value, passed through opaquely, see Click events below).
 
 | `type` | Fields |
 |--------|--------|
 | `box` | `orientation` (`"horizontal"` \| `"vertical"`, default horizontal), `spacing`, `children` (array of nodes) |
 | `label` | `text` |
-| `icon` | `name` (bundled icon) or `path` (arbitrary SVG file) — exactly one; `size` |
+| `icon` | `name` (bundled icon) or `path` (arbitrary SVG file), exactly one; `size` |
 | `progress` | `value` (0.0–1.0) |
 
-A tree is capped at depth 4 (root counts as depth 1) and 50 total nodes — comfortably enough for a status readout, not enough to build a full custom UI.
+A tree is capped at depth 4 (root counts as depth 1) and 50 total nodes: comfortably enough for a status readout, not enough to build a full custom UI.
 
 ```lua
 bread.widget.register({
@@ -826,19 +826,19 @@ bread.widget.register({
 
 ##### `style` *(Since: v1.4)*
 
-`style` is a bounded, typed vocabulary for a node's appearance — every field is a small closed enum, not a string, so a typo is a `bread.widget.register` validation failure at registration time, not a silently-ignored CSS class. There is deliberately **no raw CSS/style-string field** anywhere in this API: a module can only ever pick from the fixed set below, never inject arbitrary style.
+`style` is a bounded, typed vocabulary for a node's appearance: every field is a small closed enum, not a string, so a typo is a `bread.widget.register` validation failure at registration time, not a silently-ignored CSS class. There is deliberately **no raw CSS/style-string field** anywhere in this API: a module can only ever pick from the fixed set below, never inject arbitrary style.
 
 | Field | Type | Values |
 |-------|------|--------|
 | `color` | string | `fg`, `dim` (muted foreground), `accent`, `red`, `green`, `yellow`, `blue`, `pink`, `teal` |
 | `weight` | string | `normal`, `bold` |
-| `size` | string | `xs`, `sm`, `md`, `lg`, `xl` — text size in px (10/12/14/16/20); `sm`/`md` match the bread design system's own secondary/base font sizes |
+| `size` | string | `xs`, `sm`, `md`, `lg`, `xl`: text size in px (10/12/14/16/20); `sm`/`md` match the bread design system's own secondary/base font sizes |
 | `align` | string | `start`, `center`, `end` |
 | `background` | string | `none`, `surface`, `card` (surface + rounded corners + padding) |
 | `radius` | string | `none`, `sm`, `md`, `full` (pill) |
 | `padding` | string | `none`, `xs`, `sm`, `md` |
 
-Every field is optional and independent — set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when pywal's palette changes instead of drifting out of sync.
+Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when pywal's palette changes instead of drifting out of sync.
 
 ```lua
 { type = "label", text = "LOW BATTERY", style = { color = "yellow", weight = "bold" } }
@@ -846,10 +846,10 @@ Every field is optional and independent — set only what you need. Colors, font
 
 ##### Style vs. `class`
 
-`class` still exists as an escape hatch for a CSS class the *consuming app's own stylesheet* happens to define (restricted to `^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`) — useful if you're targeting a specific app you know the internals of, but undiscoverable and app-specific otherwise. As of this writing, breadbar's stylesheet only gives real meaning to `dim` this way (fades a node to 60% opacity) — everything else a module needs (color, weight, size, alignment, background, radius, padding) should go through `style` instead, which every renderer is expected to understand identically.
+`class` still exists as an escape hatch for a CSS class the *consuming app's own stylesheet* happens to define (restricted to `^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`): useful if you're targeting a specific app you know the internals of, but undiscoverable and app-specific otherwise. As of this writing, breadbar's stylesheet only gives real meaning to `dim` this way (fades a node to 60% opacity): everything else a module needs (color, weight, size, alignment, background, radius, padding) should go through `style` instead, which every renderer is expected to understand identically.
 
 #### `bread.widget.update(id, patch) -> ok, err`
-Patches an already-registered widget (local `id`, not the fully-qualified form). Any of `root`, `tooltip`, `visible`, `order` may be given; omitted fields are left as-is. `root`, when given, replaces the whole tree — there is no node-level patching. Returns `false, "no such widget"` if `id` isn't registered.
+Patches an already-registered widget (local `id`, not the fully-qualified form). Any of `root`, `tooltip`, `visible`, `order` may be given; omitted fields are left as-is. `root`, when given, replaces the whole tree: there is no node-level patching. Returns `false, "no such widget"` if `id` isn't registered.
 
 ```lua
 bread.widget.update("weather", {
@@ -865,7 +865,7 @@ Returns an array of every widget the calling module currently has registered.
 
 ##### Click events
 
-A clicked node's `on_click` value doesn't travel back through `breadd` directly — the rendering app (breadbar) emits `bread.bar.widget_clicked` with `{ widget_id, action }` (`action` being whatever you put in `on_click`), because a rendering app may only publish inside its own `bread.<app_id>.*` namespace (see [Namespaces](#namespaces)). React to it like any other event, filtering on `widget_id`:
+A clicked node's `on_click` value doesn't travel back through `breadd` directly: the rendering app (breadbar) emits `bread.bar.widget_clicked` with `{ widget_id, action }` (`action` being whatever you put in `on_click`), because a rendering app may only publish inside its own `bread.<app_id>.*` namespace (see [Namespaces](#namespaces)). React to it like any other event, filtering on `widget_id`:
 
 ```lua
 bread.on("bread.bar.widget_clicked", function(e)
@@ -922,7 +922,7 @@ Run a shell command. Fire-and-forget (async, does not block Lua).
 Run a shell command and return its result: `ok` is whether it exited zero,
 `stdout` is its captured standard output. Unlike `bread.exec`, this blocks
 the calling Lua callback until the command exits (or the timeout below
-elapses), so it's only appropriate for fast, local commands — e.g.
+elapses), so it's only appropriate for fast, local commands: e.g.
 `git -C <dir> rev-parse --abbrev-ref HEAD`, not anything that hits the
 network or waits on user input.
 
@@ -1009,7 +1009,7 @@ Returns true if the path exists. `~` is expanded.
 #### `bread.fs.readlink(path) -> string | nil`
 Read a symlink's target. Returns `nil` if the path doesn't exist or isn't a
 symlink. Distinct from `bread.fs.read`, which opens and reads file
-*contents* — for something like `/proc/<pid>/cwd`, the payload is the link
+*contents*: for something like `/proc/<pid>/cwd`, the payload is the link
 target itself, not a file to read.
 
 #### `bread.fs.expand(path) -> string`
@@ -1050,7 +1050,7 @@ end)
 
 ### Bluetooth
 
-The `bread.bluetooth` namespace provides control over the local Bluetooth adapter and its paired devices via BlueZ D-Bus. All functions degrade gracefully when BlueZ is unavailable — control functions log a warning and return `nil`, query functions return `nil`.
+The `bread.bluetooth` namespace provides control over the local Bluetooth adapter and its paired devices via BlueZ D-Bus. All functions degrade gracefully when BlueZ is unavailable: control functions log a warning and return `nil`, query functions return `nil`.
 
 #### `bread.bluetooth.power(enabled)`
 Power the Bluetooth adapter on (`true`) or off (`false`). Fire-and-forget.
@@ -1065,14 +1065,14 @@ end
 ```
 
 #### `bread.bluetooth.connect(address)`
-Connect to a paired device by MAC address. Fire-and-forget — the result is delivered as a `bread.device.connected` event when the connection succeeds.
+Connect to a paired device by MAC address. Fire-and-forget: the result is delivered as a `bread.device.connected` event when the connection succeeds.
 
 ```lua
 bread.bluetooth.connect("AA:BB:CC:DD:EE:FF")
 ```
 
 #### `bread.bluetooth.disconnect(address)`
-Disconnect from a device by MAC address. Fire-and-forget — delivered as `bread.device.disconnected`.
+Disconnect from a device by MAC address. Fire-and-forget: delivered as `bread.device.disconnected`.
 
 #### `bread.bluetooth.scan(enabled)`
 Start (`true`) or stop (`false`) device discovery.
@@ -1169,7 +1169,7 @@ Built-ins are loaded before user modules. Disable them via `[modules].disable` i
 ### `bread.rules` *(Since: v1.5)*
 
 The Lua side of the `rules.toml` declarative automation layer described in
-[Getting started](#getting-started) — there is no separate API to call
+[Getting started](#getting-started): there is no separate API to call
 here, it's driven entirely by `~/.config/bread/rules.toml`. Listed here (and
 disable-able via `[modules].disable = ["bread.rules"]` like every other
 built-in) because it's a real module the same way `bread.devices` is, just
@@ -1190,11 +1190,11 @@ on = "device.keyboard.connected"
 exec = "xset r rate 200 40"
 ```
 
-Each rule's `on` becomes a `bread.on("bread." .. on, ...)` subscription —
+Each rule's `on` becomes a `bread.on("bread." .. on, ...)` subscription:
 see [Getting started](#getting-started) for the full `run`/`exec`/`notify`
 semantics and validation rules. `rules.toml`'s absence is not an error;
 parse/validation problems are reported the same way a broken hand-written
-module's `on_load` error would be — via `bread doctor` / `modules.list`,
+module's `on_load` error would be: via `bread doctor` / `modules.list`,
 against the `bread.rules` module name.
 
 ### `bread.monitors`
@@ -1227,7 +1227,7 @@ monitors.on({
 
 Device connection rules with name-based matching. This module handles hardware hotplug events from USB devices, monitors, and other peripherals.
 
-Device names are defined in `~/.config/bread/devices.lua` — the daemon resolves the name before dispatching events, so modules can match on stable user-defined names rather than raw hardware identifiers.
+Device names are defined in `~/.config/bread/devices.lua`: the daemon resolves the name before dispatching events, so modules can match on stable user-defined names rather than raw hardware identifiers.
 
 ```lua
 local devices = require("bread.devices")
@@ -1385,8 +1385,8 @@ Events are delivered as a `BreadEvent`:
 }
 ```
 
-- **`id`** *(Since: v1.5)* — a unique id assigned to this specific event instance at construction. Every `BreadEvent`, regardless of origin (adapter-normalized, IPC `emit`, Lua `bread.emit()`, or a daemon-internal send like `bread.system.startup`), gets one.
-- **`caused_by`** *(Since: v1.5)* — the `id` of the event whose Lua subscriber handler emitted this event via `bread.emit()`, or `null` if this event did not originate from inside a running handler (adapter events, IPC `emit`, daemon-internal sends). This lets you reconstruct causality chains across modules that react to each other's events: if module A's handler for event X calls `bread.emit("Y", ...)`, then Y's `caused_by` is X's `id`. See `bread events --tree` below for a rendering of these chains.
+- **`id`** *(Since: v1.5)*: a unique id assigned to this specific event instance at construction. Every `BreadEvent`, regardless of origin (adapter-normalized, IPC `emit`, Lua `bread.emit()`, or a daemon-internal send like `bread.system.startup`), gets one.
+- **`caused_by`** *(Since: v1.5)*: the `id` of the event whose Lua subscriber handler emitted this event via `bread.emit()`, or `null` if this event did not originate from inside a running handler (adapter events, IPC `emit`, daemon-internal sends). This lets you reconstruct causality chains across modules that react to each other's events: if module A's handler for event X calls `bread.emit("Y", ...)`, then Y's `caused_by` is X's `id`. See `bread events --tree` below for a rendering of these chains.
 
 ### Pattern matching
 
@@ -1404,7 +1404,7 @@ Events are delivered as a `BreadEvent`:
 | Event | Data |
 |-------|------|
 | `bread.system.startup` | `{}` |
-| `bread.module.crashed` *(Since: v1.6)* | `{ module, pid, reason, exit_code, signal }` — an out-of-process `bread-module-host` child exited (crash, panic, `kill -9`, ...). `exit_code`/`signal` are mutually exclusive (whichever applies); see [Out-of-process module sandboxing](#out-of-process-module-sandboxing-since-v16). |
+| `bread.module.crashed` *(Since: v1.6)* | `{ module, pid, reason, exit_code, signal }`: an out-of-process `bread-module-host` child exited (crash, panic, `kill -9`, ...). `exit_code`/`signal` are mutually exclusive (whichever applies); see [Out-of-process module sandboxing](#out-of-process-module-sandboxing-since-v16). |
 
 #### Devices (udev / Bluetooth)
 
@@ -1439,34 +1439,34 @@ Both USB/udev devices and Bluetooth devices emit `bread.device.connected` / `bre
 
 #### Hyprland
 
-*Since: v1.5 — the `bread.hyprland.*` namespaced forms below. Bread's event vocabulary is meant to be portable across a future second compositor backend; a flat `bread.workspace.*`/`bread.monitor.*`/`bread.window.*` name gave no way to tell a genuinely cross-backend event (like `bread.power.*`) apart from one that is Hyprland-specific. The 10 rows marked `Deprecated: v1.5` are unaffected functionally — they keep firing — but new automation should subscribe to their `bread.hyprland.*` sibling instead.*
+*Since: v1.5, the `bread.hyprland.*` namespaced forms below. Bread's event vocabulary is meant to be portable across a future second compositor backend; a flat `bread.workspace.*`/`bread.monitor.*`/`bread.window.*` name gave no way to tell a genuinely cross-backend event (like `bread.power.*`) apart from one that is Hyprland-specific. The 10 rows marked `Deprecated: v1.5` are unaffected functionally, they keep firing, but new automation should subscribe to their `bread.hyprland.*` sibling instead.*
 
 Every Hyprland-sourced event below is dual-emitted: the daemon fires both the legacy flat name and its `bread.hyprland.<rest>` equivalent with identical `data`/`timestamp`/`source`, unless `[compat] legacy_hyprland_event_names = false` is set (see below), in which case only the namespaced name fires. A module that subscribes only to `bread.hyprland.*` always gets full workspace/monitor/window coverage regardless of that setting.
 
 | Event | Data |
 |-------|------|
-| `bread.workspace.changed` *(Deprecated: v1.5 — use `bread.hyprland.workspace.changed`)* | raw payload |
+| `bread.workspace.changed` *(Deprecated: v1.5, use `bread.hyprland.workspace.changed`)* | raw payload |
 | `bread.hyprland.workspace.changed` *(Since: v1.5)* | raw payload |
-| `bread.workspace.created` *(Deprecated: v1.5 — use `bread.hyprland.workspace.created`)* | `{ workspace }` |
+| `bread.workspace.created` *(Deprecated: v1.5, use `bread.hyprland.workspace.created`)* | `{ workspace }` |
 | `bread.hyprland.workspace.created` *(Since: v1.5)* | `{ workspace }` |
-| `bread.workspace.destroyed` *(Deprecated: v1.5 — use `bread.hyprland.workspace.destroyed`)* | `{ workspace }` |
+| `bread.workspace.destroyed` *(Deprecated: v1.5, use `bread.hyprland.workspace.destroyed`)* | `{ workspace }` |
 | `bread.hyprland.workspace.destroyed` *(Since: v1.5)* | `{ workspace }` |
-| `bread.monitor.connected` *(Deprecated: v1.5 — use `bread.hyprland.monitor.connected`)* | raw payload |
+| `bread.monitor.connected` *(Deprecated: v1.5, use `bread.hyprland.monitor.connected`)* | raw payload |
 | `bread.hyprland.monitor.connected` *(Since: v1.5)* | raw payload |
-| `bread.monitor.disconnected` *(Deprecated: v1.5 — use `bread.hyprland.monitor.disconnected`)* | raw payload |
+| `bread.monitor.disconnected` *(Deprecated: v1.5, use `bread.hyprland.monitor.disconnected`)* | raw payload |
 | `bread.hyprland.monitor.disconnected` *(Since: v1.5)* | raw payload |
-| `bread.window.focus.changed` *(Deprecated: v1.5 — use `bread.hyprland.window.focus.changed`)* | raw payload |
+| `bread.window.focus.changed` *(Deprecated: v1.5, use `bread.hyprland.window.focus.changed`)* | raw payload |
 | `bread.hyprland.window.focus.changed` *(Since: v1.5)* | raw payload |
-| `bread.window.focused` *(Deprecated: v1.5 — use `bread.hyprland.window.focused`)* | `{ address }` |
+| `bread.window.focused` *(Deprecated: v1.5, use `bread.hyprland.window.focused`)* | `{ address }` |
 | `bread.hyprland.window.focused` *(Since: v1.5)* | `{ address }` |
-| `bread.window.opened` *(Deprecated: v1.5 — use `bread.hyprland.window.opened`)* | `{ address, workspace, class, title }` |
+| `bread.window.opened` *(Deprecated: v1.5, use `bread.hyprland.window.opened`)* | `{ address, workspace, class, title }` |
 | `bread.hyprland.window.opened` *(Since: v1.5)* | `{ address, workspace, class, title }` |
-| `bread.window.closed` *(Deprecated: v1.5 — use `bread.hyprland.window.closed`)* | `{ address }` |
+| `bread.window.closed` *(Deprecated: v1.5, use `bread.hyprland.window.closed`)* | `{ address }` |
 | `bread.hyprland.window.closed` *(Since: v1.5)* | `{ address }` |
-| `bread.window.moved` *(Deprecated: v1.5 — use `bread.hyprland.window.moved`)* | `{ address, workspace }` |
+| `bread.window.moved` *(Deprecated: v1.5, use `bread.hyprland.window.moved`)* | `{ address, workspace }` |
 | `bread.hyprland.window.moved` *(Since: v1.5)* | `{ address, workspace }` |
-| `bread.hyprland.event` | `{ kind, raw, data }` (unhandled kinds — already namespaced, not part of this migration) |
-| `bread.hyprland.snapshot` *(Since: v1.7.1)* | `{ monitors, workspaces, active_workspace, active_window }` — emitted once after the Hyprland event socket connects (and again after a reconnect). `bread.state` applies this event to replace compositor topology so monitors/workspaces/focus are populated before the next live event. Not dual-emitted under a legacy name. |
+| `bread.hyprland.event` | `{ kind, raw, data }` (unhandled kinds, already namespaced, not part of this migration) |
+| `bread.hyprland.snapshot` *(Since: v1.7.1)* | `{ monitors, workspaces, active_workspace, active_window }`: emitted once after the Hyprland event socket connects (and again after a reconnect). `bread.state` applies this event to replace compositor topology so monitors/workspaces/focus are populated before the next live event. Not dual-emitted under a legacy name. |
 
 ##### Compatibility: `[compat]` config
 
@@ -1475,7 +1475,7 @@ Every Hyprland-sourced event below is dual-emitted: the daemon fires both the le
 legacy_hyprland_event_names = true   # default during the deprecation window
 ```
 
-Set to `false` to suppress the 10 legacy flat names above and emit only their `bread.hyprland.*` equivalents. This defaults to `true` for now; per the [API Stability & Versioning](#api-stability--versioning) deprecation-window policy, the default will flip to `false` in a later release once the window closes. Removing the legacy names entirely is a further, separate follow-up — see the note in `DEPRECATIONS.md`.
+Set to `false` to suppress the 10 legacy flat names above and emit only their `bread.hyprland.*` equivalents. This defaults to `true` for now; per the [API Stability & Versioning](#api-stability--versioning) deprecation-window policy, the default will flip to `false` in a later release once the window closes. Removing the legacy names entirely is a further, separate follow-up: see the note in `DEPRECATIONS.md`.
 
 #### Power
 
@@ -1506,18 +1506,18 @@ Set to `false` to suppress the 10 legacy flat names above and emit only their `b
 
 #### Widgets *(Since: v1.3)*
 
-Emitted by `breadd` itself on every `bread.widget.*` mutation — see [Widgets](#widgets-since-v13). `data` is the full `WidgetSpec` for `registered`/`updated`; just `{ id }` for `removed`.
+Emitted by `breadd` itself on every `bread.widget.*` mutation: see [Widgets](#widgets-since-v13). `data` is the full `WidgetSpec` for `registered`/`updated`; just `{ id }` for `removed`.
 
 | Event | Data |
 |-------|------|
 | `bread.widget.registered` | `{ id, module, placement, order, visible, tooltip, root, updated_at }` |
 | `bread.widget.updated` | same shape as `registered` |
 | `bread.widget.removed` | `{ id }` |
-| `bread.widget.cleared` | `{}` — fired once at the end of every module reload (`bread reload`), whether or not the widget set actually changed. The registry itself is wiped and re-populated as modules re-run; this is a "go re-fetch" signal for consumers that only react to `bread.widget.*` events, so a module that stops registering widgets (e.g. gets disabled) is noticed even though nothing else fires. |
+| `bread.widget.cleared` | `{}`: fired once at the end of every module reload (`bread reload`), whether or not the widget set actually changed. The registry itself is wiped and re-populated as modules re-run; this is a "go re-fetch" signal for consumers that only react to `bread.widget.*` events, so a module that stops registering widgets (e.g. gets disabled) is noticed even though nothing else fires. |
 
 #### Terminal (shell precmd/preexec hooks)
 
-Requires `bread hooks install shell` and sourcing the generated script from your shell rc — see the CLI reference. Fires via the `bread-emit` helper, not the daemon reaching out.
+Requires `bread hooks install shell` and sourcing the generated script from your shell rc: see the CLI reference. Fires via the `bread-emit` helper, not the daemon reaching out.
 
 | Event | Data |
 |-------|------|
@@ -1551,7 +1551,7 @@ Scoped to configured project roots (`[adapters.filesystem] roots = [...]`), not 
 
 #### Systemd (`systemd --user` units)
 
-Only units named in `[adapters.systemd] units = [...]` are watched — subscribing to every user unit is noisy.
+Only units named in `[adapters.systemd] units = [...]` are watched: subscribing to every user unit is noisy.
 
 | Event | Data |
 |-------|------|
@@ -1561,7 +1561,7 @@ Only units named in `[adapters.systemd] units = [...]` are watched — subscribi
 
 #### Podman (containers)
 
-Degrades to simply not emitting if the `podman` binary isn't installed — no daemon startup dependency on it.
+Degrades to simply not emitting if the `podman` binary isn't installed: no daemon startup dependency on it.
 
 | Event | Data |
 |-------|------|
@@ -1582,34 +1582,34 @@ Rides the same shell-hook transport as Terminal events (`bread hooks install she
 
 ## Namespaces
 
-*Since: v1.1 — the `AdapterSource::App` variant and the known-apps registry (`bread_shared::apps::KNOWN_APPS`). No sibling app emits through this path yet as of this writing except the breadclip pilot (see its own `EVENTS.md` once that lands); the daemon-side plumbing and the convention itself are what v1.1 adds.*
+*Since: v1.1, the `AdapterSource::App` variant and the known-apps registry (`bread_shared::apps::KNOWN_APPS`). No sibling app emits through this path yet as of this writing except the breadclip pilot (see its own `EVENTS.md` once that lands); the daemon-side plumbing and the convention itself are what v1.1 adds.*
 
-*Since: v1.3 — breadbar is now an active `bread-client` consumer under the `bar` app id (already present in `KNOWN_APPS`): it emits `bread.bar.widget_clicked` for widget clicks (see [Widgets](#widgets-since-v13)) and reads `bread.widget.*` to render the [Dictionary: Runtime state schema](#dictionary-runtime-state-schema)'s `widgets` field.*
+*Since: v1.3, breadbar is now an active `bread-client` consumer under the `bar` app id (already present in `KNOWN_APPS`): it emits `bread.bar.widget_clicked` for widget clicks (see [Widgets](#widgets-since-v13)) and reads `bread.widget.*` to render the [Dictionary: Runtime state schema](#dictionary-runtime-state-schema)'s `widgets` field.*
 
-Two dotted-name segments are reserved, permanent parts of the schema — not one-off conventions:
+Two dotted-name segments are reserved, permanent parts of the schema, not one-off conventions:
 
-- **`bread.<app>.*`** — inbound events published *by* a sibling `bread*` application about its own state (e.g. `bread.clip.copied`). An app may only publish within its own segment; the daemon enforces this at the IPC boundary (a socket client claiming a `source` of an app id it doesn't own is rejected the same way spoofing `power`/`hyprland` is rejected today).
-- **`bread.command.<app>.<verb>`** — outbound commands *to* a sibling application (e.g. `bread.command.clip.clear`). Any module or app may publish; only the target app subscribes. This reuses the existing event bus in both directions — there is no separate request/response protocol. *Since: v1.7 — well-formed `bread.command.<known-app>.<verb>` names (`known-app` ∈ `KNOWN_APPS`, verb a non-empty extra dotted segment) are allowed on the unsourced/`bread-emit` path and via sourced `AdapterSource::App` emit (an app may publish a command to another known app). `BreadClient::command` in bread-utils is the typed helper for the same path. `command` remains in `RESERVED_DOMAINS` so it cannot be claimed as an app id; `bread.command.power.off` and `bread.command.notanapp.x` are still rejected. See [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
-- The second dotted segment is drawn from a small known-apps registry (`bread_shared::apps::KNOWN_APPS` in `bread-shared/src/apps.rs`); daemon-internal domains (`terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow`) are reserved and cannot be claimed as app ids. *Since: v1.5 — `bluetooth`, `workspace`, `window`, and `monitor` added to this list (event families the Bluetooth and Hyprland adapters already published under, but that were missing from it); this same list is now also the boundary the IPC `emit` method's no-`source` path checks event names against, see [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
-- **Commands are best-effort.** Publishing `bread.command.<app>.<verb>` with no subscriber (the app isn't installed or isn't running) is a silent no-op — there is nothing to special-case, and no error is raised. An app that acts on a command *should* emit a corresponding `bread.<app>.<verb>.done` (or `.failed`) confirmation; a module that needs to know a command was actually honored must `bread.wait`/`bread.wait_any` on that confirmation with a timeout rather than assume success. There is no mandatory request/response correlation layer — most commands are legitimately fire-and-forget, and building one would contradict the "no listener, no-op" degradation property.
+- **`bread.<app>.*`**: inbound events published *by* a sibling `bread*` application about its own state (e.g. `bread.clip.copied`). An app may only publish within its own segment; the daemon enforces this at the IPC boundary (a socket client claiming a `source` of an app id it doesn't own is rejected the same way spoofing `power`/`hyprland` is rejected today).
+- **`bread.command.<app>.<verb>`**: outbound commands *to* a sibling application (e.g. `bread.command.clip.clear`). Any module or app may publish; only the target app subscribes. This reuses the existing event bus in both directions: there is no separate request/response protocol. *Since: v1.7, well-formed `bread.command.<known-app>.<verb>` names (`known-app` ∈ `KNOWN_APPS`, verb a non-empty extra dotted segment) are allowed on the unsourced/`bread-emit` path and via sourced `AdapterSource::App` emit (an app may publish a command to another known app). `BreadClient::command` in bread-utils is the typed helper for the same path. `command` remains in `RESERVED_DOMAINS` so it cannot be claimed as an app id; `bread.command.power.off` and `bread.command.notanapp.x` are still rejected. See [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
+- The second dotted segment is drawn from a small known-apps registry (`bread_shared::apps::KNOWN_APPS` in `bread-shared/src/apps.rs`); daemon-internal domains (`terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow`) are reserved and cannot be claimed as app ids. *Since: v1.5, `bluetooth`, `workspace`, `window`, and `monitor` added to this list (event families the Bluetooth and Hyprland adapters already published under, but that were missing from it); this same list is now also the boundary the IPC `emit` method's no-`source` path checks event names against, see [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
+- **Commands are best-effort.** Publishing `bread.command.<app>.<verb>` with no subscriber (the app isn't installed or isn't running) is a silent no-op: there is nothing to special-case, and no error is raised. An app that acts on a command *should* emit a corresponding `bread.<app>.<verb>.done` (or `.failed`) confirmation; a module that needs to know a command was actually honored must `bread.wait`/`bread.wait_any` on that confirmation with a timeout rather than assume success. There is no mandatory request/response correlation layer: most commands are legitimately fire-and-forget, and building one would contradict the "no listener, no-op" degradation property.
 - **`bread.exec("<cli> ...")`** remains the zero-infrastructure fallback for triggering a sibling app that has a synchronous CLI and no need for a structured response.
 
 ---
 
 ## Integrating a bread\* app
 
-This is the checklist for adding a new sibling `bread*` application to the fabric — it's deliberately short, because the whole design goal of the name-based app registry (over one `AdapterSource` enum variant per app) is that this never requires a daemon change beyond step 1. **breadclip is the reference implementation** — see its own `EVENTS.md` for a worked example of every step below.
+This is the checklist for adding a new sibling `bread*` application to the fabric: it's deliberately short, because the whole design goal of the name-based app registry (over one `AdapterSource` enum variant per app) is that this never requires a daemon change beyond step 1. **breadclip is the reference implementation**: see its own `EVENTS.md` for a worked example of every step below.
 
-1. **Register your app id.** Add it to `KNOWN_APPS` in `bread-shared/src/apps.rs` (a one-line, one-word-per-app list) — this is the only change to the `bread` repo itself a new integration needs.
-2. **Depend on `bread-utils` with the `bread-client` feature.** In your app's daemon (the long-running piece, if you have one — a short-lived CLI tool can use `bread-emit` instead, see below), add `bread-utils = { ..., features = ["bread-client"] }` and use `bread_utils::bread_client::BreadClient`:
-   - `BreadClient::connect(app_id)` — cheap, cannot fail (there is no persistent connection to fail at construction time).
-   - `client.emit(event, data)` — publish within your own `bread.<app_id>.*` namespace. Each call is its own short-lived connection (fire-and-forget, like `bread-emit`) — safe to call from a short-lived per-event process invocation, not just from inside a long-running loop.
-   - `client.command(target, verb, data)` — publish `bread.command.<target>.<verb>` to another known app. Same fire-and-forget socket write as `emit`; this is the typed helper for the command-bus path that `bread-emit bread.command.<app>.<verb>` uses. *Since: v1.7 — the daemon actually accepts these on the unsourced and sourced-app emit paths; see [Namespaces](#namespaces).*
-   - `client.subscribe("bread.command.<app_id>.**", |event| { ... })` — receive commands addressed to you, on a background thread with its own reconnect/backoff loop.
-3. **If you don't have a persistent daemon at all** (just a CLI tool invoked occasionally), skip `bread-client` entirely and shell out to `bread-emit` instead (see `bread-emit`'s own `--help`) — it's built for exactly that case (occasional callers that can't justify holding a socket open).
-4. **Emit confirmations for commands you honor.** `bread.<app_id>.<verb>.done` or `.failed` after acting on a `bread.command.<app_id>.<verb>` — optional, but it's what lets a Lua workflow `bread.wait`/`bread.wait_any` for the real outcome instead of assuming success the moment it publishes a command.
-5. **Write an `EVENTS.md`** in your app's own repo cataloguing every event you publish and every command verb you honor, with `data` shapes — the per-app companion to this file. Be honest about what's *not* implemented yet rather than stubbing a verb that does nothing (see breadclip's `EVENTS.md` for how it documents `pin`/`select` as deliberately deferred, not silently dropped).
-6. **Make it opt-out, not opt-in-only, and fail silent.** Your app should work exactly the same whether breadd is installed or not — connecting/emitting/subscribing must never block, error, or crash your app just because the daemon is absent. `BreadClient` is built this way already (dropped no-op on a failed `emit`, transparent reconnect on `subscribe`); if you roll your own transport instead, keep that property.
+1. **Register your app id.** Add it to `KNOWN_APPS` in `bread-shared/src/apps.rs` (a one-line, one-word-per-app list): this is the only change to the `bread` repo itself a new integration needs.
+2. **Depend on `bread-utils` with the `bread-client` feature.** In your app's daemon (the long-running piece, if you have one, a short-lived CLI tool can use `bread-emit` instead, see below), add `bread-utils = { ..., features = ["bread-client"] }` and use `bread_utils::bread_client::BreadClient`:
+   - `BreadClient::connect(app_id)`: cheap, cannot fail (there is no persistent connection to fail at construction time).
+   - `client.emit(event, data)`: publish within your own `bread.<app_id>.*` namespace. Each call is its own short-lived connection (fire-and-forget, like `bread-emit`): safe to call from a short-lived per-event process invocation, not just from inside a long-running loop.
+   - `client.command(target, verb, data)`: publish `bread.command.<target>.<verb>` to another known app. Same fire-and-forget socket write as `emit`; this is the typed helper for the command-bus path that `bread-emit bread.command.<app>.<verb>` uses. *Since: v1.7, the daemon actually accepts these on the unsourced and sourced-app emit paths; see [Namespaces](#namespaces).*
+   - `client.subscribe("bread.command.<app_id>.**", |event| { ... })`: receive commands addressed to you, on a background thread with its own reconnect/backoff loop.
+3. **If you don't have a persistent daemon at all** (just a CLI tool invoked occasionally), skip `bread-client` entirely and shell out to `bread-emit` instead (see `bread-emit`'s own `--help`): it's built for exactly that case (occasional callers that can't justify holding a socket open).
+4. **Emit confirmations for commands you honor.** `bread.<app_id>.<verb>.done` or `.failed` after acting on a `bread.command.<app_id>.<verb>`, optional, but it's what lets a Lua workflow `bread.wait`/`bread.wait_any` for the real outcome instead of assuming success the moment it publishes a command.
+5. **Write an `EVENTS.md`** in your app's own repo cataloguing every event you publish and every command verb you honor, with `data` shapes: the per-app companion to this file. Be honest about what's *not* implemented yet rather than stubbing a verb that does nothing (see breadclip's `EVENTS.md` for how it documents `pin`/`select` as deliberately deferred, not silently dropped).
+6. **Make it opt-out, not opt-in-only, and fail silent.** Your app should work exactly the same whether breadd is installed or not: connecting/emitting/subscribing must never block, error, or crash your app just because the daemon is absent. `BreadClient` is built this way already (dropped no-op on a failed `emit`, transparent reconnect on `subscribe`); if you roll your own transport instead, keep that property.
 
 ---
 
@@ -1694,7 +1694,7 @@ This is the checklist for adding a new sibling `bread*` application to the fabri
 }
 ```
 
-`modules[].status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`. `workflows[].state` values: `running`, `done`, `failed`, `timed_out` *(Since: v1.2 — see [Workflows](#workflows-since-v12))*. `widgets[].placement` values: `tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats` *(Since: v1.3 — see [Widgets](#widgets-since-v13))*.
+`modules[].status` values: `loaded`, `load_error`, `not_found`, `degraded`, `disabled`. `workflows[].state` values: `running`, `done`, `failed`, `timed_out` *(Since: v1.2, see [Workflows](#workflows-since-v12))*. `widgets[].placement` values: `tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats` *(Since: v1.3, see [Widgets](#widgets-since-v13))*.
 
 ---
 
@@ -1718,21 +1718,21 @@ Available methods:
 
 | Method | Params | Description |
 |--------|--------|-------------|
-| `ping` | — | Connectivity check |
-| `health` | — | Version, uptime, PID, adapter status, `api_version` |
+| `ping` | none | Connectivity check |
+| `health` | none | Version, uptime, PID, adapter status, `api_version` |
 | `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
-| `state.dump` | — | Return the full `RuntimeState` as JSON |
-| `modules.list` | — | List all loaded modules and their status |
-| `modules.reload` | — | Hot-reload the Lua runtime |
-| `profile.list` | — | List defined profiles |
+| `state.dump` | none | Return the full `RuntimeState` as JSON |
+| `modules.list` | none | List all loaded modules and their status |
+| `modules.reload` | none | Hot-reload the Lua runtime |
+| `profile.list` | none | List defined profiles |
 | `profile.activate` | `name` | Switch active profile |
-| `events.subscribe` | — | Upgrade to streaming mode; pushes events line by line |
+| `events.subscribe` | none | Upgrade to streaming mode; pushes events line by line |
 | `events.replay` | `since_ms` | Replay buffered events from the last N ms |
-| `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly, tagged `Manual` *(Since: v1.5 — previously tagged `System`; see below)*, for manually testing Lua handlers (this is what `bread emit <event>` and `bread-emit` use). Well-formed `bread.command.<known-app>.<verb>` is allowed on this path *(Since: v1.7)*; other reserved domains stay rejected. With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. A sourced app may also publish a well-formed command to another known app. Any other `source` value is rejected — this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
-| `workflows.list` | — | List running/completed workflow instances and their step/status *(Since: v1.2)* |
-| `widgets.list` | — | List all registered widgets across every module *(Since: v1.3)* |
+| `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly, tagged `Manual` *(Since: v1.5, previously tagged `System`; see below)*, for manually testing Lua handlers (this is what `bread emit <event>` and `bread-emit` use). Well-formed `bread.command.<known-app>.<verb>` is allowed on this path *(Since: v1.7)*; other reserved domains stay rejected. With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. A sourced app may also publish a well-formed command to another known app. Any other `source` value is rejected: this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
+| `workflows.list` | none | List running/completed workflow instances and their step/status *(Since: v1.2)* |
+| `widgets.list` | none | List all registered widgets across every module *(Since: v1.3)* |
 
-*Since: v1.6* — `module_host.*`: the RPC bridge an out-of-process
+*Since: v1.6*: `module_host.*`, the RPC bridge an out-of-process
 `bread-module-host` child uses in place of direct in-process `bread.*`
 bindings (see [Out-of-process module
 sandboxing](#out-of-process-module-sandboxing-since-v16)). Meaningful only
@@ -1756,15 +1756,15 @@ direct use by other clients.
 | `module_host.status` | `state` (`"loaded"`\|`"load_error"`), `error` | The module-host reports its own load outcome after running `init.lua`; updates `modules.list` status and unblocks `breadd`'s spawn-side wait. |
 
 Every gated method above checks the module's granted `PermissionKind`s
-(learned at hello-time) before attempting the call — belt-and-suspenders
+(learned at hello-time) before attempting the call: belt-and-suspenders
 alongside the Landlock sandbox enforced at the OS level on the
 module-host process itself, not a replacement for it.
 
-The `health` response's `api_version` field lets a client — the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app — assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).
+The `health` response's `api_version` field lets a client (the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app) assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).
 
-*Since: v1.5 — `emit` without `source` closed a spoofing gap: previously any event name was accepted with zero validation and tagged `System`, the same tag the daemon uses internally for events it originates itself in Rust code (`bread.system.startup`, `bread.profile.activated`, ...). That made a manually-injected event indistinguishable from a trusted, daemon-originated one. Now:*
-- *The unsourced path is tagged `AdapterSource::Manual`, not `System` — `System` is reserved for the daemon's own Rust-originated sends and can no longer be produced from data that arrived over the IPC socket.*
-- *The event name is rejected if its top-level dotted segment (the part right after `bread.`) is one of the reserved, adapter-owned domains in `bread_shared::apps::RESERVED_DOMAINS` — `terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow` (see [Namespaces](#namespaces)) — since a socket client emitting e.g. `bread.power.ac.connected` this way would otherwise be indistinguishable from the real power adapter observing it.*
-- *Since: v1.7 — well-formed `bread.command.<known-app>.<verb>` is an explicit exception to that reserved-domain reject (`command` stays reserved so it cannot be claimed as an app id). `bread.command.clip.clear` is accepted unsourced and as a sourced `AdapterSource::App` emit from another known app; `bread.command.power.off`, `bread.command.notanapp.x`, and `bread.hyprland.*` are still rejected. `API_VERSION` bumped from `1.6.0` to `1.7.0` for this addition.*
-- *Since: v1.7.1 — the state engine applies both legacy Hyprland names and `bread.hyprland.*` (so flipping `[compat] legacy_hyprland_event_names = false` no longer freezes monitors/workspace/window). `RuntimeState.workspaces` is written on `workspace.created`/`destroyed` and replaced by `bread.hyprland.snapshot`. `API_VERSION` bumped from `1.7.0` to `1.7.1`.*
-- *Freely-named custom/test event names (anything outside those reserved domains, including names with no `bread.` prefix at all) remain unrestricted — this is what keeps `bread emit <name>` useful for testing Lua handlers without unplugging cables, and what `bread-emit`'s fire-and-forget, no-reply-wait design still works against unchanged (a single JSON line write is still sufficient; no handshake was added).*
+*Since: v1.5, `emit` without `source` closed a spoofing gap: previously any event name was accepted with zero validation and tagged `System`, the same tag the daemon uses internally for events it originates itself in Rust code (`bread.system.startup`, `bread.profile.activated`, ...). That made a manually-injected event indistinguishable from a trusted, daemon-originated one. Now:*
+- *The unsourced path is tagged `AdapterSource::Manual`, not `System`: `System` is reserved for the daemon's own Rust-originated sends and can no longer be produced from data that arrived over the IPC socket.*
+- *The event name is rejected if its top-level dotted segment (the part right after `bread.`) is one of the reserved, adapter-owned domains in `bread_shared::apps::RESERVED_DOMAINS`, namely `terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow` (see [Namespaces](#namespaces)), since a socket client emitting e.g. `bread.power.ac.connected` this way would otherwise be indistinguishable from the real power adapter observing it.*
+- *Since: v1.7, well-formed `bread.command.<known-app>.<verb>` is an explicit exception to that reserved-domain reject (`command` stays reserved so it cannot be claimed as an app id). `bread.command.clip.clear` is accepted unsourced and as a sourced `AdapterSource::App` emit from another known app; `bread.command.power.off`, `bread.command.notanapp.x`, and `bread.hyprland.*` are still rejected. `API_VERSION` bumped from `1.6.0` to `1.7.0` for this addition.*
+- *Since: v1.7.1, the state engine applies both legacy Hyprland names and `bread.hyprland.*` (so flipping `[compat] legacy_hyprland_event_names = false` no longer freezes monitors/workspace/window). `RuntimeState.workspaces` is written on `workspace.created`/`destroyed` and replaced by `bread.hyprland.snapshot`. `API_VERSION` bumped from `1.7.0` to `1.7.1`.*
+- *Freely-named custom/test event names (anything outside those reserved domains, including names with no `bread.` prefix at all) remain unrestricted: this is what keeps `bread emit <name>` useful for testing Lua handlers without unplugging cables, and what `bread-emit`'s fire-and-forget, no-reply-wait design still works against unchanged (a single JSON line write is still sufficient; no handshake was added).*

@@ -1,6 +1,6 @@
 # Contributing
 
-`bread` — Reactive automation daemon (breadd) and CLI for Linux desktops.
+`bread`: Reactive automation daemon (breadd) and CLI for Linux desktops.
 
 Part of the bread ecosystem; this repo follows the same branch/release
 workflow as every other ecosystem product.
@@ -9,10 +9,10 @@ workflow as every other ecosystem product.
 
 There is one long-lived branch: **`main`**. All day-to-day work lands here.
 Every push to `main` automatically builds and publishes a **dev-track**
-build (see Tracks below) — a real install you can test before cutting
+build (see Tracks below): a real install you can test before cutting
 anything more formal.
 
-New work — features and bug fixes alike — goes on a short-lived branch:
+New work, features and bug fixes alike, goes on a short-lived branch:
 
 ```
 feature/<short-name>
@@ -20,24 +20,24 @@ fix/<issue-number-or-short-name>
 ```
 
 Branch off `main`, open a PR/push back into `main` when ready. Short-lived
-branches get deleted on merge — they never accumulate the kind of drift a
+branches get deleted on merge; they never accumulate the kind of drift a
 second long-lived branch does.
 
 ## The release cycle
 
-There's no separate `beta` or release branch — "stable" and "beta" are both
+There's no separate `beta` or release branch: "stable" and "beta" are both
 just **tags** on `main`, not branches that need to be kept in sync:
 
 1. Work accumulates on `main` via `feature/x` / `fix/x` branches. Each push
-   auto-publishes a dev build — install it with `bakery track set dev` and
+   auto-publishes a dev build: install it with `bakery track set dev` and
    `bakery update --all`, then fix anything broken with another push.
 2. When you want to stabilize before a real release, tag a release
    candidate: `git tag vX.Y.Z-rc.1 && git push origin vX.Y.Z-rc.1` (push to
-   both remotes). That tag alone triggers a beta-track build —
+   both remotes). That tag alone triggers a beta-track build:
    "freezing" is just pausing pushes to `main` while you test it, not a
    branch operation. Cut `-rc.2`, `-rc.3`, etc. for further fixes.
 3. Once an RC has gone without issues, tag the real release:
-   `git tag vX.Y.Z && git push origin vX.Y.Z` — that's what triggers the
+   `git tag vX.Y.Z && git push origin vX.Y.Z`: that's what triggers the
    signed stable release build.
 
 ## Tracks, from a user's perspective
@@ -56,7 +56,7 @@ bakery update --all            # pull the latest build on your current track
 
 Dev versions are auto-computed (`X.Y.Z-dev.<timestamp>+<sha>`) from the
 latest published stable tag, so they always sort as newer than what you
-have installed — no manual version bumping needed. Beta versions are just
+have installed; no manual version bumping needed. Beta versions are just
 the RC tag itself (already valid semver, already sorts below the real
 release it's a candidate for).
 
@@ -70,8 +70,8 @@ cargo test --release --workspace
 ### Keeping the API docs honest
 
 `Documentation.md`'s Lua API/IPC protocol sections and README's CLI
-reference are hand-written and have drifted from the actual code before —
-there's a checked-in registry, `api-schema.toml`, plus an `xtask` checker
+reference are hand-written and have drifted from the actual code before.
+There's a checked-in registry, `api-schema.toml`, plus an `xtask` checker
 (`cargo run -p xtask -- check-docs`) that catches it happening again, and
 it's enforced in CI (`dev-release.yml` fails the build on any drift).
 
@@ -80,22 +80,22 @@ Whenever you add, rename, or remove a `bread.*` Lua binding
 `bread` CLI command (`bread-cli/src/main.rs`):
 
 1. Add/update/remove its entry in `api-schema.toml` to match.
-2. Add/update the corresponding section — a `#### bread.<name>` heading in
+2. Add/update the corresponding section: a `#### bread.<name>` heading in
    `Documentation.md` for a Lua binding, a row in `Documentation.md`'s IPC
    Methods table for an IPC method, or a `bread <name>` line in `README.md`'s
    "CLI reference" section for a CLI command.
 3. Run `cargo run -p xtask -- check-docs` before committing. It fails with
-   a non-zero exit and a list of exactly what's out of sync — added but
-   undocumented, stale in the schema, or missing a doc line — if
+   a non-zero exit and a list of exactly what's out of sync (added but
+   undocumented, stale in the schema, or missing a doc line) if
    `api-schema.toml`, the code, `Documentation.md`, and `README.md` don't
    all agree. CI runs this too, so anything that slips past a local run
    still fails the build rather than landing on `main`.
 
 ## CI
 
-- `dev-release.yml` — triggered on push to `main`.
-- `rc-release.yml` — triggered on any `vX.Y.Z-rc.N` tag push.
-- `release.yml` — triggered on any other `v*` tag push, cuts the actual
+- `dev-release.yml`: triggered on push to `main`.
+- `rc-release.yml`: triggered on any `vX.Y.Z-rc.N` tag push.
+- `release.yml`: triggered on any other `v*` tag push, cuts the actual
   stable release.
 
 All CI runs on a self-hosted runner; nothing runs automatically on plain

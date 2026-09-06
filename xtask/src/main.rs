@@ -12,7 +12,7 @@
 //! The CLI-command coverage exists specifically because README's "CLI
 //! reference" section drifted from `Documentation.md`/the real `bread-cli`
 //! source (missing `modules audit`, `hooks install-shell`/`install-git`,
-//! `events --tree`) — a live instance of exactly the drift this whole
+//! `events --tree`): a live instance of exactly the drift this whole
 //! workstream exists to prevent, found and fixed by hand once the schema
 //! didn't cover it yet. See `api-schema.toml`'s header for how CLI commands
 //! are named and versioned differently from the Lua/IPC entries.
@@ -106,7 +106,7 @@ const VALID_KINDS: &[&str] = &["lua_function", "lua_table", "ipc_method", "cli_c
 // Extraction: breadd/src/lua/mod.rs -> the current bread.* Lua API surface.
 //
 // This is deliberately line/substring scanning, not a real Lua or Rust
-// parser (see api-schema.toml's header comment) — precise enough because
+// parser (see api-schema.toml's header comment): precise enough because
 // `install_api` and its `install_*_helpers` siblings follow a small, stable
 // set of textual patterns:
 //
@@ -281,7 +281,7 @@ fn extract_ipc_methods(src: &str) -> BTreeSet<String> {
 
 /// Top-level `Commands` variants that delegate to a nested subcommand enum
 /// via `#[command(subcommand)] subcommand: XCommand` rather than being a
-/// leaf command themselves — each such variant's own leaf commands are
+/// leaf command themselves: each such variant's own leaf commands are
 /// named `<variant-kebab>.<subcommand-kebab>` (e.g. `modules.audit`,
 /// `hooks.install-shell`) instead of the group variant itself being a leaf.
 /// Update this list if `bread-cli/src/main.rs` gains another subcommand
@@ -422,7 +422,7 @@ impl CheckReport {
 
     fn print(&self) {
         if self.is_clean() {
-            println!("check-docs: OK — api-schema.toml matches breadd's Lua/IPC/CLI surface, Documentation.md, and README.md.");
+            println!("check-docs: OK; api-schema.toml matches breadd's Lua/IPC/CLI surface, Documentation.md, and README.md.");
             return;
         }
 
@@ -474,7 +474,7 @@ impl CheckReport {
             println!();
         }
 
-        println!("check-docs: FAILED — see above.");
+        println!("check-docs: FAILED; see above.");
     }
 }
 
@@ -557,7 +557,7 @@ fn check(
             .push(("cli_command".to_string(), name.clone()));
     }
 
-    // --- schema vs Documentation.md (lua_function/lua_table/ipc_method only —
+    // --- schema vs Documentation.md (lua_function/lua_table/ipc_method only:
     // cli_command is checked against README.md separately, below) ---
     let lua_section = lua_api_section(doc_md);
     let ipc_tbl_section = ipc_section(doc_md);

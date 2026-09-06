@@ -1,10 +1,10 @@
-//! `bread-module-host` — the out-of-process runtime for a single third-party
+//! `bread-module-host`: the out-of-process runtime for a single third-party
 //! Bread module (Workstream G).
 //!
 //! `breadd` spawns one of these per out-of-process module (see
 //! `breadd/src/module_host.rs`), sandboxed at the OS level via a Landlock
 //! ruleset applied by the parent *before* this binary's own `main()` ever
-//! runs (through `Command::pre_exec` — see that module's doc comment for
+//! runs (through `Command::pre_exec`; see that module's doc comment for
 //! why this binary itself has no Landlock dependency at all). This process
 //! then:
 //!
@@ -13,7 +13,7 @@
 //! 2. Presents the one-time token `breadd` gave it (via `$BREAD_MODULE_TOKEN`,
 //!    an env var rather than argv, which is visible to any process via
 //!    `/proc/*/cmdline`) via `module_host.hello` and learns its own identity
-//!    (module name + granted permissions) from `breadd`'s answer — it never
+//!    (module name + granted permissions) from `breadd`'s answer: it never
 //!    asserts its own name and have that trusted.
 //! 3. Loads exactly one module's `init.lua` (`$BREAD_MODULE_ENTRY`) into a
 //!    fresh Lua VM whose `bread` table is built entirely from RPC-backed
@@ -24,12 +24,12 @@
 //!
 //! Env vars, all required except `BREAD_MODULE_SOCKET` and
 //! `BREAD_MODULE_NAME`:
-//! - `BREAD_MODULE_TOKEN` — one-time handshake token.
-//! - `BREAD_MODULE_ENTRY` — absolute path to the module's entry `.lua` file.
-//! - `BREAD_MODULE_SOCKET` — override for breadd's socket path (defaults to
+//! - `BREAD_MODULE_TOKEN`: one-time handshake token.
+//! - `BREAD_MODULE_ENTRY`: absolute path to the module's entry `.lua` file.
+//! - `BREAD_MODULE_SOCKET`: override for breadd's socket path (defaults to
 //!   `bread_shared::resolve_socket_path()`, the same resolution breadd's own
 //!   `Config::socket_path` uses).
-//! - `BREAD_MODULE_NAME` — informational only (early log lines before the
+//! - `BREAD_MODULE_NAME`: informational only (early log lines before the
 //!   hello response arrives); never trusted for permission lookup.
 
 mod io;
@@ -133,7 +133,7 @@ fn main() {
 
     // Steady state: dispatch pushed events/timers until the connection to
     // breadd drops (breadd exited, socket closed, or we were killed and
-    // this line never runs at all — see breadd/src/module_host.rs's
+    // this line never runs at all; see breadd/src/module_host.rs's
     // child-reap thread for the other half of that crash-isolation story).
     loop {
         match host_rx.recv() {

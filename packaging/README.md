@@ -10,7 +10,7 @@ packaging/
 ```
 
 Prebuilt binaries are distributed exclusively via `bakery` (see the main
-README) — there is no Arch/pacman package for `bread` anymore. `bakery`
+README); there is no Arch/pacman package for `bread` anymore. `bakery`
 installs the systemd user service unit itself, matching the `packaging/systemd/breadd.service`
 file here.
 

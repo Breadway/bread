@@ -1,11 +1,11 @@
-//! `rules.toml` — a declarative shortcut for the common "when event X
+//! `rules.toml`: a declarative shortcut for the common "when event X
 //! happens, do Y" case that otherwise requires hand-written Lua
 //! (`bread.on(...)`, `bread.exec(...)`, etc).
 //!
 //! This module owns TOML parsing and validation only; it has no `mlua`
 //! dependency so it can be unit-tested in isolation. The `bread.rules`
 //! built-in Lua module (`breadd/src/lua/mod.rs`, `BUILTIN_RULES`) is the
-//! other half — it takes the [`ParsedRule`]s this module produces and turns
+//! other half: it takes the [`ParsedRule`]s this module produces and turns
 //! each one into a real `bread.on()` subscription.
 //!
 //! Schema:
@@ -49,13 +49,13 @@ struct RawRule {
 /// The action a validated rule fires when its event matches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuleAction {
-    /// Path to a single script/executable. Treated as exactly one program —
+    /// Path to a single script/executable. Treated as exactly one program:
     /// tilde-expanded and shell-quoted as a whole before being handed to
     /// `bread.exec()`, so a path containing spaces still runs as one file
     /// rather than being word-split into a command plus arguments.
     Run(String),
     /// A raw shell command line, passed to `bread.exec()` verbatim (same as
-    /// calling `bread.exec()` from hand-written Lua) — you're responsible
+    /// calling `bread.exec()` from hand-written Lua); you're responsible
     /// for quoting/escaping exactly as if you'd typed it in a shell.
     Exec(String),
     /// A desktop notification message, passed to `bread.notify()`.
@@ -66,14 +66,14 @@ pub enum RuleAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRule {
     /// Event-name suffix, e.g. `"device.dock.connected"`. The real
-    /// subscription is `"bread." .. on` — wildcards (`*`, `**`, `?`) are
+    /// subscription is `"bread." .. on`: wildcards (`*`, `**`, `?`) are
     /// whatever `bread.on()` itself supports, since this is handed straight
     /// through.
     pub on: String,
     pub action: RuleAction,
 }
 
-/// A `[[rule]]` entry that failed validation — reported, not silently
+/// A `[[rule]]` entry that failed validation: reported, not silently
 /// dropped, so it shows up via `bread doctor` the same way a broken Lua
 /// module would.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,11 +98,11 @@ impl std::fmt::Display for RuleIssue {
 /// Result of attempting to load `rules.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RulesLoadOutcome {
-    /// The file doesn't exist. Not an error — `rules.toml` is entirely
+    /// The file doesn't exist. Not an error: `rules.toml` is entirely
     /// optional and purely additive alongside `init.lua`.
     Absent,
     /// The file exists but couldn't be read, or doesn't parse as TOML at
-    /// all — no rules could be recovered from it.
+    /// all; no rules could be recovered from it.
     Fatal(String),
     /// The file parsed as TOML. `rules` are the entries that passed
     /// validation (register these); `issues` describes any `[[rule]]`
@@ -114,13 +114,13 @@ pub enum RulesLoadOutcome {
     },
 }
 
-/// Location of `rules.toml` — re-exported from `core::config` (single
+/// Location of `rules.toml`, re-exported from `core::config` (single
 /// source of truth, colocated with `config_path()`'s identical
 /// `XDG_CONFIG_HOME`-vs-`HOME` resolution for `breadd.toml`) so callers that
 /// only care about rules loading can reach it as `rules::rules_path()`.
 pub use crate::core::config::rules_path;
 
-/// Reads and validates `rules.toml` at `path`. Never panics — every failure
+/// Reads and validates `rules.toml` at `path`. Never panics: every failure
 /// mode (missing file, unreadable file, invalid TOML, invalid individual
 /// rules) is represented in the returned [`RulesLoadOutcome`].
 pub fn load_rules(path: &Path) -> RulesLoadOutcome {
