@@ -1,4 +1,4 @@
-//! `bread hooks install git` — installs small, non-blocking git hooks that
+//! `bread hooks install git`: installs small, non-blocking git hooks that
 //! emit normalized events (via the `bread-emit` fire-and-forget binary) on
 //! commit and branch-change activity.
 //!
@@ -15,7 +15,7 @@
 //!   and unconditionally exit 0.
 //! - Respect `core.hooksPath`. If the user has repointed hooks elsewhere, we
 //!   do not silently write into `.git/hooks` where nothing will ever run
-//!   them — see [`install_git`] for the exact behavior.
+//!   them; see [`install_git`] for the exact behavior.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -26,7 +26,7 @@ use std::process::Command;
 /// Distinctive marker comment written as the second line of every hook
 /// script bread installs. Its presence is how we tell "a hook we installed
 /// previously, safe to overwrite" apart from "someone else's hook, hands
-/// off." Keep this stable across versions — changing it would make bread
+/// off." Keep this stable across versions: changing it would make bread
 /// think its own previously-installed hooks belong to someone else.
 pub const MARKER: &str = "# bread-managed-hook";
 
@@ -45,7 +45,7 @@ enum HookOutcome {
 ///
 /// This only ever touches the repo rooted at the current directory (via
 /// `git rev-parse`, which correctly follows worktrees/submodules to the
-/// real git dir) — never a global `core.hooksPath`, never other repos.
+/// real git dir): never a global `core.hooksPath`, never other repos.
 pub fn install_git() -> Result<()> {
     let git_dir = git_dir()?;
     let toplevel = show_toplevel()?;
@@ -88,7 +88,7 @@ fn install_one_hook(path: &Path, script: &str) -> Result<HookOutcome> {
             .with_context(|| format!("failed to read existing hook {}", path.display()))?;
         if !is_bread_managed(&existing) {
             eprintln!(
-                "bread: '{}' already exists and was not installed by bread — leaving it \
+                "bread: '{}' already exists and was not installed by bread: leaving it \
                  untouched.\n  To also emit bread events from it, add this line to the end \
                  of the existing script:\n\n    {}\n",
                 path.display(),
@@ -96,7 +96,7 @@ fn install_one_hook(path: &Path, script: &str) -> Result<HookOutcome> {
             );
             return Ok(HookOutcome::Skipped);
         }
-        // It's ours from a previous install — safe to overwrite.
+        // It's ours from a previous install: safe to overwrite.
     }
 
     fs::write(path, script).with_context(|| format!("failed to write hook {}", path.display()))?;
@@ -116,7 +116,7 @@ fn is_bread_managed(contents: &str) -> bool {
     contents.lines().any(|line| line.trim() == MARKER)
 }
 
-/// The bare `bread-emit` invocation for a branch checkout, with no guard —
+/// The bare `bread-emit` invocation for a branch checkout, with no guard:
 /// callers that already run inside a `[ "$3" = "1" ]` check (our own
 /// generated hook script) use this directly.
 fn branch_changed_emit_line() -> String {
@@ -200,7 +200,7 @@ fn git_dir() -> Result<PathBuf> {
     }
 }
 
-/// `git rev-parse --show-toplevel` — the repo root, used only for display.
+/// `git rev-parse --show-toplevel`: the repo root, used only for display.
 fn show_toplevel() -> Result<PathBuf> {
     run_git(&["rev-parse", "--show-toplevel"])
         .map(PathBuf::from)
@@ -219,7 +219,7 @@ fn hooks_path_override() -> Result<Option<String>> {
         .context("failed to run 'git config --get core.hooksPath' (is git installed?)")?;
 
     if !output.status.success() {
-        // Exit code 1 from `git config --get` means "key not set" — that's
+        // Exit code 1 from `git config --get` means "key not set": that's
         // the normal, expected case, not an error.
         return Ok(None);
     }

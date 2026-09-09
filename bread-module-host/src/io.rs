@@ -4,7 +4,7 @@
 //! `breadd/src/module_host.rs` for the server side of this bridge).
 //!
 //! Runs on its own dedicated OS thread with its own single-threaded Tokio
-//! runtime — mirroring `breadd`'s own `spawn_runtime` split between an async
+//! runtime: mirroring `breadd`'s own `spawn_runtime` split between an async
 //! IPC/adapters world and a synchronous, single-threaded Lua world (see
 //! `breadd/src/lua/mod.rs`'s `spawn_runtime`). The Lua-driving thread in
 //! `main.rs` talks to this thread over two plain `std::sync::mpsc` channels
@@ -55,7 +55,7 @@ struct RpcResponse {
     error: Option<String>,
 }
 
-/// Connect, perform the `module_host.hello` handshake, and — on success —
+/// Connect, perform the `module_host.hello` handshake, and, on success,
 /// run the steady-state request/response + push-forwarding loop until the
 /// connection closes. `hello_tx` is always sent to exactly once, before
 /// anything else; the caller blocks on it to learn the module's granted
@@ -246,9 +246,9 @@ pub fn run(
 }
 
 /// Blocking helper used from Lua callback closures (which run on the
-/// Lua-driving thread, not the async IO thread): send a request and wait —
-/// with a timeout, so a wedged connection can't hang a Lua callback forever
-/// — for its response.
+/// Lua-driving thread, not the async IO thread): send a request and wait
+/// (with a timeout, so a wedged connection can't hang a Lua callback forever)
+/// for its response.
 pub fn call(
     cmd_tx: &mpsc::Sender<IoCommand>,
     method: &str,

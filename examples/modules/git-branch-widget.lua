@@ -1,9 +1,9 @@
--- git-branch-widget — shows "<repo> <branch>" for whichever git repo the
+-- git-branch-widget: shows "<repo> <branch>" for whichever git repo the
 -- currently focused terminal's *active tab* is sitting in, yellow when the
 -- worktree is dirty. Hides entirely when focus isn't on a terminal, or the
 -- focused tab isn't inside a git repo.
 --
--- This is a plain Lua module doing its own OS-level legwork end to end —
+-- This is a plain Lua module doing its own OS-level legwork end to end:
 -- no dedicated Rust adapter behind it. It combines four general-purpose
 -- primitives that all already exist (or were added alongside this module
 -- as small, non-kitty-specific additions): bread.hyprland.active_window()
@@ -13,18 +13,18 @@
 --
 -- Why kitty remote control instead of /proc: a kitty *window* can host
 -- several *tabs*, each a separate child shell process, and the kernel has
--- no notion of "which pty is currently displayed" — that's purely internal
+-- no notion of "which pty is currently displayed": that's purely internal
 -- kitty state. Walking /proc can find the window's child processes but
 -- can't tell which one you're actually looking at. Kitty's own `kitty @ ls`
 -- tracks focus precisely at the OS-window/tab/window level, so asking it
 -- directly is the only way to get this exactly right for multi-tab windows.
 --
--- Prerequisite — add to ~/.config/kitty/kitty.conf:
+-- Prerequisite: add to ~/.config/kitty/kitty.conf:
 --   allow_remote_control socket-only
 --   listen_on unix:/tmp/kitty-bread-{kitty_pid}
 -- `{kitty_pid}` makes the socket path unique per kitty process, so this
 -- works whether or not you run kitty in single-instance mode, and however
--- many separate kitty processes you have open — this module derives the
+-- many separate kitty processes you have open: this module derives the
 -- exact socket to ask from the focused window's own pid. Kitty only picks
 -- up `listen_on` on (re)start, not a config reload, so existing kitty
 -- windows need to be restarted once after adding this.

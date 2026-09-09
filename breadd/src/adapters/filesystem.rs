@@ -23,7 +23,7 @@ const MARKERS: [&str; 4] = [".git", "Cargo.toml", "package.json", "go.mod"];
 /// when a new file appears inside them.
 const EXCLUDED_DIRS: [&str; 5] = [".git", "target", "node_modules", "dist", "build"];
 
-/// Debounce window for `file.changed` — editors frequently perform several
+/// Debounce window for `file.changed`: editors frequently perform several
 /// writes (temp file + rename, fsync, etc.) for a single logical save.
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(300);
 
@@ -43,7 +43,7 @@ impl FilesystemAdapter {
 
     /// Expand `~` and a single `*` glob segment in each configured pattern
     /// into concrete directory paths. Patterns are not required to exist on
-    /// disk yet — existence is checked by the caller.
+    /// disk yet: existence is checked by the caller.
     fn resolve_roots(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for pattern in &self.roots {

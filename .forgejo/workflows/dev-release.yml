@@ -1,7 +1,7 @@
 name: dev release
 
 # Publishes a dev-track build on every push to `main` (the trunk
-# branch — there is no separate `dev` branch). See bread-ecosystem's
+# branch; there is no separate `dev` branch). See bread-ecosystem's
 # docs/release-channels.md for the release-track policy this is part of.
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
 
       # Fails fast, before the expensive release build/test below, on any
       # drift between api-schema.toml, the actual bread.*/IPC/CLI surface,
-      # Documentation.md, and README.md — see api-schema.toml's header and
+      # Documentation.md, and README.md; see api-schema.toml's header and
       # CONTRIBUTING.md's "Keeping the API docs honest" section.
       - name: check-docs
         run: cd src && cargo run -p xtask --locked -- check-docs
@@ -32,14 +32,14 @@ jobs:
         run: cd src && bash ci/build.sh cargo test --release --locked --workspace
 
       # breadd/Cargo.toml is the canonical version source (this workspace has
-      # no shared workspace.package.version — breadd and bread-cli are kept
+      # no shared workspace.package.version: breadd and bread-cli are kept
       # in lockstep manually).
       - name: compute dev version
         run: |
           set -euo pipefail
           cd src
           # Base the dev version off the latest published stable tag,
-          # not Cargo.toml — Cargo.toml can go stale relative to the last
+          # not Cargo.toml: Cargo.toml can go stale relative to the last
           # real release (seen in practice: breadbox/breadpad/breadcrumbs/
           # breadpaper), which would make a dev build sort as OLDER than
           # what's already installed and bakery would correctly refuse it.
@@ -72,7 +72,7 @@ jobs:
           cp src/bakery.toml "${PKG_DIR}/bakery.toml"
           ln -sfn "${VERSION}" "/srv/breadway-dl/dev/bread/latest"
 
-      # No GitHub Release upload — dev builds happen on every push and would
+      # No GitHub Release upload: dev builds happen on every push and would
       # spam a release per commit, so dl.breadway.dev/dev/ is the only
       # distribution point for this track.
       - name: regenerate dev index.json
@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${MINISIGN_SEC_KEY:-}" ]; then
-            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set — refusing to regenerate dev index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the dev track)"
+            echo "::error::BAKERY_MINISIGN_SEC_KEY_PATH secret not set: refusing to regenerate dev index.json unsigned (would leave a stale signature mismatched against fresh content and break bakery for everyone on the dev track)"
             exit 1
           fi
           rm -rf /tmp/bread-ecosystem-ci-* 2>/dev/null || true

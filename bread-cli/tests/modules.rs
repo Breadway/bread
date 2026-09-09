@@ -94,7 +94,7 @@ fn list_reads_manifests_from_disk() {
     make_module_dir(modules_tmp.path(), "alpha", "1.0.0");
     make_module_dir(modules_tmp.path(), "beta", "2.0.0");
 
-    // Add a non-module dir (no manifest) — should be ignored
+    // Add a non-module dir (no manifest): should be ignored
     fs::create_dir_all(modules_tmp.path().join("notamodule")).unwrap();
 
     let modules = modules_mgmt::list_modules(modules_tmp.path()).unwrap();

@@ -42,20 +42,20 @@ return M
 ## Architecture
 
 ```
-breadd/              Rust daemon — event pipeline, state engine, IPC, adapter supervision
-bread-cli/           CLI frontend — talks to breadd over a Unix socket
+breadd/              Rust daemon: event pipeline, state engine, IPC, adapter supervision
+bread-cli/           CLI frontend: talks to breadd over a Unix socket
 bread-emit/          Tiny fire-and-forget IPC emitter (hooks / command bus)
 bread-module-host/   Out-of-process sandboxed Lua module runtime
-bread-shared/        Shared types — RawEvent, BreadEvent, AdapterSource
+bread-shared/        Shared types: RawEvent, BreadEvent, AdapterSource
 packaging/           systemd user service unit (bakery installs this)
 ```
 
 The daemon is structured in four layers:
 
-- **Adapters** — interface with Hyprland IPC, udev, power state, network interfaces, and Bluetooth (BlueZ)
-- **Normalizer** — transforms raw adapter signals into semantic Bread events
-- **State engine** — maintains runtime state and dispatches events to subscribers
-- **Lua runtime** — loads your modules, registers handlers, executes automation
+- **Adapters**: interface with Hyprland IPC, udev, power state, network interfaces, and Bluetooth (BlueZ)
+- **Normalizer**: transforms raw adapter signals into semantic Bread events
+- **State engine**: maintains runtime state and dispatches events to subscribers
+- **Lua runtime**: loads your modules, registers handlers, executes automation
 
 ---
 
@@ -82,7 +82,7 @@ git clone https://git.breadway.dev/Breadway/bread.git
 cd bread
 ```
 
-Run the install script — it builds, symlinks `breadd`, `bread`, `bread-emit`, and `bread-module-host` into `~/.local/bin` (override with `BIN_DIR=…`), installs the systemd user service, and starts the daemon:
+Run the install script: it builds, symlinks `breadd`, `bread`, `bread-emit`, and `bread-module-host` into `~/.local/bin` (override with `BIN_DIR=...`), installs the systemd user service, and starts the daemon:
 
 ```bash
 bash scripts/install.sh
@@ -119,7 +119,7 @@ systemctl --user enable --now breadd
 
 ## Configuration
 
-Bread reads from `~/.config/bread/breadd.toml`. All values are optional — the daemon runs with defaults if the file doesn't exist.
+Bread reads from `~/.config/bread/breadd.toml`. All values are optional; the daemon runs with defaults if the file doesn't exist.
 
 ```toml
 [daemon]
@@ -163,7 +163,7 @@ disable = []      # list of built-in module names to disable
 ```
 
 For the common "when event X happens, do Y" case, you don't need Lua at
-all — drop rules straight into `~/.config/bread/rules.toml` and skip
+all: drop rules straight into `~/.config/bread/rules.toml` and skip
 `init.lua` entirely:
 
 ```toml
@@ -177,7 +177,7 @@ on = "power.ac.disconnected"
 notify = "Unplugged"
 ```
 
-It's optional and purely additive alongside `init.lua` — see
+It's optional and purely additive alongside `init.lua`; see
 [Getting started in Documentation.md](Documentation.md#getting-started) for
 the full schema (`run` vs `exec` vs `notify`, wildcard `on` patterns, and
 how a malformed rule surfaces via `bread doctor`).
@@ -254,8 +254,8 @@ Modules are Lua files (or directories) installed to `~/.config/bread/modules/`. 
 ### Installing modules
 
 Modules install from a local directory only. By default a module runs
-in-process with full, ungated `bread.exec()` privileges — the same trust
-model as before — so to use a module published on a git host, clone it
+in-process with full, ungated `bread.exec()` privileges (the same trust
+model as before), so to use a module published on a git host, clone it
 yourself and review the Lua before installing from the local checkout.
 A module can opt into a smaller, enforced footprint by declaring
 `[[permissions]]` in its manifest: it then runs out-of-process under an
@@ -308,7 +308,7 @@ return M
 
 ## Event reference, Lua API, and IPC protocol
 
-These are fully documented in [`Documentation.md`](Documentation.md) — the single canonical reference (event catalogue, per-function Lua API, runtime-state schema, and IPC protocol), versioned as **Bread Automation API v1**. This README no longer keeps a parallel copy, to avoid the two drifting apart.
+These are fully documented in [`Documentation.md`](Documentation.md), the single canonical reference (event catalogue, per-function Lua API, runtime-state schema, and IPC protocol), versioned as **Bread Automation API v1**. This README no longer keeps a parallel copy, to avoid the two drifting apart.
 
 - [Dictionary: Event reference](Documentation.md#dictionary-event-reference)
 - [Dictionary: Lua API](Documentation.md#dictionary-lua-api)
@@ -328,4 +328,4 @@ The daemon (`breadd`) is the most stable part of the codebase. Active developmen
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE).

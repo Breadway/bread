@@ -1,12 +1,12 @@
 //! Workstream G acceptance tests: the real, end-to-end version of the two
 //! things this workstream exists to prove, going through a real spawned
 //! `breadd` + a real spawned `bread-module-host` child + a real IPC
-//! handshake — not the in-isolation Landlock-mechanism unit tests in
+//! handshake: not the in-isolation Landlock-mechanism unit tests in
 //! `breadd/src/module_host.rs` (`landlock_denies_reads_outside_granted_path`,
 //! `no_exec_permission_means_binary_cannot_be_executed_at_all`), which only
 //! exercise `apply_sandbox` directly against a plain `sh`/`cat`.
 //!
-//! 1. [`os_execute_and_io_open_are_denied_at_the_kernel_level_outside_granted_scope`] —
+//! 1. [`os_execute_and_io_open_are_denied_at_the_kernel_level_outside_granted_scope`]:
 //!    a module granted `fs.read` for exactly one directory (and nothing
 //!    else) runs real Lua that calls `io.open`/`os.execute` directly,
 //!    bypassing the RPC bridge entirely and going straight for the
@@ -15,7 +15,7 @@
 //!    comment). This is the single most important test in the whole
 //!    workstream: proving the denial is a *kernel* permission error, not a
 //!    Lua-level check that a well-behaved module merely chooses to respect.
-//! 2. [`killing_a_module_host_child_does_not_take_down_breadd_or_other_modules`] —
+//! 2. [`killing_a_module_host_child_does_not_take_down_breadd_or_other_modules`]:
 //!    `kill -9` on a running module-host child's PID, confirming `breadd`
 //!    itself and a second, unrelated module both keep responding, and that
 //!    `breadd` detects the death and reports it via `bread.module.crashed`.
@@ -33,13 +33,13 @@ use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
 
 // NOTE: these tests need `target/{debug,release}/bread-module-host` to
-// already exist — `breadd::module_host::resolve_module_host_binary` looks
+// already exist: `breadd::module_host::resolve_module_host_binary` looks
 // for it as a sibling of `breadd`'s own executable. `bread-module-host` is
-// a bin-only crate (no `[lib]` target — deliberately, see its Cargo.toml),
+// a bin-only crate (no `[lib]` target, deliberately, see its Cargo.toml),
 // so it can't be pulled in as a `[dev-dependencies]` entry to force cargo
 // to build it via `env!("CARGO_BIN_EXE_...")`, the usual trick for this.
 // Running via `cargo test --workspace` (this repo's documented/required
-// verification command — see Documentation.md) builds every workspace
+// verification command, see Documentation.md) builds every workspace
 // member, including `bread-module-host`, before any test runs, so this
 // isn't a problem in practice; running `cargo test -p breadd` in isolation
 // without a prior `cargo build --workspace` would need one first.
@@ -54,7 +54,7 @@ struct TestHarness {
 
 impl TestHarness {
     /// Spawns a real `breadd` with `[modules] builtin = false` and one
-    /// directory-based module per `(name, manifest_toml, init_lua)` entry —
+    /// directory-based module per `(name, manifest_toml, init_lua)` entry:
     /// the same on-disk shape `bread modules install` produces
     /// (`<modules_dir>/<name>/{bread.module.toml,init.lua}`).
     fn spawn_with_modules(modules: &[(&str, &str, &str)]) -> Result<Self> {
@@ -145,7 +145,7 @@ enabled = false
         Err(anyhow!("daemon did not become ready in time"))
     }
 
-    /// Poll `modules.list` until `name` shows up `Loaded` — out-of-process
+    /// Poll `modules.list` until `name` shows up `Loaded`: out-of-process
     /// modules report their load outcome asynchronously (see
     /// `breadd/src/lua/mod.rs`'s `load_out_of_process_module`), so a plain
     /// `wait_until_ready` (which only proves the daemon's IPC socket is up)
@@ -202,7 +202,7 @@ enabled = false
 
     /// Find the PID of a `bread-module-host` child spawned for this
     /// harness's `breadd` by scanning `/proc/*/environ` for
-    /// `BREAD_MODULE_NAME=<module_name>` — the module-host binary never
+    /// `BREAD_MODULE_NAME=<module_name>`: the module-host binary never
     /// puts its identity in argv (see its own doc comment on why:
     /// `/proc/*/cmdline` is visible to any process), so this is the same
     /// kind of environment-based lookup, just from the test side instead
@@ -240,7 +240,7 @@ enabled = false
     }
 
     fn shutdown(self) {
-        // Drop does the actual killing (see below) — this method exists so
+        // Drop does the actual killing (see below): this method exists so
         // call sites can be explicit about "done with this harness" without
         // caring exactly how cleanup happens.
         drop(self);
@@ -249,18 +249,18 @@ enabled = false
 
 impl Drop for TestHarness {
     /// Any `?`-propagated failure partway through a test (a timed-out
-    /// event, a failed assertion via `anyhow!` — though assertion panics
+    /// event, a failed assertion via `anyhow!`, though assertion panics
     /// unwind rather than `?`-return, they still run `Drop`) must not leak
     /// a live `breadd` (and, transitively, any `bread-module-host`
-    /// children it spawned) — `kill` here, not just on the happy path via
+    /// children it spawned): `kill` here, not just on the happy path via
     /// `shutdown()`, is what keeps a failed test run from leaving orphaned
     /// sandboxed processes behind for the next run to trip over.
     fn drop(&mut self) {
-        // SIGTERM first, not straight to SIGKILL — see the matching comment
+        // SIGTERM first, not straight to SIGKILL; see the matching comment
         // in `ipc_integration.rs`'s `TestHarness::drop`. SIGKILL prevents
         // `breadd` from ever running its own graceful shutdown path, which
         // is what actually fires `kill_on_drop` on adapter-spawned child
-        // processes (e.g. `PodmanAdapter`'s `podman events` watcher) —
+        // processes (e.g. `PodmanAdapter`'s `podman events` watcher):
         // exactly how a day of repeated `cargo test --workspace` runs left
         // 1,559 orphaned `podman events` processes system-wide. Bounded
         // wait, then SIGKILL as a fallback so a genuinely wedged `breadd`
@@ -295,7 +295,7 @@ async fn os_execute_and_io_open_are_denied_at_the_kernel_level_outside_granted_s
     // Deliberately NOT under $HOME/anything the manifest grants, and
     // deliberately world-readable-by-this-user (normal DAC permissions
     // alone would NOT deny this) so a pass here can only be explained by
-    // Landlock, not by an unrelated ordinary permission error — the same
+    // Landlock, not by an unrelated ordinary permission error: the same
     // reasoning as the `deny_dir`/`secret.txt` split in
     // `breadd/src/module_host.rs`'s unit tests, just end-to-end this time.
     let deny_dir = tempfile::tempdir()?;
@@ -314,19 +314,19 @@ path = "{}"
     );
 
     // No `exec` permission granted at all, so `os.execute` should fail
-    // outright (can't even launch `/bin/sh` under Landlock) — and
+    // outright (can't even launch `/bin/sh` under Landlock), and
     // `io.open`, which doesn't need a subprocess at all, directly tests
     // the FsRead scoping. Results are reported back over `bread.emit`
     // (baseline, always available) since this module runs in a separate
     // process we can't otherwise introspect from the test.
     //
     // The checks run on a `bread.on("test.trigger", ...)` handler, NOT in
-    // `on_load` — a module loads (and, if it ran in `on_load`, would emit
+    // `on_load`: a module loads (and, if it ran in `on_load`, would emit
     // its result) as part of daemon startup, which races the test's own
     // `events.subscribe` connection. `tokio::sync::broadcast` (what
     // `events.subscribe` reads from) does not replay history to a
-    // subscriber that joins after a send already happened — a late
-    // subscription just misses it, no error, no buffering — so without
+    // subscriber that joins after a send already happened: a late
+    // subscription just misses it, no error, no buffering, so without
     // this explicit trigger the test would be racing the daemon's own
     // startup sequence rather than reliably observing anything.
     let init_lua = format!(
@@ -376,7 +376,7 @@ return M
     let harness = TestHarness::spawn_with_modules(&[("escape-hatch-test", &manifest, &init_lua)])?;
     harness.wait_until_ready().await?;
     // Guarantees the module's `bread.on("test.trigger", ...)` subscription
-    // is already registered server-side before the trigger below is sent —
+    // is already registered server-side before the trigger below is sent:
     // "loaded" status is only reported (via `module_host.status`) after the
     // module's whole init.lua chunk, including that top-level `bread.on`
     // call, has finished executing. See this test's other race-avoidance
@@ -419,11 +419,11 @@ return M
     );
     assert!(
         !denied_result.contains("UNEXPECTEDLY_SUCCEEDED"),
-        "io.open on a path OUTSIDE the granted fs.read scope must be denied at the kernel level (Landlock), not merely un-offered by an RPC binding — got {denied_result:?}"
+        "io.open on a path OUTSIDE the granted fs.read scope must be denied at the kernel level (Landlock), not merely un-offered by an RPC binding: got {denied_result:?}"
     );
     assert!(
         !exec_result.contains("UNEXPECTEDLY_SUCCEEDED"),
-        "os.execute with no `exec` permission granted must not be able to run anything at all — got {exec_result:?}"
+        "os.execute with no `exec` permission granted must not be able to run anything at all: got {exec_result:?}"
     );
 
     harness.shutdown();
@@ -434,7 +434,7 @@ return M
 /// other module) down with it, and `breadd` must notice and report it.
 #[tokio::test]
 async fn killing_a_module_host_child_does_not_take_down_breadd_or_other_modules() -> Result<()> {
-    // An explicit, empty `permissions = []` — not "no manifest at all" — is
+    // An explicit, empty `permissions = []`, not "no manifest at all", is
     // what opts a module into the out-of-process sandboxed path with zero
     // grants (see `ModuleDecl::permissions`'s doc comment in
     // `breadd/src/lua/mod.rs`: `None` means "no manifest", which keeps
@@ -448,7 +448,7 @@ function M.on_load() end
 return M
 "#;
 
-    // The "control" module stays in-process (no manifest at all — the
+    // The "control" module stays in-process (no manifest at all, the
     // legacy/backward-compat path) specifically so this test also proves
     // an out-of-process module's crash doesn't disturb an *in-process*
     // module either, not just breadd's own IPC responsiveness.

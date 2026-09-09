@@ -26,7 +26,7 @@ echo "  $BIN_DIR/bread-module-host -> $REPO_ROOT/target/release/bread-module-hos
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
-    echo "  note: $BIN_DIR is not in PATH — add to your shell profile:"
+    echo "  note: $BIN_DIR is not in PATH; add to your shell profile:"
     echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 echo ""
@@ -63,7 +63,7 @@ fi
 
 if [[ ! -f "$CONFIG_DIR/init.lua" ]]; then
     cat > "$CONFIG_DIR/init.lua" << 'EOF'
--- bread init.lua — loaded before modules, use for global setup
+-- bread init.lua: loaded before modules, use for global setup
 bread.log("bread started")
 EOF
     echo "  created $CONFIG_DIR/init.lua"

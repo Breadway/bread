@@ -106,7 +106,7 @@ async fn emit_without_source_rejects_adapter_owned_event_name() -> Result<()> {
     harness.wait_until_ready().await?;
 
     // A no-`source` emit must not be able to impersonate a real adapter
-    // event by event name alone — "power" is a reserved, adapter-owned
+    // event by event name alone: "power" is a reserved, adapter-owned
     // domain (see `bread_shared::apps::RESERVED_DOMAINS`).
     let result = harness
         .send_request(
@@ -204,7 +204,7 @@ async fn emit_without_source_is_tagged_manual_not_system() -> Result<()> {
 
     // The subscribe ack is written to the client before the server task
     // actually registers on the broadcast channel (see `handle_connection`'s
-    // "events.subscribe" arm — ack first, `stream_events`/`event_tx.subscribe()`
+    // "events.subscribe" arm: ack first, `stream_events`/`event_tx.subscribe()`
     // second). A brief settle delay avoids racing that registration under
     // full-suite parallel load, same as the settle delay already used in
     // `workflow_reaches_done_via_wait_any_happy_path` above for the same
@@ -220,8 +220,8 @@ async fn emit_without_source_is_tagged_manual_not_system() -> Result<()> {
 
     // Bounded by an explicit timeout (not just the `Instant`-deadline-checked
     // loop used elsewhere in this file) so a real regression here fails the
-    // test in 5s instead of hanging this test binary — and therefore the
-    // whole `cargo test --workspace` run — forever.
+    // test in 5s instead of hanging this test binary, and therefore the
+    // whole `cargo test --workspace` run, forever.
     let event = timeout(Duration::from_secs(5), async {
         loop {
             let line = reader
@@ -238,7 +238,7 @@ async fn emit_without_source_is_tagged_manual_not_system() -> Result<()> {
     .map_err(|_| anyhow!("timed out waiting for bread.mymodule.poked on the stream"))??;
     // A wire-triggered no-source emit must never be indistinguishable from
     // a daemon-internal `System` event (e.g. `bread.system.startup`,
-    // `bread.profile.activated`) — it must carry the distinct `Manual` tag.
+    // `bread.profile.activated`): it must carry the distinct `Manual` tag.
     assert_eq!(
         event.get("source").and_then(Value::as_str),
         Some("manual"),
@@ -254,7 +254,7 @@ async fn emit_with_internal_source_is_rejected() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
 
-    // "power" is a real internal AdapterSource — a socket client must not be
+    // "power" is a real internal AdapterSource: a socket client must not be
     // able to spoof it via sourced emit.
     let result = harness
         .send_request(
@@ -358,7 +358,7 @@ async fn emit_with_app_source_rejects_wrong_namespace() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
 
-    // "clip" is a registered app id, but the event name belongs to "pad" —
+    // "clip" is a registered app id, but the event name belongs to "pad":
     // an app may only publish within its own namespace segment.
     let result = harness
         .send_request(
@@ -387,7 +387,7 @@ async fn emit_without_source_allows_well_formed_command_event() -> Result<()> {
     harness.wait_until_ready().await?;
 
     // Unsourced `bread-emit bread.command.clip.clear` is the documented
-    // command-bus path — `command` is reserved so it cannot be an app id,
+    // command-bus path: `command` is reserved so it cannot be an app id,
     // but a well-formed command to a known app must still go through.
     let result = harness
         .send_request(
@@ -413,7 +413,7 @@ async fn emit_without_source_rejects_command_to_non_app() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
 
-    // `power` is reserved and is not a known app — this must not sneak
+    // `power` is reserved and is not a known app: this must not sneak
     // through the command-bus exception.
     let result = harness
         .send_request(
@@ -480,7 +480,7 @@ async fn emit_with_app_source_still_rejects_foreign_app_namespace() -> Result<()
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
 
-    // `cast` must not be able to publish `bread.clip.*` events — only
+    // `cast` must not be able to publish `bread.clip.*` events: only
     // commands to clip, not clip's own inbound namespace.
     let result = harness
         .send_request(
@@ -556,22 +556,22 @@ async fn modules_list_returns_array() -> Result<()> {
 /// Core regression test from the capability-manifest report: a third-party
 /// module whose manifest grants only `state.read` can call
 /// `bread.state.get(...)`, but `bread.fs` and `bread.exec` must be
-/// genuinely *absent* from the `bread` table it sees — `nil`, not merely
+/// genuinely *absent* from the `bread` table it sees: `nil`, not merely
 /// permission-denied when called.
 ///
 /// *Since Workstream G*: a module that declares `[[permissions]]` (any,
-/// including an explicit empty list — see
+/// including an explicit empty list; see
 /// `explicit_empty_permissions_is_scoped_but_not_flagged_ungated` below)
 /// now runs out-of-process in a real `bread-module-host` child instead of
 /// in-process with a scoped Lua `_ENV` (see `breadd/src/lua/mod.rs`'s
-/// `load_module`) — the presence/absence check this test exists for still
+/// `load_module`): the presence/absence check this test exists for still
 /// holds, just enforced by what `bread-module-host`'s own `ModuleHostLua`
 /// constructs the `bread` table from (see `bread-module-host/src/
 /// lua_env.rs`) instead of `build_scoped_env`. `M.store.set(...)` no
 /// longer works as the result-reporting channel here, since an
 /// out-of-process module's `bread.module().store` is process-local (not
-/// synced back to `breadd`'s `RuntimeState` — a documented gap, see
-/// `Documentation.md`'s Workstream G section) — `bread.emit(...)` is used
+/// synced back to `breadd`'s `RuntimeState`; a documented gap, see
+/// `Documentation.md`'s Workstream G section): `bread.emit(...)` is used
 /// instead, which *does* cross the process boundary via the RPC bridge.
 #[tokio::test]
 async fn scoped_module_sees_only_granted_state_read_permission() -> Result<()> {
@@ -667,7 +667,7 @@ return M
 
 /// A third-party module installed with no `bread.module.toml` manifest at
 /// all (the pre-existing/legacy case) keeps full, unscoped `bread.*`
-/// access — but is surfaced as `ungated` in module status, which is exactly
+/// access, but is surfaced as `ungated` in module status, which is exactly
 /// what `bread doctor` reads to print its "no permissions declared"
 /// warning.
 #[tokio::test]
@@ -687,7 +687,7 @@ return M
     let harness = TestHarness::spawn_with_module("legacy-test", None, module_lua)?;
     harness.wait_until_ready().await?;
     // `wait_until_ready` only proves the IPC socket is accepting
-    // connections — module loading runs concurrently on the Lua engine's
+    // connections: module loading runs concurrently on the Lua engine's
     // own thread (see `lua::spawn_runtime`), so without this the check
     // below races module load completion even for an in-process module.
     // Usually fast enough not to matter, but flaky under this suite's
@@ -742,7 +742,7 @@ return M
 ///
 /// *Since Workstream G*: `Some(vec![])` also opts this module into the
 /// out-of-process sandboxed path (same as any other declared
-/// `[[permissions]]`), and — as in the test above — results come back via
+/// `[[permissions]]`), and, as in the test above, results come back via
 /// `bread.emit` on a `test.trigger` handler rather than `M.store`. See that
 /// test's doc comment for the full explanation.
 #[tokio::test]
@@ -825,7 +825,7 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // Event emitted before any reload. A non-reserved event name: `reload` is
     // an adapter-owned domain, so a manual `emit` of `bread.reload.*` is now
     // rejected by the normalizer (see "Allow well-formed bread.command events
-    // on the emit bus"). The name here is incidental — this test only cares
+    // on the emit bus"). The name here is incidental: this test only cares
     // that events flow through the pipeline before and after a reload storm.
     harness
         .send_request("emit", json!({"event": "bread.reloadtest.before", "data": {}}))
@@ -833,8 +833,8 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
 
     // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
     // and re-registers subscriptions. A wedge here (lost Lua thread, deadlocked
-    // dispatch, paused-and-never-resumed pipeline) is the regression this guards
-    // — the previous suite only checked a single happy-path reload.
+    // dispatch, paused-and-never-resumed pipeline) is the regression this guards:
+    // the previous suite only checked a single happy-path reload.
     for _ in 0..3 {
         let r = harness.send_request("modules.reload", json!({})).await?;
         assert_eq!(r.get("ok").and_then(Value::as_bool), Some(true));
@@ -1001,7 +1001,7 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
         "method": "events.subscribe",
         "params": {
             // "system" is a reserved, adapter/daemon-owned domain (see
-            // `emit_without_source_rejects_reserved_domain` below) — a
+            // `emit_without_source_rejects_reserved_domain` below): a
             // manual emit can no longer use it, so this test's custom
             // event lives under "custom" instead, same as it always did
             // for "match"/"nomatch"/"replay"/etc. elsewhere in this file.
@@ -1110,7 +1110,7 @@ async fn event_causality_chain_threads_caused_by_across_handlers() -> Result<()>
     );
 
     // The trigger itself comes in over IPC's unsourced `emit`, outside any
-    // Lua handler — its `caused_by` must be None. Everything downstream
+    // Lua handler: its `caused_by` must be None. Everything downstream
     // (X, Y, Z) is emitted by `bread.emit()` from inside a running handler.
     harness
         .send_request(
@@ -1301,7 +1301,7 @@ async fn workflow_captures_error_on_failure() -> Result<()> {
 
 #[tokio::test]
 async fn rules_toml_absent_is_a_no_op() -> Result<()> {
-    // No rules.toml written at all — the daemon must still start cleanly
+    // No rules.toml written at all: the daemon must still start cleanly
     // and `bread.rules` (always present as a built-in) must come up
     // `loaded` with nothing registered, not `load_error` or `not_found`.
     let harness = TestHarness::spawn()?;
@@ -1352,7 +1352,7 @@ async fn rules_toml_well_formed_all_action_kinds_work_end_to_end() -> Result<()>
     // realistic "device.*"/"power.*" shown in rules.toml's own docs):
     // Workstream A closed the IPC `emit` method's no-source path to reject
     // any event name claiming a reserved, adapter-owned domain (see
-    // `bread_shared::apps::RESERVED_DOMAINS` — "device" and "power" are both
+    // `bread_shared::apps::RESERVED_DOMAINS`: "device" and "power" are both
     // in it), so a real `bread.device.dock.connected` can no longer be
     // manually injected over the socket the way this test needs to. What's
     // under test here is rules.toml -> bread.on() -> action wiring, which is
@@ -1383,7 +1383,7 @@ exec = "touch '{exec_path}'"
     )?;
     harness.wait_until_ready().await?;
 
-    // rules.toml parsed and registered cleanly — no load_error.
+    // rules.toml parsed and registered cleanly: no load_error.
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
         .get("modules")
@@ -1492,7 +1492,7 @@ on = "power.ac.disconnected"
         "expected the validation message, got: {last_error}"
     );
 
-    // The daemon itself must not have crashed — still reachable.
+    // The daemon itself must not have crashed: still reachable.
     let ping = harness.send_request("ping", json!({})).await?;
     assert_eq!(ping.get("ok").and_then(Value::as_bool), Some(true));
 
@@ -1500,7 +1500,7 @@ on = "power.ac.disconnected"
     Ok(())
 }
 
-/// Polls for `path` to exist, or times out after 5 seconds — `bread.exec`
+/// Polls for `path` to exist, or times out after 5 seconds: `bread.exec`
 /// is fire-and-forget (spawn_blocking + `sh -c`), so its side effects land
 /// asynchronously relative to the IPC call that triggered them.
 async fn wait_for_file(path: &Path) -> Result<()> {
@@ -1627,8 +1627,8 @@ enabled = false
 
     /// Like `spawn_with_init`, but also installs one third-party,
     /// directory-based module (`<modules_dir>/<name>/{bread.module.toml,
-    /// init.lua}`) — the same on-disk shape `bread modules install`
-    /// produces — before starting the daemon. `manifest_toml` is written
+    /// init.lua}`) (the same on-disk shape `bread modules install`
+    /// produces) before starting the daemon. `manifest_toml` is written
     /// verbatim as `bread.module.toml`; pass `None` to install the module
     /// with no manifest file at all (the legacy/backward-compat case).
     fn spawn_with_module(
@@ -1754,7 +1754,7 @@ enabled = false
     /// `name` reaches `Loaded` (or `LoadError`, which is treated as a test
     /// failure). Out-of-process modules (Workstream G:
     /// `decl.permissions.is_some()`, see `breadd/src/lua/mod.rs`) report
-    /// their load outcome asynchronously — a passing `wait_until_ready`
+    /// their load outcome asynchronously: a passing `wait_until_ready`
     /// only proves the daemon's IPC socket itself is up, not that any
     /// particular module has finished spawning/connecting/authenticating/
     /// running its `init.lua` yet.
@@ -1831,25 +1831,25 @@ enabled = false
 
 impl Drop for TestHarness {
     /// A test that fails partway through (an `?`-propagated error, a
-    /// failed `assert!` unwinding) must not leak a live `breadd` process —
+    /// failed `assert!` unwinding) must not leak a live `breadd` process:
     /// worse, since Workstream G, a leaked `breadd` can itself have spawned
     /// `bread-module-host` children under a real Landlock sandbox, which
     /// don't exit on their own once the parent socket's other end goes
     /// away instantly (they notice on their next read and exit, but that's
     /// not instant). Without this, a single failing test in this file
     /// leaves orphaned processes for every *other* concurrently-running
-    /// test to contend with for CPU/scheduler time — turning one flaky
+    /// test to contend with for CPU/scheduler time: turning one flaky
     /// failure into cascading slowdowns/timeouts across the whole suite
     /// (observed directly while developing Workstream G's tests).
     fn drop(&mut self) {
         // SIGTERM first, not straight to SIGKILL: `breadd`'s own
         // `wait_for_shutdown()` (src/main.rs) listens for SIGTERM and runs
-        // a graceful shutdown path — `lua_runtime.shutdown()`,
+        // a graceful shutdown path: `lua_runtime.shutdown()`,
         // `module_host_registry.shutdown_all()`, and, as `main()` returns,
         // every adapter task getting dropped, which is what actually fires
         // `kill_on_drop` on a still-running child process like
         // `PodmanAdapter`'s `podman events` watcher. SIGKILL bypasses all of
-        // that — the process is torn down before any of its own code, Drop
+        // that: the process is torn down before any of its own code, Drop
         // impls included, ever runs. That gap is exactly how a single day
         // of repeated `cargo test --workspace` runs left 1,559 orphaned
         // `podman events` processes system-wide (found and cleaned up

@@ -1,4 +1,4 @@
--- pause-media-on-headphone-unplug — pause playback when headphones disconnect,
+-- pause-media-on-headphone-unplug: pause playback when headphones disconnect,
 -- so sound doesn't suddenly blast out of the speakers.
 --
 -- Drop-in: copy into ~/.config/bread/modules/. Requires `playerctl`.

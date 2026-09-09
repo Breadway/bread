@@ -2,7 +2,7 @@
 
 Tracks API surface currently in its deprecation window per
 [`Documentation.md`'s API Stability & Versioning](Documentation.md#api-stability--versioning)
-policy — marked `Deprecated` and still functioning, pending removal in a
+policy; marked `Deprecated` and still functioning, pending removal in a
 future major version.
 
 ## Hyprland legacy flat event names (since v1.5)
@@ -18,7 +18,7 @@ future major version.
 **Recommended form going forward:** their `bread.hyprland.<rest>` equivalents
 (e.g. `bread.hyprland.workspace.changed`), which make explicit that these
 events are Hyprland-specific rather than portable across a future second
-compositor backend — see `Documentation.md`'s
+compositor backend; see `Documentation.md`'s
 [Hyprland event reference](Documentation.md#hyprland) for the full mapping.
 
 **Current behavior:** both names fire by default (`[compat]
@@ -33,7 +33,7 @@ the legacy names; only `bread.hyprland.*` fires. The state engine applies
    later minor release, once downstream modules have had a full deprecation
    window to migrate.
 2. Remove the legacy flat names and the `[compat]` flag entirely in the next
-   major version (v2) — at that point `normalize_hyprland()` only ever
+   major version (v2), at that point `normalize_hyprland()` only ever
    produces `bread.hyprland.*` names and the dual-emit machinery
    (`emit_hyprland_dual` in `normalizer.rs`) can be deleted.
 

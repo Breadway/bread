@@ -1,4 +1,4 @@
-//! `bread init` — installs bread's Hyprland compositor integration: the
+//! `bread init` installs bread's Hyprland compositor integration: the
 //! `layerrule`s (blur, ignore_alpha, blur_popups, animation) that make
 //! breadbar/breadbox actually look like the translucent shell they're
 //! designed as, generated from the active shell theme's `[compositor]`
@@ -6,17 +6,17 @@
 //!
 //! # Why this command auto-edits a file, unlike `hooks_shell`/`hooks_git`
 //!
-//! Read `hooks_shell.rs`'s module header first — it lays out the general
+//! Read `hooks_shell.rs`'s module header first: it lays out the general
 //! rule this repo follows: bread does not silently edit a user's own
 //! startup/config files, because that kind of edit is hard to notice and
 //! hard to undo. This module is the one deliberate exception, and it is
 //! narrow and consent-gated on purpose:
 //!
-//! - A missing shell hook is invisible enrichment — the shell just doesn't
+//! - A missing shell hook is invisible enrichment: the shell just doesn't
 //!   report telemetry, nothing looks broken, and the fix (source a line)
 //!   is something the user can take at their own pace.
 //! - A missing compositor layer rule is not invisible. breadbar renders
-//!   without blur, without `ignore_alpha`, motion is wrong — it looks like
+//!   without blur, without `ignore_alpha`, motion is wrong; it looks like
 //!   a broken app, not a missing optional feature, and a user hitting that
 //!   has no way to know the fix is "hand-write five `hl.layer_rule` calls
 //!   into your Hyprland config." The gap between "install the bread stack"
@@ -29,7 +29,7 @@
 //! behind a timestamped backup; and always reversible with `bread init
 //! --undo`. Every actual line of layer-rule logic lives in a separate,
 //! entirely bread-owned file (`~/.config/hypr/bread.lua`) that is
-//! regenerated freely and never hand-edited — the one line touched in the
+//! regenerated freely and never hand-edited; the one line touched in the
 //! user's own `hyprland.lua` just sources it.
 //!
 //! # Scope: appearance only
@@ -37,7 +37,7 @@
 //! `bread.lua` (see [`BREAD_LUA`]) emits `hl.layer_rule` calls built from
 //! exactly five fields: `blur`, `ignore_alpha`, `blur_popups`, `animation`,
 //! `no_anim`. It never reads or emits window placement, workspace
-//! assignment, or focus rules — those are `hl.window_rule` policy, are
+//! assignment, or focus rules; those are `hl.window_rule` policy, are
 //! never part of `layerrules.json`, and are explicitly out of scope for
 //! this file even if a future `layerrules.json` somehow grew such a key.
 //! An installer that rearranged a user's workspaces on upgrade would be a
@@ -50,7 +50,7 @@
 //! config." This command's shape is different in a way that matters enough
 //! to warrant its own top-level verb rather than a third `hooks install`
 //! variant: it *proposes an edit to a file it doesn't own*, which needs a
-//! diff, a consent gate, a backup, and a symmetrical `--undo` — none of
+//! diff, a consent gate, a backup, and a symmetrical `--undo`; none of
 //! which the `hooks` family has or needs. Folding it into `HooksCommand`
 //! would either bolt consent/undo semantics onto a subcommand group that
 //! otherwise has neither, or quietly suggest to a reader that hooks and
@@ -73,7 +73,7 @@ pub const MARKER_BEGIN: &str = "-- >>> bread managed >>>";
 pub const MARKER_END: &str = "-- <<< bread managed <<<";
 
 /// The single line inserted between the markers. Deliberately just a
-/// `pcall(dofile(...))` — every actual rule lives in `bread.lua`, guarded
+/// `pcall(dofile(...))`: every actual rule lives in `bread.lua`, guarded
 /// by its own internal `pcall` too (belt and suspenders: this call site
 /// can never abort the rest of `hyprland.lua` even if `bread.lua` itself
 /// somehow threw outside its own guard, e.g. a syntax error from a
@@ -87,7 +87,7 @@ fn managed_block_text() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// bread.lua — the entirely bread-owned generated file
+// bread.lua: the entirely bread-owned generated file
 // ---------------------------------------------------------------------------
 
 /// Full contents written to `~/.config/hypr/bread.lua`.
@@ -96,16 +96,16 @@ fn managed_block_text() -> String {
 /// decoder rather than `dofile`-ing `scripts/lib/json.lua`, because that
 /// file is a BOS/this-machine convention, not something every Hyprland+Lua
 /// user has. The decoder only needs to handle what `layerrules.json` can
-/// contain (a flat object of objects with string/number/bool/null leaves)
-/// — see `bread-theme layerrules`'s writer for the schema this reads.
+/// contain (a flat object of objects with string/number/bool/null leaves).
+/// See `bread-theme layerrules`'s writer for the schema this reads.
 ///
 /// The whole body runs inside one `pcall`. A missing `layerrules.json`
 /// (bread-theme layerrules never run), an unreadable one, or a malformed
-/// one all degrade to "no bread layer rules applied this session" — never
+/// one all degrade to "no bread layer rules applied this session", never
 /// to a Hyprland config that fails to load.
 const BREAD_LUA: &str = r#"-- ~/.config/hypr/bread.lua
 --
--- Generated by `bread init`. DO NOT HAND-EDIT — rerun `bread init` any
+-- Generated by `bread init`. DO NOT HAND-EDIT. Rerun `bread init` any
 -- time to regenerate this file from the current layerrules.json, or
 -- `bread init --undo` to remove the one line in hyprland.lua that sources
 -- it (this file itself is left in place, inert, until you delete it).
@@ -116,7 +116,7 @@ const BREAD_LUA: &str = r#"-- ~/.config/hypr/bread.lua
 --
 -- Appearance only: blur, ignore_alpha, blur_popups, animation, no_anim.
 -- This file must never grow window placement, workspace assignment, or
--- focus rules — those are hl.window_rule policy and belong in your own
+-- focus rules; those are hl.window_rule policy and belong in your own
 -- hyprland.lua, not here. Only these five fields are ever read off each
 -- entry below; any other key in layerrules.json (there should not be any)
 -- is silently ignored.
@@ -126,7 +126,7 @@ local ok, err = pcall(function()
 
     local fh = io.open(path, "r")
     if not fh then
-        return -- no layerrules.json yet (bread-theme layerrules not run) — nothing to do
+        return -- no layerrules.json yet (bread-theme layerrules not run); nothing to do
     end
     local raw = fh:read("*a")
     fh:close()
@@ -134,7 +134,7 @@ local ok, err = pcall(function()
     -- Minimal JSON decoder, scoped to layerrules.json's shape (an object of
     -- objects; string/number/bool/null leaves; arrays supported for
     -- completeness though the schema never uses one). Not a general-purpose
-    -- parser — see BREAD_LUA's doc comment in bread-cli/src/init.rs for why
+    -- parser: see BREAD_LUA's doc comment in bread-cli/src/init.rs for why
     -- this doesn't just dofile scripts/lib/json.lua.
     local pos, len = 1, #raw
 
@@ -277,7 +277,7 @@ end)
 
 if not ok then
     -- Never let a bad layerrules.json break the rest of the compositor
-    -- config — Hyprland just runs without bread's layer rules until the
+    -- config; Hyprland just runs without bread's layer rules until the
     -- underlying file is fixed (or regenerated with `bread-theme layerrules`).
     io.stderr:write("bread.lua: layer rules not applied: " .. tostring(err) .. "\n")
 end
@@ -291,10 +291,10 @@ end
 /// init` can safely auto-edit.
 #[derive(Debug, PartialEq, Eq)]
 enum ConfigLayout {
-    /// `hyprland.lua` exists and is readable as UTF-8 text — the only
+    /// `hyprland.lua` exists and is readable as UTF-8 text: the only
     /// layout this command will ever write to.
     Lua(PathBuf),
-    /// No `hyprland.lua`, but `hyprland.conf` exists — the legacy hyprlang
+    /// No `hyprland.lua`, but `hyprland.conf` exists: the legacy hyprlang
     /// format. Never auto-edited (a `dofile`-based integration can't work
     /// there anyway; conf and Lua are different, mutually exclusive config
     /// entry points).
@@ -331,7 +331,7 @@ fn detect_layout(hypr_dir: &Path) -> ConfigLayout {
 /// (`scripts/ui/rules.lua`, etc); this is just a hang-safety bound.
 const CONFLICT_SCAN_MAX_DEPTH: usize = 8;
 
-/// Look for a `breadbar*` layer rule bread doesn't own — either BOS's own
+/// Look for a `breadbar*` layer rule bread doesn't own: either BOS's own
 /// dotfiles or a user's hand-authored one (this machine's
 /// `scripts/ui/rules.lua` is exactly this case: `hl.layer_rule({ name =
 /// "breadbar-island", match = { namespace = "^breadbar$" }, ... })`).
@@ -342,7 +342,7 @@ const CONFLICT_SCAN_MAX_DEPTH: usize = 8;
 /// keyword (`layer_rule` for Lua, `layerrule` for hyprlang conf) and
 /// `breadbar` is treated as an existing owner. False positives (a file
 /// that mentions both words without actually defining a breadbar layer
-/// rule) are the safe failure mode here — worst case bread declines to
+/// rule) are the safe failure mode here: worst case bread declines to
 /// install and points at a red herring, which is recoverable by hand;
 /// installing a second, conflicting rule set is not.
 fn find_breadbar_conflict(hypr_dir: &Path) -> Result<Option<PathBuf>> {
@@ -375,7 +375,7 @@ fn scan_dir_for_conflict(dir: &Path, depth: usize) -> Result<Option<PathBuf>> {
             continue;
         }
         if path.file_name().and_then(|n| n.to_str()) == Some("bread.lua") {
-            continue; // our own generated file — never a conflict with itself
+            continue; // our own generated file, never a conflict with itself
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if ext != "lua" && ext != "conf" {
@@ -398,12 +398,12 @@ fn mentions_breadbar_layer_rule(content: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Managed-block find / plan (pure — operate on strings only)
+// Managed-block find / plan (pure: operate on strings only)
 // ---------------------------------------------------------------------------
 
 /// Locate the bread-managed block's (start, end) 0-based *line* indices in
 /// `content`, if present. A line must match a marker exactly after
-/// trimming — a passing mention of the marker text mid-line is not enough,
+/// trimming; a passing mention of the marker text mid-line is not enough,
 /// mirroring `hooks_git.rs`'s `is_bread_managed`.
 fn find_managed_block(content: &str) -> Option<(usize, usize)> {
     let lines: Vec<&str> = content.lines().collect();
@@ -416,14 +416,14 @@ fn find_managed_block(content: &str) -> Option<(usize, usize)> {
 #[derive(Debug, PartialEq, Eq)]
 enum ChangeKind {
     /// A bread block is already present and byte-identical to what we'd
-    /// write — nothing to change in `hyprland.lua` (`bread.lua` itself is
+    /// write: nothing to change in `hyprland.lua` (`bread.lua` itself is
     /// still freely refreshed by the caller).
     Unchanged,
     /// No existing block found; the new one will be appended at the end.
     Appended,
     /// An existing block was found at these 0-based line indices and will
-    /// be replaced in place (its content differs from what we'd write now
-    /// — e.g. an older bread version's block).
+    /// be replaced in place (its content differs from what we'd write now,
+    /// e.g. an older bread version's block).
     Replaced { start: usize, end: usize },
 }
 
@@ -514,7 +514,7 @@ type LayerRulesFile = BTreeMap<String, LayerRuleEntry>;
 
 /// Read and parse `~/.config/hypr/layerrules.json`.
 ///
-/// `None` means the file doesn't exist (not an error — `bread-theme
+/// `None` means the file doesn't exist (not an error: `bread-theme
 /// layerrules` just hasn't been run yet). `Some(Err(..))` means it exists
 /// but couldn't be read or parsed; the message is meant to be shown to the
 /// user as-is.
@@ -532,7 +532,7 @@ fn read_layerrules_json(hypr_dir: &Path) -> Option<Result<LayerRulesFile, String
     }
 }
 
-/// Render `rules` as hyprlang `.conf` `layerrule` lines — the manual
+/// Render `rules` as hyprlang `.conf` `layerrule` lines: the manual
 /// snippet printed for a `hyprland.conf`-only or unrecognized layout. Same
 /// five fields as `bread.lua`, nothing else.
 fn render_conf_snippet(rules: &LayerRulesFile) -> String {
@@ -565,7 +565,7 @@ fn render_conf_snippet(rules: &LayerRulesFile) -> String {
 enum Consent {
     Yes,
     No,
-    /// No TTY on stdin and `--yes` wasn't given — per spec, this must never
+    /// No TTY on stdin and `--yes` wasn't given; per spec, this must never
     /// write.
     NonInteractive,
 }
@@ -615,7 +615,7 @@ fn print_proposed_change(path: &Path, original: &str, new_content: &str, change:
     println!();
     match change {
         ChangeKind::Unchanged => {
-            println!("  (already installed — no change needed)");
+            println!("  (already installed: no change needed)");
         }
         ChangeKind::Appended => {
             let (start, end) =
@@ -651,13 +651,13 @@ fn print_proposed_change(path: &Path, original: &str, new_content: &str, change:
 
 fn print_bos_conflict(path: &Path) {
     println!(
-        "bread init: found an existing breadbar layer rule in {} — refusing to install.",
+        "bread init: found an existing breadbar layer rule in {}, refusing to install.",
         path.display()
     );
     println!(
         "Two owners writing the same Hyprland layer rules is how they end up fighting each \
          other on reload. That file already provides this behavior (BOS's own dotfiles, or \
-         something hand-authored) — edit it directly if you want to change the rules, or \
+         something hand-authored). Edit it directly if you want to change the rules, or \
          remove it first if you'd rather have `bread init` manage this from now on."
     );
 }
@@ -672,7 +672,7 @@ fn print_manual_snippet(hypr_dir: &Path, reason: ManualReason) {
     match reason {
         ManualReason::ConfOnly(path) => {
             println!(
-                "bread init: found {} but no hyprland.lua — bread only auto-edits the Lua-based \
+                "bread init: found {} but no hyprland.lua; bread only auto-edits the Lua-based \
                  Hyprland config, never .conf (they're different, mutually exclusive config \
                  entry points), so nothing was written.",
                 path.display()
@@ -681,13 +681,13 @@ fn print_manual_snippet(hypr_dir: &Path, reason: ManualReason) {
         ManualReason::Unrecognized => {
             println!(
                 "bread init: no recognized Hyprland config found at {} (looked for \
-                 hyprland.lua, hyprland.conf) — nothing was written.",
+                 hyprland.lua, hyprland.conf). Nothing was written.",
                 hypr_dir.display()
             );
         }
         ManualReason::LuaUnreadable(path) => {
             println!(
-                "bread init: {} exists but could not be read as text — bread only auto-edits a \
+                "bread init: {} exists but could not be read as text; bread only auto-edits a \
                  config it can safely parse, so nothing was written.",
                 path.display()
             );
@@ -705,13 +705,13 @@ fn print_manual_snippet(hypr_dir: &Path, reason: ManualReason) {
                 }
                 Some(Ok(_)) => {
                     println!(
-                        "~/.config/hypr/layerrules.json exists but is empty — nothing to paste \
+                        "~/.config/hypr/layerrules.json exists but is empty: nothing to paste \
                          yet. Set a theme's [compositor] table and run `bread-theme layerrules`."
                     );
                 }
                 Some(Err(e)) => {
                     println!(
-                        "~/.config/hypr/layerrules.json exists but {e} — fix it and re-run \
+                        "~/.config/hypr/layerrules.json exists but {e}: fix it and re-run \
                          `bread init`, or run `bread-theme layerrules` to regenerate it."
                     );
                 }
@@ -777,7 +777,7 @@ fn run_install(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
             lua_path.display()
         );
         if dry_run {
-            println!("(dry run — bread.lua left untouched)");
+            println!("(dry run: bread.lua left untouched)");
             return Ok(());
         }
         let bread_lua_path = write_bread_lua(hypr_dir)?;
@@ -788,18 +788,18 @@ fn run_install(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     print_proposed_change(&lua_path, &original, &new_content, &change);
 
     if dry_run {
-        println!("(dry run — no changes made)");
+        println!("(dry run: no changes made)");
         return Ok(());
     }
 
     match ask_consent(yes, "Apply this change?")? {
         Consent::No => {
-            println!("aborted — no changes made.");
+            println!("aborted: no changes made.");
             return Ok(());
         }
         Consent::NonInteractive => {
             println!(
-                "non-interactive session — re-run with --yes to apply this change, or paste \
+                "non-interactive session: re-run with --yes to apply this change, or paste \
                  the snippet above yourself."
             );
             return Ok(());
@@ -827,7 +827,7 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
         ConfigLayout::Lua(path) => path,
         _ => {
             println!(
-                "bread init --undo: no bread-managed hyprland.lua found at {} — nothing to undo.",
+                "bread init --undo: no bread-managed hyprland.lua found at {}, nothing to undo.",
                 hypr_dir.display()
             );
             return Ok(());
@@ -839,7 +839,7 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
 
     let Some((start, end)) = find_managed_block(&original) else {
         println!(
-            "bread init --undo: no bread-managed block found in {} — nothing to undo.",
+            "bread init --undo: no bread-managed block found in {}, nothing to undo.",
             lua_path.display()
         );
         return Ok(());
@@ -858,17 +858,17 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     println!();
 
     if dry_run {
-        println!("(dry run — no changes made)");
+        println!("(dry run: no changes made)");
         return Ok(());
     }
 
     match ask_consent(yes, "Remove this block?")? {
         Consent::No => {
-            println!("aborted — no changes made.");
+            println!("aborted: no changes made.");
             return Ok(());
         }
         Consent::NonInteractive => {
-            println!("non-interactive session — re-run with --yes to apply this change.");
+            println!("non-interactive session: re-run with --yes to apply this change.");
             return Ok(());
         }
         Consent::Yes => {}
@@ -888,7 +888,7 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     let bread_lua = hypr_dir.join("bread.lua");
     if bread_lua.exists() {
         println!(
-            "  note     {} was left in place (harmless — nothing sources it anymore); delete \
+            "  note     {} was left in place (harmless: nothing sources it anymore); delete \
              it yourself if you want it gone",
             bread_lua.display()
         );
@@ -900,7 +900,7 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
 // Public entry points
 // ---------------------------------------------------------------------------
 
-/// `~/.config/hypr` — Hyprland always reads its config from here; unlike
+/// `~/.config/hypr`: Hyprland always reads its config from here; unlike
 /// most XDG apps this is not `$XDG_CONFIG_HOME`-relative in practice, so
 /// this resolves `$HOME` directly rather than going through
 /// `dirs::config_dir()`.
@@ -925,7 +925,7 @@ pub fn run(dry_run: bool, yes: bool, undo: bool) -> Result<()> {
 }
 
 /// Status lines for `bread doctor`'s compositor section. Pure
-/// filesystem/string inspection — no daemon round trip, so this works even
+/// filesystem/string inspection: no daemon round trip, so this works even
 /// when breadd isn't running, and it never installs anything itself.
 pub fn doctor_report(hypr_dir: &Path) -> Vec<String> {
     let mut lines = Vec::new();
@@ -948,12 +948,12 @@ pub fn doctor_report(hypr_dir: &Path) -> Vec<String> {
                     "  compositor  ✓ installed (bread.lua sourced from hyprland.lua)".to_string(),
                 ),
                 (true, false) => lines.push(
-                    "  compositor  ⚠ hyprland.lua sources bread.lua, but bread.lua is missing \
-                     — run `bread init` to regenerate it"
+                    "  compositor  ⚠ hyprland.lua sources bread.lua, but bread.lua is missing: \
+                     run `bread init` to regenerate it"
                         .to_string(),
                 ),
                 (false, _) => lines.push(
-                    "  compositor  ✗ not installed — run `bread init` to enable layer-rule \
+                    "  compositor  ✗ not installed: run `bread init` to enable layer-rule \
                      blur/opacity for breadbar"
                         .to_string(),
                 ),
@@ -961,14 +961,14 @@ pub fn doctor_report(hypr_dir: &Path) -> Vec<String> {
         }
         ConfigLayout::ConfOnly(_) => {
             lines.push(
-                "  compositor  ✗ not installed (hyprland.conf detected, not the Lua config) \
-                 — run `bread init` for the layerrule snippet to paste in by hand"
+                "  compositor  ✗ not installed (hyprland.conf detected, not the Lua config): \
+                 run `bread init` for the layerrule snippet to paste in by hand"
                     .to_string(),
             );
         }
         ConfigLayout::Unrecognized => {
             lines.push(
-                "  compositor  ✗ not installed (no recognized Hyprland config found) — run \
+                "  compositor  ✗ not installed (no recognized Hyprland config found): run \
                  `bread init`"
                     .to_string(),
             );
@@ -981,7 +981,7 @@ pub fn doctor_report(hypr_dir: &Path) -> Vec<String> {
         if layerrules_json.is_file() {
             format!("present ({})", layerrules_json.display())
         } else {
-            "missing — run `bread-theme layerrules`".to_string()
+            "missing: run `bread-theme layerrules`".to_string()
         }
     ));
 
@@ -1107,7 +1107,7 @@ mod tests {
     #[test]
     fn detect_layout_unrecognized_when_lua_unreadable_binary() {
         let dir = TempDir::new().unwrap();
-        // Invalid UTF-8 bytes — fs::read_to_string will fail on this.
+        // Invalid UTF-8 bytes: fs::read_to_string will fail on this.
         fs::write(dir.path().join("hyprland.lua"), [0xff, 0xfe, 0x00, 0xff]).unwrap();
         assert_eq!(detect_layout(dir.path()), ConfigLayout::Unrecognized);
     }
@@ -1154,7 +1154,7 @@ mod tests {
         fs::write(dir.path().join("bread.lua"), BREAD_LUA).unwrap();
         // bread.lua emits hl.layer_rule({ name = ns, ... }) for a namespace
         // that could well be literally "breadbar" once layerrules.json has
-        // that key — the scan must still skip bread.lua by filename.
+        // that key: the scan must still skip bread.lua by filename.
         assert_eq!(find_breadbar_conflict(dir.path()).unwrap(), None);
     }
 

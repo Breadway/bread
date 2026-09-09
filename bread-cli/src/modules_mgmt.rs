@@ -15,7 +15,7 @@ pub struct ModuleManifest {
     pub source: String,
     pub installed_at: String,
     /// Declared `[[permissions]]` entries. `None` means the manifest has no
-    /// `permissions` key at all — either because it predates this field (an
+    /// `permissions` key at all: either because it predates this field (an
     /// already-installed module) or because the author simply didn't add
     /// one. `breadd` treats that the same way: full, ungated `bread.*`
     /// access, same as today, but `bread doctor` flags it so the gap is
@@ -62,7 +62,7 @@ pub fn parse_source(source: &str) -> Result<PathBuf> {
 /// (`bread.module.toml`, which could be crafted by anyone who hands the user
 /// a "module" to install) or a raw CLI argument (`bread modules remove
 /// <name>`). Without this check, a name like `../../../../etc` or an
-/// absolute path would let install/remove escape `modules_dir` entirely —
+/// absolute path would let install/remove escape `modules_dir` entirely:
 /// classic path traversal. Reject any name containing a path separator,
 /// a `..` component, or that is otherwise not a single plain path segment.
 fn validate_module_name(name: &str) -> Result<()> {
@@ -240,7 +240,7 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// `bread modules audit` — best-effort static permission suggestion
+// `bread modules audit`: best-effort static permission suggestion
 // ---------------------------------------------------------------------------
 //
 // This is deliberately a text scan, not a Lua parser. `breadd`'s own
@@ -252,7 +252,7 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 // expected to follow dynamic dispatch, string-built calls, or anything a
 // real parser would be needed for.
 
-/// Statically scan every `.lua` file in `module_dir` (recursively — a
+/// Statically scan every `.lua` file in `module_dir` (recursively, a
 /// module may `require()` sibling files from its own directory) for
 /// `bread.*` call-site patterns and return a suggested, deduplicated
 /// permission list for the user to review.
@@ -299,7 +299,7 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// Scan one file's source for `bread.<ident>[.<ident>]` occurrences and
 /// classify each into a permission, accumulating into `found` (keyed by
 /// kind, so repeated call sites for the same permission collapse to one
-/// suggestion — first-seen scoping hint wins).
+/// suggestion: first-seen scoping hint wins).
 fn scan_lua_source(src: &str, found: &mut std::collections::BTreeMap<PermissionKind, ModulePermission>) {
     const NEEDLE: &str = "bread.";
     let mut cursor = 0usize;
@@ -353,7 +353,7 @@ fn classify_call_site(
         }
         // Everything else (on/once/filter/off/emit/after/every/cancel/json/
         // module/log/warn/error/debounce/spawn/wait/wait_any/wait_all/
-        // workflow/__private) is baseline — always available, nothing to
+        // workflow/__private) is baseline: always available, nothing to
         // suggest.
         _ => return,
     };
@@ -365,7 +365,7 @@ fn classify_call_site(
 /// Best-effort extraction of the first quoted string literal appearing on
 /// the same line right after a call-site's opening paren, e.g.
 /// `bread.exec("hyprpaper --config foo")` -> `Some("hyprpaper --config foo")`.
-/// Returns `None` for dynamic/variable arguments (`bread.fs.read(path)`) —
+/// Returns `None` for dynamic/variable arguments (`bread.fs.read(path)`):
 /// the permission is still suggested, just without a scoping hint.
 fn extract_first_string_arg(tail: &str) -> Option<String> {
     let line_end = tail.find('\n').unwrap_or(tail.len());

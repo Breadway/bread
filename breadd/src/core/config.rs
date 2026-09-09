@@ -92,7 +92,7 @@ pub struct PowerConfig {
 }
 
 /// Shared shape for adapters scoped to a list of project-root glob patterns
-/// (e.g. `~/Projects/*`) — used by both the filesystem and git adapters.
+/// (e.g. `~/Projects/*`), used by both the filesystem and git adapters.
 /// `roots` defaults to empty: these adapters do nothing until the user opts
 /// in with actual paths, since there's no universally-safe default directory
 /// to watch.
@@ -108,7 +108,7 @@ pub struct RootsConfig {
 pub struct SystemdConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Allowlist of `systemd --user` unit names to watch. Empty by default —
+    /// Allowlist of `systemd --user` unit names to watch. Empty by default:
     /// subscribing to every user unit's transitions is noisy, so nothing is
     /// watched until the user names specific units.
     #[serde(default)]
@@ -130,7 +130,7 @@ pub struct CompatConfig {
     /// adapter dual-emits both its legacy flat event names (e.g.
     /// `bread.workspace.changed`) and their namespaced `bread.hyprland.*`
     /// equivalents (e.g. `bread.hyprland.workspace.changed`). Set to `false`
-    /// to suppress the legacy names and emit only the namespaced ones — this
+    /// to suppress the legacy names and emit only the namespaced ones; this
     /// will become the default in a later release once the deprecation
     /// window closes.
     #[serde(default = "default_true")]
@@ -282,7 +282,7 @@ fn config_path() -> PathBuf {
     expand_home("~/.config/bread/breadd.toml")
 }
 
-/// Location of the optional `rules.toml` — declarative automation rules
+/// Location of the optional `rules.toml`: declarative automation rules
 /// (see `crate::core::rules`). Resolved with the exact same
 /// `XDG_CONFIG_HOME`-vs-`HOME` precedence as `config_path()` above; see the
 /// `expand_home` doc comment for why every config-adjacent path the daemon
@@ -297,7 +297,7 @@ pub fn rules_path() -> PathBuf {
 
 /// Expands a leading `~/`. `~/.config/...` paths specifically prefer
 /// `$XDG_CONFIG_HOME` when it's set, consistent with `config_path()`'s own
-/// resolution of `breadd.toml` itself — otherwise the default `lua.entry_point`
+/// resolution of `breadd.toml` itself; otherwise the default `lua.entry_point`
 /// / `lua.module_path` values (`"~/.config/bread/init.lua"` and
 /// `"~/.config/bread/modules"`) would silently ignore `XDG_CONFIG_HOME` even
 /// though the config file that sets them was found via that same variable,
@@ -367,8 +367,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Tests that mutate process env vars must serialize against each other
-    // — cargo runs tests in parallel by default and HOME/XDG_RUNTIME_DIR are
+    // Tests that mutate process env vars must serialize against each other:
+    // cargo runs tests in parallel by default and HOME/XDG_RUNTIME_DIR are
     // process-global. Tests that don't touch env are free to run unguarded.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 

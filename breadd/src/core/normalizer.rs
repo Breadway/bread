@@ -68,7 +68,7 @@ impl EventNormalizer {
                 data: raw.payload.clone(),
             }],
             // `Manual` is never constructed as a `RawEvent::source` in this
-            // codebase — the IPC boundary's unsourced `emit` path builds a
+            // codebase: the IPC boundary's unsourced `emit` path builds a
             // `BreadEvent` directly (see `breadd/src/ipc/mod.rs`), bypassing
             // this normalizer entirely, exactly as `System` did before it.
             // This arm exists only so the match stays exhaustive; if that
@@ -95,7 +95,7 @@ impl EventNormalizer {
             .and_then(Value::as_str)
             .unwrap_or("change");
 
-        // "bind" is the kernel attaching a driver to an interface — not a meaningful
+        // "bind" is the kernel attaching a driver to an interface, not a meaningful
         // device state change for automation purposes.
         if action == "bind" {
             return vec![];
@@ -128,7 +128,7 @@ impl EventNormalizer {
             .unwrap_or_default();
 
         // Drop anonymous child USB interfaces (e.g. 3-5:1.0, 3-5:1.1) that carry
-        // no identity information — they are USB protocol artefacts, not devices.
+        // no identity information; they are USB protocol artefacts, not devices.
         if name == "unknown" && vendor.is_empty() && vendor_id.is_empty() {
             return vec![];
         }
@@ -295,7 +295,7 @@ impl EventNormalizer {
     }
 
     /// Emits a Hyprland event under its namespaced `bread.hyprland.<rest>`
-    /// name — always — plus, when `legacy_hyprland_event_names` is enabled
+    /// name, always, plus, when `legacy_hyprland_event_names` is enabled
     /// (the default during the deprecation window), a second `BreadEvent`
     /// under the pre-namespace flat name (e.g. `bread.workspace.changed`).
     /// This is the single mechanism behind Workstream C: the two names carry
@@ -516,7 +516,7 @@ impl EventNormalizer {
     // Adapter contracts: each of these adapters emits `RawEvent.kind` already
     // namespaced for its family (e.g. filesystem emits "file.changed",
     // "detected", "build_artifact.created"), so normalization here is just a
-    // `bread.<family>.` prefix — except systemd (`unit.*` -> `service.*`) and
+    // `bread.<family>.` prefix, except systemd (`unit.*` -> `service.*`) and
     // podman's health-status rename, which need a small rewrite.
     fn normalize_terminal(&self, raw: &RawEvent) -> Vec<BreadEvent> {
         vec![BreadEvent {
@@ -597,8 +597,8 @@ impl EventNormalizer {
     /// Sibling `bread*` app events. Unlike the other sources, `raw.kind`
     /// already carries the full dotted event name (the IPC boundary builds
     /// it that way before construction), so this is validate-and-wrap, not
-    /// a transform. The namespace check is defense in depth — the IPC layer
-    /// already validates before constructing the `RawEvent` — so a
+    /// a transform. The namespace check is defense in depth: the IPC layer
+    /// already validates before constructing the `RawEvent`, so a
     /// malformed event here is dropped silently rather than treated as an
     /// adapter failure.
     fn normalize_app(&self, raw: &RawEvent) -> Vec<BreadEvent> {
@@ -606,8 +606,8 @@ impl EventNormalizer {
             return vec![];
         };
         // Own-namespace events plus well-formed commands to another known
-        // app (the command bus). Anything else — including spoofed adapter
-        // namespaces — is dropped here even if it somehow crossed IPC.
+        // app (the command bus). Anything else (including spoofed adapter
+        // namespaces) is dropped here even if it somehow crossed IPC.
         if !validate_app_namespace(app, &raw.kind) && !validate_command_event(&raw.kind) {
             return vec![];
         }
@@ -755,7 +755,7 @@ mod tests {
     #[test]
     fn udev_anonymous_child_interface_is_dropped() {
         let n = EventNormalizer::new(100);
-        // No name, no vendor — pure USB protocol artefact.
+        // No name, no vendor: pure USB protocol artefact.
         let ev = raw(
             AdapterSource::Udev,
             "udev",
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn hyprland_unknown_kind_falls_through_to_generic_event() {
         // The `bread.hyprland.event` fallback is already namespaced, so it's
-        // exempt from dual-emit — it never had a legacy flat name to begin
+        // exempt from dual-emit; it never had a legacy flat name to begin
         // with.
         let n = EventNormalizer::new(0);
         let ev = raw(
@@ -1049,7 +1049,7 @@ mod tests {
     }
 
     /// (b) With `legacy_hyprland_event_names = false`, only the namespaced
-    /// `bread.hyprland.*` names fire — the legacy flat names are fully
+    /// `bread.hyprland.*` names fire; the legacy flat names are fully
     /// suppressed, not just relegated to a secondary slot.
     #[test]
     fn hyprland_legacy_names_suppressed_when_compat_disabled() {
@@ -1152,8 +1152,8 @@ mod tests {
     }
 
     /// (c) A module that subscribes only to `bread.hyprland.*` gets full
-    /// coverage of workspace, monitor, and window activity — regardless of
-    /// the `[compat]` setting — since the namespaced name is unconditional.
+    /// coverage of workspace, monitor, and window activity, regardless of
+    /// the `[compat]` setting, since the namespaced name is unconditional.
     /// This is the actual promise Workstream C makes: "portable automation"
     /// only means something if the namespaced form alone is a complete feed.
     #[test]
@@ -1455,7 +1455,7 @@ mod tests {
         );
         // Hyprland's "workspace" kind dual-emits (legacy + namespaced name,
         // see the Hyprland test section below), so each distinct payload
-        // produces 2 events rather than 1 — but the point of this test is
+        // produces 2 events rather than 1, but the point of this test is
         // that neither call is suppressed by dedup, since the payloads
         // differ and thus so does the dedup key.
         assert_eq!(n.normalize(&a).len(), 2);

@@ -1,4 +1,4 @@
--- bluetooth-toggle-widget — a real one-click Bluetooth power toggle in the
+-- bluetooth-toggle-widget: a real one-click Bluetooth power toggle in the
 -- hamburger popover's tray section, showing power state and connected
 -- device count. breadbar's native bar only shows a passive BT icon; this
 -- adds an actual control surface for it.

@@ -1,6 +1,6 @@
 //! The known-apps registry for sibling `bread*` application integration.
 //!
-//! Adding a new sibling app is a one-line edit to [`KNOWN_APPS`] — no new
+//! Adding a new sibling app is a one-line edit to [`KNOWN_APPS`]: no new
 //! `AdapterSource` variant, no new normalizer arm, no recompile-driven
 //! exhaustiveness churn. This is what makes the sibling-app integration
 //! model extensible: see `Documentation.md`'s "Namespaces" section and
@@ -15,12 +15,12 @@ pub const KNOWN_APPS: &[&str] = &[
 ];
 
 /// Daemon-internal domains that are reserved and can never be claimed as an
-/// app id, even if a future `bread*` app would otherwise want that name —
+/// app id, even if a future `bread*` app would otherwise want that name:
 /// these are the top-level segments the normalizer and built-in event
 /// families already use.
 ///
 /// This is also the single source of truth the IPC boundary checks before
-/// allowing a manual (no-`source`) `emit` request to use an event name — a
+/// allowing a manual (no-`source`) `emit` request to use an event name: a
 /// socket client may freely emit a custom/test event, but not one whose
 /// top-level segment is one of these, since that would let it impersonate
 /// a real adapter (or another daemon-internal event family) rather than
@@ -28,11 +28,11 @@ pub const KNOWN_APPS: &[&str] = &[
 /// [`validate_command_event`] name (`bread.command.<known-app>.<verb>`):
 /// `command` stays reserved so it cannot be claimed as an app id, but the
 /// command bus itself is meant to be publishable. See [`is_reserved_domain`]
-/// and `breadd/src/ipc/mod.rs`'s `emit` handler. *Since: v1.5 — `bluetooth`,
+/// and `breadd/src/ipc/mod.rs`'s `emit` handler. *Since: v1.5, `bluetooth`,
 /// `workspace`, `window`, and `monitor` added (event families the Hyprland
 /// and Bluetooth adapters already published under, but that were missing
 /// from this list) when this became a spoofing-prevention boundary and not
-/// just an app-id-conflict one. Since: v1.7 — command-bus exception.
+/// just an app-id-conflict one. Since: v1.7, command-bus exception.
 /// `module`, `state`, `widget`, and `reload` are daemon-synthesized
 /// families and must stay unclaimable.*
 const RESERVED_DOMAINS: &[&str] = &[
@@ -72,24 +72,24 @@ pub fn is_reserved_domain(id: &str) -> bool {
     RESERVED_DOMAINS.contains(&id)
 }
 
-/// Whether `event` is a well-formed event name for `app` — i.e. it starts
+/// Whether `event` is a well-formed event name for `app`: i.e. it starts
 /// with `bread.<app>.`. An app may only publish within its own namespace
 /// segment; this is what the IPC boundary checks before constructing a
 /// `RawEvent` tagged `AdapterSource::App(app)`. Command events addressed
-/// to another known app are a separate, explicit exception — see
+/// to another known app are a separate, explicit exception; see
 /// [`validate_command_event`].
 pub fn validate_app_namespace(app: &str, event: &str) -> bool {
     event.starts_with(&format!("bread.{app}."))
 }
 
 /// Whether `event` is in the outbound command namespace
-/// (`bread.command.*`). Does not check that the target is a known app —
+/// (`bread.command.*`). Does not check that the target is a known app:
 /// use [`validate_command_event`] for that.
 pub fn is_command_event(event: &str) -> bool {
     event.starts_with("bread.command.")
 }
 
-/// The app id a command event is addressed to — the segment immediately
+/// The app id a command event is addressed to: the segment immediately
 /// after `bread.command.`. Returns `None` if `event` is not a command
 /// event or the app-id segment is empty.
 pub fn command_target(event: &str) -> Option<&str> {
@@ -108,7 +108,7 @@ pub fn command_target(event: &str) -> Option<&str> {
 ///
 /// This is the exception the IPC unsourced/`bread-emit` path (and sourced
 /// `AdapterSource::App` emit) use so any module or app can publish
-/// commands without `command` leaving [`is_reserved_domain`] — `command`
+/// commands without `command` leaving [`is_reserved_domain`]: `command`
 /// must stay unclaimable as an app id. `bread.command.power.off` and
 /// `bread.command.notanapp.x` still fail because the target is not in
 /// [`KNOWN_APPS`].
@@ -123,7 +123,7 @@ pub fn validate_command_event(event: &str) -> bool {
     is_known_app(app) && !verb.is_empty()
 }
 
-/// The top-level dotted segment after `bread.` in an event name — e.g.
+/// The top-level dotted segment after `bread.` in an event name: e.g.
 /// `Some("power")` for `"bread.power.ac.connected"`. Returns `None` for
 /// event names that don't start with `bread.` at all, which are always
 /// outside any reserved namespace (freely-named custom/test events, the

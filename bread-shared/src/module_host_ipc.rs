@@ -3,7 +3,7 @@
 //!
 //! Living here (rather than duplicated as private structs in each crate)
 //! means the two processes can't drift on what a `module_host.hello`
-//! response or an async event/timer push looks like on the wire — the same
+//! response or an async event/timer push looks like on the wire: the same
 //! failure mode `ModulePermission`/`PermissionKind` already guard against
 //! for the manifest schema (see `permissions.rs`).
 //!
@@ -22,11 +22,11 @@ use serde::{Deserialize, Serialize};
 use crate::permissions::ModulePermission;
 use crate::BreadEvent;
 
-/// The successful result of a `module_host.hello` call — what `breadd`
+/// The successful result of a `module_host.hello` call: what `breadd`
 /// looked up for the presented one-time token, told back to the
 /// `bread-module-host` process that presented it. Deliberately does not
 /// trust anything the child process asserts about its own identity (see
-/// `breadd/src/module_host.rs`'s token/registry doc comments) — this is
+/// `breadd/src/module_host.rs`'s token/registry doc comments): this is
 /// `breadd` telling the child who *it* has decided the child is, based on
 /// which token was issued for which pending spawn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ pub struct ModuleHostHello {
 /// module-host connection, interleaved with ordinary request/response
 /// lines. Distinguished on the wire by the `"push"` tag (internally-tagged
 /// enum), which never collides with a plain `{"id", "result"/"error"}`
-/// response envelope or an `{"id", "method", "params"}` request envelope —
+/// response envelope or an `{"id", "method", "params"}` request envelope:
 /// neither of those ever carries a `"push"` key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "push")]
@@ -88,7 +88,7 @@ mod tests {
         };
         let value = serde_json::to_value(&push).unwrap();
         assert_eq!(value.get("push").and_then(|v| v.as_str()), Some("event"));
-        // A plain response envelope never has a "push" key — this is the
+        // A plain response envelope never has a "push" key: this is the
         // disambiguator bread-module-host's read loop relies on.
         assert!(value.get("id").is_none());
     }

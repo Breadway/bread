@@ -1,4 +1,4 @@
--- low-battery-warning — notify once when the battery runs low.
+-- low-battery-warning: notify once when the battery runs low.
 --
 -- Drop-in: copy into ~/.config/bread/modules/ (auto-discovered; no init.lua
 -- edit needed). Zero configuration.

@@ -1,4 +1,4 @@
--- dock-workflow — a worked example of bread's workflow engine
+-- dock-workflow: a worked example of bread's workflow engine
 -- (bread.workflow + bread.wait_any), not just a single-event reaction like
 -- the other examples in this directory.
 --
@@ -6,7 +6,7 @@
 -- timeout) for Hyprland to actually report a new monitor, activate a
 -- "docked" profile, wait for the workspace to settle, then notify. Each
 -- step is recorded via bread.workflow.step() so `bread workflows` (or the
--- `workflows.list` IPC method) can show exactly where a run is — useful for
+-- `workflows.list` IPC method) can show exactly where a run is: useful for
 -- diagnosing a dock that isn't behaving, since you can see whether it got
 -- stuck waiting for the monitor or the workspace change.
 --
@@ -25,7 +25,7 @@ bread.workflow.define("dock-connected", function()
         { timeout = 5000 }
     )
     if not event then
-        -- Hyprland never reported the new monitor within 5s — leave a
+        -- Hyprland never reported the new monitor within 5s: leave a
         -- breadcrumb rather than silently continuing as if it worked.
         bread.warn("dock-workflow: timed out waiting for monitor to appear")
         error("monitor did not appear in time")
@@ -44,7 +44,7 @@ end)
 function M.on_load()
     bread.on("bread.device.dock.connected", function()
         -- deadline covers the whole workflow, independent of each step's
-        -- own wait timeout — a safety net in case something hangs
+        -- own wait timeout: a safety net in case something hangs
         -- unexpectedly rather than failing cleanly.
         bread.workflow.start("dock-connected", { deadline = 15000 })
     end)

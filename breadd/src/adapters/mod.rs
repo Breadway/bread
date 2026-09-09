@@ -109,7 +109,7 @@ impl Manager {
         }
 
         // Filesystem/git/systemd all default to "no roots/units configured",
-        // in which case they'd have nothing to do — skip spawning them
+        // in which case they'd have nothing to do: skip spawning them
         // entirely rather than running an adapter that can never emit.
         if self.config.adapters.filesystem.enabled
             && !self.config.adapters.filesystem.roots.is_empty()

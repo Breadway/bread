@@ -33,10 +33,10 @@ mod module_host_bridge;
 /// major version only for a breaking change, which should not happen inside
 /// this daemon's v1 lifetime per that section's stated policy.
 ///
-/// *Since 1.6.0* — Workstream G's `module_host.*` methods (hello handshake
+/// *Since 1.6.0*: Workstream G's `module_host.*` methods (hello handshake
 /// plus the RPC bridge a `bread-module-host` child uses in place of direct
 /// in-process `bread.*` bindings).
-/// *Since 1.7.0* — well-formed `bread.command.<known-app>.<verb>` is an
+/// *Since 1.7.0*: well-formed `bread.command.<known-app>.<verb>` is an
 /// explicit exception to the reserved-domain reject on unsourced emit, and
 /// sourced `AdapterSource::App` emit may publish commands to another known
 /// app. `command` stays in `RESERVED_DOMAINS` so it cannot be claimed as
@@ -200,9 +200,9 @@ impl Server {
             // Workstream G: a `bread-module-host` child's very first message
             // presents its one-time spawn token. From here on this
             // connection is a dedicated, bidirectional module-host bridge
-            // (RPC requests interleaved with async event/timer pushes) —
-            // see `module_host_bridge::handle_module_host_connection` —
-            // rather than a one-shot request/response exchange, so it takes
+            // (RPC requests interleaved with async event/timer pushes; see
+            // `module_host_bridge::handle_module_host_connection`) rather
+            // than a one-shot request/response exchange, so it takes
             // over the rest of this connection's lifetime exactly like
             // `events.subscribe` above does for a plain event stream.
             if req.method == "module_host.hello" {
@@ -311,7 +311,7 @@ impl Server {
                 // sibling bread* app events both go through the same
                 // RawEvent -> normalizer pipeline as in-process adapters,
                 // instead of being tagged System. `source` is restricted to
-                // the fixed hook-fed set plus registered app ids — allowing
+                // the fixed hook-fed set plus registered app ids: allowing
                 // arbitrary sources here would let any socket client spoof
                 // e.g. a power/bluetooth event, or another app's namespace.
                 if let Some(source_str) = req.params.get("source").and_then(Value::as_str) {
@@ -331,7 +331,7 @@ impl Server {
                         return Err((id, "missing kind for sourced emit".to_string()));
                     };
                     // For a sibling-app source, `kind` is the full dotted event
-                    // name (e.g. "bread.clip.copied"), not a bare suffix — it
+                    // name (e.g. "bread.clip.copied"), not a bare suffix: it
                     // must live inside that app's own namespace. Well-formed
                     // `bread.command.<known-app>.<verb>` is the one exception:
                     // an app may publish a command addressed to another known
@@ -364,14 +364,14 @@ impl Server {
                 } else {
                     // Unsourced emit: the manual-testing path ("bread emit
                     // <event>", used to poke Lua handlers without unplugging
-                    // cables). Tagged `Manual`, never `System` — `System` is
+                    // cables). Tagged `Manual`, never `System`: `System` is
                     // reserved for events the daemon originates itself in
                     // Rust code (e.g. `bread.system.startup` in `serve()`
                     // above), not for anything that arrived over the wire.
                     // A socket client can still name any custom/test event
                     // it likes, but not one whose top-level segment is a
                     // reserved, adapter-owned domain (`bread.power.*`,
-                    // `bread.hyprland.*`, ...) — otherwise this path would
+                    // `bread.hyprland.*`, ...): otherwise this path would
                     // let any same-UID process impersonate a real adapter
                     // event with nothing downstream able to tell the
                     // difference. Well-formed `bread.command.<known-app>.<verb>`
@@ -438,7 +438,7 @@ impl Server {
     /// Unsourced-emit logic, factored out of `handle_request`'s `"emit"`
     /// case so `module_host_bridge`'s `module_host.emit` (Workstream G) can
     /// share the exact same reserved-domain guard rather than re-deriving
-    /// it — see the original inline comment (still above the one call site
+    /// it; see the original inline comment (still above the one call site
     /// in `handle_request`) for why the guard exists: a same-UID socket
     /// client (or, now, a module-host child) must not be able to
     /// impersonate a real adapter-owned event namespace.
@@ -446,7 +446,7 @@ impl Server {
         if let Some(domain) = event_domain(event) {
             if is_reserved_domain(domain) && !validate_command_event(event) {
                 return Err(format!(
-                    "event '{event}' claims the reserved '{domain}' domain — manual emit cannot impersonate an adapter-owned event; use a custom event name, a well-formed bread.command.<app>.<verb>, or a sourced emit if this should go through the normalizer"
+                    "event '{event}' claims the reserved '{domain}' domain: manual emit cannot impersonate an adapter-owned event; use a custom event name, a well-formed bread.command.<app>.<verb>, or a sourced emit if this should go through the normalizer"
                 ));
             }
         }

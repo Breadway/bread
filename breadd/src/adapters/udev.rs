@@ -44,7 +44,7 @@ impl Adapter for UdevAdapter {
 }
 
 // udev::MonitorSocket uses a non-blocking socket; calling iter().next() without
-// first polling the fd returns None immediately and exits the loop — which is
+// first polling the fd returns None immediately and exits the loop: which is
 // why the old code silently fell back to sysfs on every start.  We use poll(2)
 // inside spawn_blocking so the thread truly blocks until events are available.
 async fn run_udev_monitor(subsystems: Vec<String>, tx: mpsc::Sender<RawEvent>) -> Result<()> {

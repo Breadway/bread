@@ -20,7 +20,7 @@ impl BluetoothAdapter {
     }
 
     /// Emit `bluetooth.enumerate` events for every device that is currently connected.
-    /// Errors are swallowed — Bluetooth hardware being absent is not a daemon startup failure.
+    /// Errors are swallowed: Bluetooth hardware being absent is not a daemon startup failure.
     pub async fn enumerate_existing(&self, tx: &mpsc::Sender<RawEvent>) {
         match try_enumerate(tx).await {
             Ok(n) => debug!("bluetooth enumerated {n} connected device(s)"),
@@ -131,7 +131,7 @@ fn parse_bluetooth_message(message: &Message) -> Option<RawEvent> {
         .map(|p| p.as_str().to_string())
         .unwrap_or_default();
 
-    // Connected / disconnected — PropertiesChanged on a BlueZ device object
+    // Connected / disconnected: PropertiesChanged on a BlueZ device object
     if interface == "org.freedesktop.DBus.Properties" && member == "PropertiesChanged" {
         if !path.starts_with("/org/bluez/") {
             return None;
@@ -161,7 +161,7 @@ fn parse_bluetooth_message(message: &Message) -> Option<RawEvent> {
         });
     }
 
-    // Device paired / discovered — InterfacesAdded from BlueZ ObjectManager
+    // Device paired / discovered: InterfacesAdded from BlueZ ObjectManager
     if interface == "org.freedesktop.DBus.ObjectManager" && member == "InterfacesAdded" {
         let (obj_path, interfaces): (
             OwnedObjectPath,
@@ -197,7 +197,7 @@ fn parse_bluetooth_message(message: &Message) -> Option<RawEvent> {
         });
     }
 
-    // Device unpaired — InterfacesRemoved from BlueZ ObjectManager
+    // Device unpaired: InterfacesRemoved from BlueZ ObjectManager
     if interface == "org.freedesktop.DBus.ObjectManager" && member == "InterfacesRemoved" {
         let (obj_path, interfaces): (OwnedObjectPath, Vec<String>) = message.body().ok()?;
         let obj_str = obj_path.as_str();

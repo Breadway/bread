@@ -10,7 +10,7 @@ path = "src/main.rs"
 # Deliberately minimal dependency footprint (Workstream G): this binary is
 # itself reviewable attack surface running third-party Lua under an
 # OS-level sandbox constructed by breadd's parent process (see
-# breadd/src/module_host.rs) — it does not depend on landlock itself, since
+# breadd/src/module_host.rs): it does not depend on landlock itself, since
 # the Landlock ruleset is applied by breadd via Command::pre_exec() *before*
 # this binary's own main() ever runs (landlock_restrict_self() applies to
 # the calling process across the subsequent execve()).

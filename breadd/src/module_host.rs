@@ -7,14 +7,14 @@
 //! *documented* `bread.*` surface by controlling which keys exist on the
 //! `bread` table a module's chunk sees. Its own doc comment says plainly
 //! that `os.execute`/`io.open`/`debug.*` remain fully reachable from a
-//! scoped module — Lua's stdlib isn't sandboxed at all, only the `bread`
+//! scoped module: Lua's stdlib isn't sandboxed at all, only the `bread`
 //! table is. A module that never calls `bread.fs`/`bread.exec` and instead
 //! calls `io.open`/`os.execute` directly bypasses the whole mechanism,
 //! because everything still runs as Lua code inside `breadd`'s own OS
 //! process, sharing its real filesystem/exec access at the kernel level.
 //!
 //! This module closes that gap for any module that opted into the
-//! capability-manifest system (`decl.permissions.is_some()` — see
+//! capability-manifest system (`decl.permissions.is_some()`: see
 //! `lua/mod.rs`'s `load_module`): instead of loading its chunk in-process,
 //! `breadd` spawns a separate `bread-module-host` OS process for it,
 //! restricted by a Landlock ruleset built from that module's granted
@@ -23,7 +23,7 @@
 //!
 //! # Why Landlock over bubblewrap/firejail
 //!
-//! - Pure Rust, no external sandboxing binary dependency — this workspace's
+//! - Pure Rust, no external sandboxing binary dependency: this workspace's
 //!   existing style already favors native Rust crates over shelling out
 //!   (see e.g. `udev`, `zbus`, `rtnetlink` instead of wrapping CLI tools).
 //! - Unprivileged: no setuid helper, no CAP_SYS_ADMIN, works from an
@@ -32,12 +32,12 @@
 //!   mechanism was verified against it directly before adoption (see the
 //!   `landlock` entry in the workspace `Cargo.toml` and
 //!   `module_host::tests::landlock_denies_reads_outside_granted_path`
-//!   below) — a `pre_exec`-restricted child process attempting to read a
+//!   below): a `pre_exec`-restricted child process attempting to read a
 //!   file outside its granted rule set gets `EACCES` from the kernel, not a
 //!   Lua-level error.
 //! - `bubblewrap`-wrapping remains a documented fallback if a target
 //!   platform's kernel lacks Landlock support (pre-5.13, or a hardened
-//!   kernel config with it compiled out) — not implemented here since
+//!   kernel config with it compiled out): not implemented here since
 //!   Landlock covers this repo's actual target (a modern desktop Linux
 //!   kernel) and keeps the dependency footprint native-Rust-only.
 //!
@@ -46,7 +46,7 @@
 //! Network access. Landlock gained TCP bind/connect mediation in ABI v4+
 //! (kernel 6.7+), but wiring a `network` permission kind through the
 //! manifest schema, `PermissionKind`, and this sandbox builder is scoped
-//! out of this workstream's P0 — see `Documentation.md`.
+//! out of this workstream's P0; see `Documentation.md`.
 //!
 //! # The token handshake
 //!
@@ -55,12 +55,12 @@
 //! existing `module:<name>` identity concept to hook into. This module adds
 //! the minimal mechanism Workstream G actually needs: `breadd` generates a
 //! random one-time token when spawning a module-host child, hands it to the
-//! child via `$BREAD_MODULE_TOKEN` (an env var, not argv — argv is visible
+//! child via `$BREAD_MODULE_TOKEN` (an env var, not argv: argv is visible
 //! to any process on the system via `/proc/<pid>/cmdline`, env vars are not
 //! without `/proc/<pid>/environ` + matching privileges), and the child's
 //! first message on the IPC socket (`module_host.hello`) presents that
 //! token. `breadd` looks up which module name/manifest/permission set the
-//! token was issued for — see [`ModuleHostRegistry::take_pending`] — rather
+//! token was issued for (see [`ModuleHostRegistry::take_pending`]) rather
 //! than trusting any name the child process might assert about itself.
 
 use std::collections::HashMap;
@@ -139,7 +139,7 @@ impl ModuleHostRegistry {
 
     /// One-time consumption of a pending token, called from the IPC side
     /// when a connection presents it via `module_host.hello`. Returns
-    /// `None` for an unknown/already-consumed/expired token — the caller
+    /// `None` for an unknown/already-consumed/expired token: the caller
     /// must not extend any trust to that connection in that case.
     pub fn take_pending(&self, token: &str) -> Option<PendingModuleHost> {
         self.inner
@@ -172,7 +172,7 @@ impl ModuleHostRegistry {
     /// holding an open IPC connection and reacting to events alongside its
     /// replacement. The old process's own reap thread (started when it was
     /// first spawned) will still notice it exit and emit
-    /// `bread.module.crashed` for it — a known rough edge documented in
+    /// `bread.module.crashed` for it: a known rough edge documented in
     /// `Documentation.md`: an intentional reload-triggered replacement
     /// currently looks identical, on the wire, to an unexpected crash.
     fn terminate_existing(&self, name: &str) {
@@ -207,7 +207,7 @@ impl ModuleHostRegistry {
 }
 
 /// How long `load_module` blocks waiting for a freshly spawned module-host
-/// to either report ready (`module_host.status{state:"loaded"}`) or fail —
+/// to either report ready (`module_host.status{state:"loaded"}`) or fail:
 /// mirrors the synchronous "a module either loaded or it didn't" contract
 /// `load_scoped_lua_file` already has for in-process modules. 25s rather
 /// than something tighter: a real spawn (process fork/exec + Landlock
@@ -220,7 +220,7 @@ impl ModuleHostRegistry {
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Spawn a sandboxed `bread-module-host` child for one third-party module
-/// and block (on a `std::sync::mpsc` channel, not an async await — this is
+/// and block (on a `std::sync::mpsc` channel, not an async await: this is
 /// called from the Lua engine's own dedicated OS thread, which is not
 /// async) until it reports ready or fails to within [`READY_TIMEOUT`].
 ///
@@ -265,7 +265,7 @@ pub fn spawn_module_host(
     let sandbox_socket_path = socket_path.to_path_buf();
     // SAFETY: the closure runs in the forked child between fork() and
     // execve() (that's what pre_exec is for). It only touches its own
-    // captured, already-allocated data plus filesystem/landlock syscalls —
+    // captured, already-allocated data plus filesystem/landlock syscalls:
     // no allocation-unsafe signal-handler tricks, matching the same
     // pattern the `landlock` crate's own sandboxing examples use for
     // restricting a spawned child.
@@ -302,7 +302,7 @@ pub fn spawn_module_host(
 
     // Reap thread: detects the child exiting for ANY reason (clean exit,
     // panic, `kill -9`) without blocking breadd's IPC server or the Lua
-    // engine thread — this is the mechanism behind the "crash isolation"
+    // engine thread: this is the mechanism behind the "crash isolation"
     // acceptance test (P0 item 5): killing this child must not take breadd
     // or any other module down with it, and breadd must notice and report
     // it via `bread.module.crashed`.
@@ -370,7 +370,7 @@ fn describe_exit(
 
 /// Resolve the `bread-module-host` binary's path: prefer the sibling of
 /// `breadd`'s own executable (the layout `cargo build --workspace` and this
-/// repo's packaging both produce — all workspace binaries land in the same
+/// repo's packaging both produce: all workspace binaries land in the same
 /// `target/{debug,release}` or install bindir), falling back to a bare
 /// `PATH` lookup for layouts where `current_exe()` resolution is
 /// unreliable.
@@ -388,7 +388,7 @@ pub fn resolve_module_host_binary() -> PathBuf {
 
 /// Build and apply the Landlock ruleset for a module-host child, from
 /// inside `Command::pre_exec` (i.e. after `fork()`, before `execve()` of
-/// `bread-module-host` itself — so the restriction covers that very
+/// `bread-module-host` itself, so the restriction covers that very
 /// `execve()` too, which is why the baseline rules below exist at all).
 ///
 /// # The baseline (always granted, not manifest-driven)
@@ -399,7 +399,7 @@ pub fn resolve_module_host_binary() -> PathBuf {
 /// `execve()`/`execveat()` only, and that granting plain `ReadFile` on the
 /// library directories would be enough for the dynamic linker's
 /// `mmap(..., PROT_EXEC, ...)` calls on `.so` files. That assumption was
-/// **wrong** — verified empirically (not just reasoned about from the
+/// **wrong**: verified empirically (not just reasoned about from the
 /// kernel docs) by spawning a real sandboxed child: with library
 /// directories restricted to `ReadFile`-only, even `/bin/sh -c "true"`
 /// fails `execve()` with `EACCES` before running a single line of script;
@@ -409,7 +409,7 @@ pub fn resolve_module_host_binary() -> PathBuf {
 /// contrary to what a first reading of "Execute a file" (the kernel doc's
 /// one-line description) suggests. The baseline therefore grants:
 /// - `ReadFile | ReadDir | Execute` on the system library directories and
-///   `ReadFile` on `/etc/ld.so.cache`/`/etc/ld.so.preload` — what the
+///   `ReadFile` on `/etc/ld.so.cache`/`/etc/ld.so.preload`: what the
 ///   dynamic linker actually needs to start this binary at all.
 /// - `ReadFile | Execute` on the `bread-module-host` binary's own resolved
 ///   path specifically (not a whole directory).
@@ -417,15 +417,15 @@ pub fn resolve_module_host_binary() -> PathBuf {
 /// **Known trade-off, not swept under the rug**: this means a module-host
 /// child's direct `os.execute`/`io.open` escape hatch, if it names a path
 /// under `/usr/lib`/`/lib` (etc.) directly, is not denied by Landlock the
-/// way an arbitrary path elsewhere on the filesystem is — the baseline
+/// way an arbitrary path elsewhere on the filesystem is: the baseline
 /// necessarily grants real `Execute` there, not just enough for the linker.
 /// This is a materially smaller exposure than "no sandbox at all" (it's
 /// bounded to files already shipped in the system's own library
 /// directories, not the whole filesystem, and not anything a manifest
 /// didn't otherwise ask for), but it is a real gap worth being honest
-/// about — see `Documentation.md`'s "Workstream G" section. A fully static
-/// build of `bread-module-host` (e.g. targeting `x86_64-unknown-linux-musl`
-/// — confirmed available via `rustup target list --installed` in this
+/// about; see `Documentation.md`'s "Workstream G" section. A fully static
+/// build of `bread-module-host` (e.g. targeting `x86_64-unknown-linux-musl`,
+/// confirmed available via `rustup target list --installed` in this
 /// repo's dev environment) would remove the need for this baseline
 /// entirely, since there'd be no dynamic linker involved at all; that's
 /// flagged as follow-up work rather than attempted here, since it's a
@@ -448,12 +448,12 @@ pub fn resolve_module_host_binary() -> PathBuf {
 ///   `ipc/mod.rs`), but no Landlock rule is added, since Landlock scoping
 ///   needs a concrete path. A module author who wants the direct
 ///   `os`/`io` escape hatch mediated at the kernel level too needs to
-///   declare a `path` — documented as a known sharp edge in
+///   declare a `path`: documented as a known sharp edge in
 ///   `Documentation.md` rather than silently "fixed" by granting
 ///   filesystem-wide access.
 /// - Every other `PermissionKind` (`state.*`, `notify`, `machine`,
 ///   `hyprland`, `widget`, `bluetooth`, `profile.activate`) is RPC-gated
-///   only (see `ipc/mod.rs`) — they have no filesystem shape to hand
+///   only (see `ipc/mod.rs`): they have no filesystem shape to hand
 ///   Landlock in the first place.
 fn apply_sandbox(
     module_host_bin: &Path,
@@ -501,13 +501,13 @@ fn apply_sandbox(
             .map_err(|e| anyhow!("landlock rule for module-host binary: {e}"))?;
     }
     // The module-host bootstrap process needs to read its OWN module's
-    // directory (init.lua, bread.module.toml, an optional lib/ subtree —
+    // directory (init.lua, bread.module.toml, an optional lib/ subtree:
     // the same directory shape load_scoped_lua_file's in-process
     // counterpart reads from) to load any Lua at all, entirely separate
     // from whatever `fs.read` the manifest grants for the module's own
     // runtime file I/O. Without this rule, EVERY out-of-process module
-    // fails to load — including ones with no `fs.read` permission at
-    // all — since it can't even read its own entry file.
+    // fails to load, including ones with no `fs.read` permission at
+    // all, since it can't even read its own entry file.
     if let Some(module_dir) = entry_path.parent() {
         if let Ok(fd) = PathFd::new(module_dir) {
             ruleset = ruleset
@@ -519,7 +519,7 @@ fn apply_sandbox(
     }
     // The module-host must connect back to breadd over this Unix socket
     // (BREAD_MODULE_SOCKET). Path-based AF_UNIX connect is mediated by
-    // Landlock as filesystem access — without a rule for the socket path
+    // Landlock as filesystem access: without a rule for the socket path
     // (and walk access on its parent), UnixStream::connect fails with
     // EACCES, the hello handshake never completes, and every
     // out-of-process module times out with "did not report ready".
@@ -597,11 +597,11 @@ fn apply_sandbox(
     if !matches!(status.ruleset, RulesetStatus::FullyEnforced) {
         // Not fatal: PartiallyEnforced still means real kernel enforcement
         // for whatever subset the running kernel/LSM stack supports (see
-        // this module's doc comment — verified directly against this
+        // this module's doc comment: verified directly against this
         // repo's dev kernel, which reports PartiallyEnforced yet still
         // denies out-of-scope reads). NotEnforced (pre-5.13 kernel, or
         // Landlock compiled out) would mean this module is running fully
-        // unsandboxed — loud enough to want in the log, not loud enough to
+        // unsandboxed: loud enough to want in the log, not loud enough to
         // refuse to start the module entirely and regress availability.
         eprintln!(
             "bread-module-host: landlock ruleset status = {:?} (not fully enforced on this kernel)",
@@ -637,7 +637,7 @@ mod tests {
     /// task's P0 item 4 and `Documentation.md`'s "Workstream G" section):
     /// a real spawned child, restricted only by `apply_sandbox` for a
     /// module granted `fs.read` on exactly one directory, must be denied
-    /// by the *kernel* — not a Lua-level check — when it tries to read a
+    /// by the *kernel*, not a Lua-level check, when it tries to read a
     /// file outside that directory. This talks to `apply_sandbox` and
     /// `Command::pre_exec` exactly the way `spawn_module_host` does; the
     /// full end-to-end version (going through the real IPC handshake and
@@ -656,7 +656,7 @@ mod tests {
         // Mirrors the task's own acceptance scenario verbatim:
         // `os.execute("cat /etc/shadow")` from inside a module granted
         // `fs.read` for exactly one other directory. `cat` does a plain
-        // `open()`+`read()` — no shell builtin involved — which is both
+        // `open()`+`read()`, no shell builtin involved, which is both
         // the most faithful stand-in for the direct `os`/`io` escape hatch
         // and (empirically, see the note on `no_exec_permission_...` below)
         // avoids a bash `read`-builtin quirk that turned out to need more
@@ -710,10 +710,10 @@ mod tests {
         );
         assert!(
             !stdout.contains("DENIED_UNEXPECTEDLY_OK"),
-            "sandboxed process read a file OUTSIDE its granted fs.read path — Landlock did not enforce; stdout={stdout} stderr={stderr}"
+            "sandboxed process read a file OUTSIDE its granted fs.read path: Landlock did not enforce; stdout={stdout} stderr={stderr}"
         );
         // The kernel denial surfaces as `cat`'s own "Permission denied"
-        // (EACCES from open()), on stderr — confirming this was an OS-level
+        // (EACCES from open()), on stderr: confirming this was an OS-level
         // denial, not e.g. the file simply not existing.
         assert!(
             stderr.to_lowercase().contains("permission denied"),
@@ -775,6 +775,6 @@ mod tests {
                 return p;
             }
         }
-        panic!("no /bin/sh or /usr/bin/sh found — cannot run sandbox tests");
+        panic!("no /bin/sh or /usr/bin/sh found: cannot run sandbox tests");
     }
 }

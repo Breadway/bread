@@ -8,12 +8,12 @@
 //! and reacts to messages from a channel (`HostMessage` here, `LuaMessage`
 //! there); a separate thread/task owns the actual async I/O. Only ONE
 //! module is ever loaded per `bread-module-host` process, so there's no
-//! module registry, load ordering, or `after` dependency resolution here —
+//! module registry, load ordering, or `after` dependency resolution here:
 //! `breadd` already resolved all of that before deciding this module needed
 //! its own process.
 //!
 //! `bread.module()`'s `store` is process-local (an in-memory table, not
-//! synced back to `breadd`) — a documented gap vs. the in-process
+//! synced back to `breadd`): a documented gap vs. the in-process
 //! implementation's `bread.module().store`, which persists in
 //! `RuntimeState` and is visible to `bread modules info`/other modules.
 //! Fine for a single module's own private scratch state; not fine yet for
@@ -34,7 +34,7 @@ use tracing::error;
 use crate::io::{call, IoCommand};
 
 /// Timeout for a single RPC round trip to `breadd`. Generous relative to a
-/// same-host Unix socket hop — this exists to fail loudly if the connection
+/// same-host Unix socket hop: this exists to fail loudly if the connection
 /// wedges rather than to accommodate genuinely slow calls.
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -47,7 +47,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// Deliberately duplicated rather than shared: extracting this into
 /// `bread-shared` (so `breadd` and `bread-module-host` load the same
 /// constant instead of two hand-kept-in-sync copies) is flagged as
-/// follow-up work in `Documentation.md` — doing it here would also require
+/// follow-up work in `Documentation.md`: doing it here would also require
 /// making `breadd`'s currently-private `const BUILTIN_*`/wait-helper
 /// strings public, which is a larger refactor than this workstream's time
 /// budget covers.
@@ -118,7 +118,7 @@ fn json_to_lua<'lua>(lua: &'lua Lua, value: &JsonValue) -> mlua::Result<LuaValue
 
 /// The Lua VM plus the bookkeeping needed to route `ModuleHostPush`
 /// messages to the right registered callback. Lives entirely on one thread
-/// (`mlua::Lua` is `!Send`) — see `main.rs`.
+/// (`mlua::Lua` is `!Send`); see `main.rs`.
 pub struct ModuleHostLua {
     lua: Lua,
     /// subscription_id or timer_id -> the Lua callback registered for it.
@@ -345,9 +345,9 @@ impl ModuleHostLua {
     }
 
     /// `bread.state.get(path)`, gated on `state.read`. Only the `get`
-    /// shorthand is bridged here — `.monitors()`/`.active_workspace()`/etc.
+    /// shorthand is bridged here: `.monitors()`/`.active_workspace()`/etc.
     /// convenience wrappers and `state.watch` (a standing subscription, a
-    /// materially different capability — see `PermissionKind::StateWatch`'s
+    /// materially different capability; see `PermissionKind::StateWatch`'s
     /// doc comment in `bread-shared`) are deferred; see `Documentation.md`'s
     /// Workstream G section for the full list of what's bridged vs. not.
     fn install_state(
@@ -456,7 +456,7 @@ impl ModuleHostLua {
     }
 
     /// Load and execute the module's `init.lua`, then verify it actually
-    /// called `bread.module(...)` — mirrors `breadd`'s own
+    /// called `bread.module(...)`: mirrors `breadd`'s own
     /// `load_module`/`load_scoped_lua_file` contract exactly (see
     /// `breadd/src/lua/mod.rs`).
     pub fn load_entry(&self, entry_path: &std::path::Path) -> Result<()> {

@@ -1,4 +1,4 @@
--- dock-monitors — apply a monitor layout when an external display is plugged
+-- dock-monitors: apply a monitor layout when an external display is plugged
 -- in (a "dock") and revert to the laptop panel when it's removed.
 --
 -- Drop-in: copy into ~/.config/bread/modules/ and edit the output names /

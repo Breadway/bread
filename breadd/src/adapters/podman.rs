@@ -74,7 +74,7 @@ impl Adapter for PodmanAdapter {
                 Ok(Some(line)) => line,
                 Ok(None) => {
                     // EOF: the child's stdout closed, meaning the process exited.
-                    // Never surface this as Ok(()) — the supervisor treats a clean
+                    // Never surface this as Ok(()): the supervisor treats a clean
                     // `run()` return as "stop forever," but a dead `podman events`
                     // process is exactly the kind of thing we want retried.
                     let _ = child.kill().await;
@@ -180,7 +180,7 @@ fn map_podman_event(value: &Value) -> Option<(String, Value)> {
             }),
         )),
         "stop" | "remove" => {
-            // Intentionally ignored — see de-dup note on map_podman_event above.
+            // Intentionally ignored; see de-dup note on map_podman_event above.
             None
         }
         "health_status" => {

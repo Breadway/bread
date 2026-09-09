@@ -1,17 +1,17 @@
--- cpu-temp-widget — live CPU package temperature, read straight from the
+-- cpu-temp-widget: live CPU package temperature, read straight from the
 -- k10temp hwmon sysfs node via bread.fs.read.
 --
 -- Demonstrates: WidgetPlacement "left_of_stats", a bread.every-polled
 -- widget reading real hardware state (the same category of readout
--- breadbar's native CPU%/RAM stats already do in Rust — this shows it's
+-- breadbar's native CPU%/RAM stats already do in Rust: this shows it's
 -- just as easy from a drop-in Lua module), and the typed `style` vocabulary
 -- (color + weight) swapping based on a threshold so the widget visually
--- flags when something's hot — no CSS, no guessing which class names the
+-- flags when something's hot: no CSS, no guessing which class names the
 -- rendering app happens to define.
 --
 -- Drop-in: copy the whole cpu-temp-widget/ directory into
 -- ~/.config/bread/modules/ (or `bread modules install path/to/this/dir`).
--- TEMP_PATH is specific to this machine (AMD, k10temp) — find yours with:
+-- TEMP_PATH is specific to this machine (AMD, k10temp); find yours with:
 --   grep -l k10temp /sys/class/hwmon/hwmon*/name
 -- and adjust below; a missing/unreadable path just shows "—" rather than
 -- erroring, since bread.fs.read returns nil (not an error) for that case.
@@ -19,8 +19,8 @@
 -- This is also the worked example for the capability-manifest permission
 -- system (Documentation.md's "Capability-scoped modules" section): see the
 -- sibling bread.module.toml. It declares exactly the two permissions this
--- module actually uses — `fs.read` (bread.fs.read, read-only) and `widget`
--- (bread.widget.register/update) — nothing else. If you install it that
+-- module actually uses: `fs.read` (bread.fs.read, read-only) and `widget`
+-- (bread.widget.register/update): nothing else. If you install it that
 -- way, bread.exec/bread.bluetooth/bread.hyprland/etc. are all genuinely
 -- absent (nil) from this module's `bread` table, not just unused.
 

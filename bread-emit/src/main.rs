@@ -1,7 +1,7 @@
 //! Minimal fire-and-forget emitter for breadd's IPC socket.
 //!
 //! This exists because shell precmd/preexec hooks (and git hooks) fire on
-//! every command / commit — spawning the full `bread` CLI (clap parsing +
+//! every command / commit: spawning the full `bread` CLI (clap parsing +
 //! a Tokio runtime + a round trip) on that path is perceptible latency in
 //! an interactive shell. This binary skips all of that: no async runtime,
 //! argv is parsed by hand, and it never waits for or reads a reply. A
