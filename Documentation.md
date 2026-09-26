@@ -838,7 +838,7 @@ bread.widget.register({
 | `radius` | string | `none`, `sm`, `md`, `full` (pill) |
 | `padding` | string | `none`, `xs`, `sm`, `md` |
 
-Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when pywal's palette changes instead of drifting out of sync.
+Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when bread-theme's palette changes instead of drifting out of sync.
 
 ```lua
 { type = "label", text = "LOW BATTERY", style = { color = "yellow", weight = "bold" } }
