@@ -828,7 +828,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // on the emit bus"). The name here is incidental: this test only cares
     // that events flow through the pipeline before and after a reload storm.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.before", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.before", "data": {}}),
+        )
         .await?;
 
     // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
@@ -849,7 +852,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // The pipeline must have resumed: an event emitted *after* the reloads
     // still flows through normalization into the replay buffer.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.after", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.after", "data": {}}),
+        )
         .await?;
     sleep(Duration::from_millis(100)).await;
 

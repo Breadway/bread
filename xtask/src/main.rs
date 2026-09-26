@@ -61,14 +61,20 @@ fn run_check_docs() -> Result<bool> {
         .context("reading breadd/src/ipc/mod.rs")?;
     let cli_src = std::fs::read_to_string(root.join("bread-cli/src/main.rs"))
         .context("reading bread-cli/src/main.rs")?;
-    let schema_toml = std::fs::read_to_string(root.join("api-schema.toml"))
-        .context("reading api-schema.toml")?;
-    let doc_md =
-        std::fs::read_to_string(root.join("Documentation.md")).context("reading Documentation.md")?;
-    let readme_md =
-        std::fs::read_to_string(root.join("README.md")).context("reading README.md")?;
+    let schema_toml =
+        std::fs::read_to_string(root.join("api-schema.toml")).context("reading api-schema.toml")?;
+    let doc_md = std::fs::read_to_string(root.join("Documentation.md"))
+        .context("reading Documentation.md")?;
+    let readme_md = std::fs::read_to_string(root.join("README.md")).context("reading README.md")?;
 
-    let report = check(&lua_src, &ipc_src, &cli_src, &schema_toml, &doc_md, &readme_md)?;
+    let report = check(
+        &lua_src,
+        &ipc_src,
+        &cli_src,
+        &schema_toml,
+        &doc_md,
+        &readme_md,
+    )?;
     report.print();
     Ok(report.is_clean())
 }
@@ -166,7 +172,12 @@ fn extract_lua_bindings(src: &str) -> BTreeSet<(String, String)> {
         }
         let is_table = TABLE_VARS.iter().any(|(_, parent)| *parent == name);
         out.insert((
-            (if is_table { "lua_table" } else { "lua_function" }).to_string(),
+            (if is_table {
+                "lua_table"
+            } else {
+                "lua_function"
+            })
+            .to_string(),
             name.to_string(),
         ));
     }
@@ -201,7 +212,10 @@ fn extract_lua_bindings(src: &str) -> BTreeSet<(String, String)> {
         if name.is_empty() || name == "workflow" {
             continue;
         }
-        if src[name_start + name.len()..].trim_start().starts_with("= function") {
+        if src[name_start + name.len()..]
+            .trim_start()
+            .starts_with("= function")
+        {
             out.insert(("lua_function".to_string(), name.to_string()));
         }
     }
@@ -216,7 +230,10 @@ fn extract_lua_bindings(src: &str) -> BTreeSet<(String, String)> {
         if name.is_empty() {
             continue;
         }
-        if src[name_start + name.len()..].trim_start().starts_with("= function") {
+        if src[name_start + name.len()..]
+            .trim_start()
+            .starts_with("= function")
+        {
             out.insert(("lua_function".to_string(), format!("workflow.{name}")));
         }
     }
@@ -286,7 +303,8 @@ fn extract_ipc_methods(src: &str) -> BTreeSet<String> {
 /// `hooks.install-shell`) instead of the group variant itself being a leaf.
 /// Update this list if `bread-cli/src/main.rs` gains another subcommand
 /// group (the same kind of manual-update-needed list as `TABLE_VARS` above).
-const SUBCOMMAND_GROUPS: &[(&str, &str)] = &[("Modules", "ModulesCommand"), ("Hooks", "HooksCommand")];
+const SUBCOMMAND_GROUPS: &[(&str, &str)] =
+    &[("Modules", "ModulesCommand"), ("Hooks", "HooksCommand")];
 
 /// clap's default rename for a derived `Subcommand` variant: PascalCase ->
 /// kebab-case (`ProfileList` -> `profile-list`, `InstallShell` ->
@@ -427,7 +445,9 @@ impl CheckReport {
         }
 
         if !self.bad_kind.is_empty() {
-            println!("Schema entries with an unrecognized `kind` (expected one of {VALID_KINDS:?}):");
+            println!(
+                "Schema entries with an unrecognized `kind` (expected one of {VALID_KINDS:?}):"
+            );
             for (kind, name) in &self.bad_kind {
                 println!("  - {name} (kind = \"{kind}\")");
             }
@@ -435,7 +455,9 @@ impl CheckReport {
         }
 
         if !self.missing_from_schema.is_empty() {
-            println!("Added but undocumented in api-schema.toml (present in code, missing from schema):");
+            println!(
+                "Added but undocumented in api-schema.toml (present in code, missing from schema):"
+            );
             for (kind, name) in &self.missing_from_schema {
                 println!("  - [{kind}] {name}");
             }
@@ -493,7 +515,9 @@ fn check(
     let mut schema_set: BTreeSet<(String, String)> = BTreeSet::new();
     for entry in &schema.entry {
         if !VALID_KINDS.contains(&entry.kind.as_str()) {
-            report.bad_kind.push((entry.kind.clone(), entry.name.clone()));
+            report
+                .bad_kind
+                .push((entry.kind.clone(), entry.name.clone()));
             continue;
         }
         if entry.since.trim().is_empty() {

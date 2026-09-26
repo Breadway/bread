@@ -89,7 +89,11 @@ pub struct RuleIssue {
 impl std::fmt::Display for RuleIssue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.on {
-            Some(on) => write!(f, "rule #{} (on = \"{}\"): {}", self.index, on, self.message),
+            Some(on) => write!(
+                f,
+                "rule #{} (on = \"{}\"): {}",
+                self.index, on, self.message
+            ),
             None => write!(f, "rule #{}: {}", self.index, self.message),
         }
     }

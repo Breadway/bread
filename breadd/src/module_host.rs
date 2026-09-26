@@ -73,8 +73,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent, ModulePermission, PermissionKind};
 use landlock::{
-    make_bitflags, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus, ABI,
+    make_bitflags, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, ABI,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
@@ -277,11 +277,11 @@ pub fn spawn_module_host(
                 &sandbox_socket_path,
                 &sandbox_permissions,
             )
-                .map_err(|e| {
-                    std::io::Error::other(format!(
-                        "landlock sandbox setup failed for module '{sandbox_module_name}': {e}"
-                    ))
-                })
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "landlock sandbox setup failed for module '{sandbox_module_name}': {e}"
+                ))
+            })
         });
     }
 
@@ -513,7 +513,10 @@ fn apply_sandbox(
             ruleset = ruleset
                 .add_rule(PathBeneath::new(fd, read_only))
                 .map_err(|e| {
-                    anyhow!("landlock rule for module directory {}: {e}", module_dir.display())
+                    anyhow!(
+                        "landlock rule for module directory {}: {e}",
+                        module_dir.display()
+                    )
                 })?;
         }
     }
@@ -539,12 +542,7 @@ fn apply_sandbox(
         if let Ok(fd) = PathFd::new(socket_path) {
             ruleset = ruleset
                 .add_rule(PathBeneath::new(fd, read_file_only))
-                .map_err(|e| {
-                    anyhow!(
-                        "landlock rule for socket {}: {e}",
-                        socket_path.display()
-                    )
-                })?;
+                .map_err(|e| anyhow!("landlock rule for socket {}: {e}", socket_path.display()))?;
         }
     }
 
@@ -554,11 +552,12 @@ fn apply_sandbox(
                 if let Some(path) = &perm.path {
                     let expanded = bread_shared::expand_path(path);
                     if let Ok(fd) = PathFd::new(&expanded) {
-                        ruleset = ruleset
-                            .add_rule(PathBeneath::new(fd, read_only))
-                            .map_err(|e| {
-                                anyhow!("landlock fs.read rule for {}: {e}", expanded.display())
-                            })?;
+                        ruleset =
+                            ruleset
+                                .add_rule(PathBeneath::new(fd, read_only))
+                                .map_err(|e| {
+                                    anyhow!("landlock fs.read rule for {}: {e}", expanded.display())
+                                })?;
                     }
                 }
             }
@@ -696,7 +695,7 @@ mod tests {
                     Path::new("/nonexistent/dummy/breadd.sock"),
                     &permissions,
                 )
-                    .map_err(|e| std::io::Error::other(e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
             });
         }
 
@@ -733,7 +732,7 @@ mod tests {
             &script_path,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
-            .unwrap();
+        .unwrap();
 
         // No permissions granted at all: the sandboxed process should not
         // be able to execute ANYTHING, including a script sitting right
@@ -756,7 +755,7 @@ mod tests {
                     Path::new("/nonexistent/dummy/breadd.sock"),
                     &permissions,
                 )
-                    .map_err(|e| std::io::Error::other(e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
             });
         }
 
