@@ -371,15 +371,32 @@ fn describe_exit(
 /// Resolve the `bread-module-host` binary's path: prefer the sibling of
 /// `breadd`'s own executable (the layout `cargo build --workspace` and this
 /// repo's packaging both produce: all workspace binaries land in the same
-/// `target/{debug,release}` or install bindir), falling back to a bare
-/// `PATH` lookup for layouts where `current_exe()` resolution is
-/// unreliable.
+/// `target/{debug,release}` or install bindir). Test and bench binaries are
+/// built one level deeper, into `target/{debug,release}/deps/`, so when
+/// `current_exe()` resolves there (running under `cargo test`), also check
+/// that directory's parent, where the real workspace binaries actually
+/// live; production `breadd` never runs from a `deps/` directory, so this
+/// adds a fallback without changing where a real install resolves. Falls
+/// back to a bare `PATH` lookup for layouts where neither resolves.
 pub fn resolve_module_host_binary() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("bread-module-host");
-            if candidate.exists() {
-                return candidate;
+    resolve_module_host_binary_from(std::env::current_exe().ok().as_deref())
+}
+
+/// The testable half of [`resolve_module_host_binary`]: everything past
+/// getting the current executable's path, which `std::env::current_exe()`
+/// makes otherwise unmockable.
+fn resolve_module_host_binary_from(exe: Option<&Path>) -> PathBuf {
+    if let Some(dir) = exe.and_then(Path::parent) {
+        let candidate = dir.join("bread-module-host");
+        if candidate.exists() {
+            return candidate;
+        }
+        if dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
+            if let Some(parent) = dir.parent() {
+                let candidate = parent.join("bread-module-host");
+                if candidate.exists() {
+                    return candidate;
+                }
             }
         }
     }
@@ -631,6 +648,86 @@ fn resolve_bin_path(bin: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// `cargo test` builds test binaries one level deeper than the real
+    /// workspace binaries (`target/debug/deps/<test>-<hash>` vs
+    /// `target/debug/breadd`), so a naive sibling-of-`current_exe()` lookup
+    /// never finds `bread-module-host` when running under a test harness,
+    /// even though `cargo test --workspace` (this repo's documented
+    /// verification command) builds it right alongside `breadd`. This is
+    /// exactly what broke `breadd/tests/ipc_integration.rs`.
+    #[test]
+    fn resolves_next_to_deps_dir_when_running_under_a_test_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "bread-module-host-resolve-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let debug_dir = root.join("target/debug");
+        let deps_dir = debug_dir.join("deps");
+        std::fs::create_dir_all(&deps_dir).unwrap();
+        std::fs::write(debug_dir.join("bread-module-host"), b"").unwrap();
+        let fake_test_binary = deps_dir.join("ipc_integration-abc123");
+        std::fs::write(&fake_test_binary, b"").unwrap();
+
+        let resolved = resolve_module_host_binary_from(Some(&fake_test_binary));
+        assert_eq!(resolved, debug_dir.join("bread-module-host"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The normal (non-test) case is unaffected: a real `breadd` binary
+    /// resolves the sibling in its own directory without ever touching the
+    /// `deps/` fallback.
+    #[test]
+    fn resolves_next_to_the_binary_itself_outside_deps() {
+        let root = std::env::temp_dir().join(format!(
+            "bread-module-host-resolve-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                + 1
+        ));
+        let debug_dir = root.join("target/debug");
+        std::fs::create_dir_all(&debug_dir).unwrap();
+        std::fs::write(debug_dir.join("bread-module-host"), b"").unwrap();
+        let fake_breadd_binary = debug_dir.join("breadd");
+        std::fs::write(&fake_breadd_binary, b"").unwrap();
+
+        let resolved = resolve_module_host_binary_from(Some(&fake_breadd_binary));
+        assert_eq!(resolved, debug_dir.join("bread-module-host"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Neither the binary itself nor a `deps/`-parent fallback exists:
+    /// falls back to a bare `PATH` lookup name, same as before this fix.
+    #[test]
+    fn falls_back_to_bare_name_when_nothing_resolves() {
+        let root = std::env::temp_dir().join(format!(
+            "bread-module-host-resolve-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                + 2
+        ));
+        let deps_dir = root.join("target/debug/deps");
+        std::fs::create_dir_all(&deps_dir).unwrap();
+        let fake_test_binary = deps_dir.join("some_test-def456");
+        std::fs::write(&fake_test_binary, b"").unwrap();
+
+        let resolved = resolve_module_host_binary_from(Some(&fake_test_binary));
+        assert_eq!(resolved, PathBuf::from("bread-module-host"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The single most important test in this whole workstream (see the
     /// task's P0 item 4 and `Documentation.md`'s "Workstream G" section):
