@@ -175,7 +175,9 @@ enabled = false
             }
             sleep(Duration::from_millis(100)).await;
         }
-        Err(anyhow!("module '{name}' did not reach Loaded within timeout"))
+        Err(anyhow!(
+            "module '{name}' did not reach Loaded within timeout"
+        ))
     }
 
     async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
@@ -409,9 +411,18 @@ return M
         .get("data")
         .ok_or_else(|| anyhow!("event missing data"))?;
 
-    let allowed_result = data.get("allowed_result").and_then(Value::as_str).unwrap_or("");
-    let denied_result = data.get("denied_result").and_then(Value::as_str).unwrap_or("");
-    let exec_result = data.get("exec_result").and_then(Value::as_str).unwrap_or("");
+    let allowed_result = data
+        .get("allowed_result")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let denied_result = data
+        .get("denied_result")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let exec_result = data
+        .get("exec_result")
+        .and_then(Value::as_str)
+        .unwrap_or("");
 
     assert!(
         allowed_result.starts_with("ALLOWED_READ_OK"),
@@ -487,8 +498,13 @@ return M
     let _ack = crash_reader.next_line().await?;
 
     let victim_pid = harness.find_module_host_pid("victim")?;
-    let kill_status = Command::new("kill").args(["-9", &victim_pid.to_string()]).status()?;
-    assert!(kill_status.success(), "failed to send SIGKILL to victim module-host");
+    let kill_status = Command::new("kill")
+        .args(["-9", &victim_pid.to_string()])
+        .status()?;
+    assert!(
+        kill_status.success(),
+        "failed to send SIGKILL to victim module-host"
+    );
 
     // breadd itself must keep responding.
     let ping = harness.send_request("ping", json!({})).await?;

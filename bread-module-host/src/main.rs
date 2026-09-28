@@ -110,7 +110,11 @@ fn main() {
         "bread-module-host: identity established by breadd"
     );
 
-    let engine = match ModuleHostLua::new(cmd_tx.clone(), hello.module.clone(), hello.permissions.clone()) {
+    let engine = match ModuleHostLua::new(
+        cmd_tx.clone(),
+        hello.module.clone(),
+        hello.permissions.clone(),
+    ) {
         Ok(e) => e,
         Err(e) => {
             error!(error = %e, "bread-module-host: failed to build lua environment");

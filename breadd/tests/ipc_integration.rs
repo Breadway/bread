@@ -828,7 +828,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // on the emit bus"). The name here is incidental: this test only cares
     // that events flow through the pipeline before and after a reload storm.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.before", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.before", "data": {}}),
+        )
         .await?;
 
     // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
@@ -849,7 +852,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // The pipeline must have resumed: an event emitted *after* the reloads
     // still flows through normalization into the replay buffer.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.after", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.after", "data": {}}),
+        )
         .await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -1544,6 +1550,39 @@ async fn poll_workflow_status(
     ))
 }
 
+/// Every test that spawns a real breadd with a third-party module needs
+/// `bread-module-host`'s actual binary on disk (breadd spawns it as a
+/// subprocess; see `module_host::resolve_module_host_binary`). It cannot be
+/// forced via `env!("CARGO_BIN_EXE_bread-module-host")` the way `breadd`'s
+/// own binary is below: `bread-module-host` deliberately has no `[lib]`
+/// target (see its Cargo.toml), so it cannot be added as a
+/// `[dev-dependencies]` path dependency, which is what that macro requires;
+/// Cargo's artifact-dependency feature that would otherwise cover a bin-only
+/// crate is still nightly-only (`-Z bindeps`). `cargo test --workspace`
+/// compiles `bread-module-host`'s own unit-test harness (proving the crate
+/// builds) but does not, on its own, produce `target/{debug,release}/
+/// bread-module-host` the way it does for `breadd` (forced by the
+/// `CARGO_BIN_EXE_breadd` reference below): a bin-only crate with nothing
+/// referencing its `CARGO_BIN_EXE_*` var has no reason for cargo to link its
+/// final executable. So build it here, once per test binary process,
+/// exactly as if the caller had run `cargo build -p bread-module-host`
+/// first (this repo's CI runs `cargo test --workspace`, not `cargo build
+/// --workspace` first, so relying on build order was never actually safe).
+fn ensure_module_host_built() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let status = Command::new(cargo)
+            .args(["build", "-p", "bread-module-host", "--locked"])
+            .status()
+            .expect("failed to run `cargo build -p bread-module-host`");
+        assert!(
+            status.success(),
+            "cargo build -p bread-module-host failed with {status}"
+        );
+    });
+}
+
 struct TestHarness {
     _temp: TempDir,
     child: Child,
@@ -1636,6 +1675,7 @@ enabled = false
         manifest_toml: Option<&str>,
         module_init_lua: &str,
     ) -> Result<Self> {
+        ensure_module_host_built();
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");

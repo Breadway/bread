@@ -1,6 +1,6 @@
-mod init;
 mod hooks_git;
 mod hooks_shell;
+mod init;
 mod modules_mgmt;
 
 use anyhow::Result;

@@ -655,7 +655,10 @@ impl LuaEngine {
 
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
-                        let result = std::process::Command::new("sh").arg("-c").arg(&cmd).output();
+                        let result = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&cmd)
+                            .output();
                         let _ = tx.send(result);
                     });
 
@@ -858,8 +861,7 @@ impl LuaEngine {
                 .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("active_window", active_window_fn)?;
 
@@ -868,8 +870,7 @@ impl LuaEngine {
                 hyprland_request("j/monitors").map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("monitors", monitors_fn)?;
 
@@ -878,8 +879,7 @@ impl LuaEngine {
                 hyprland_request("j/workspaces").map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("workspaces", workspaces_fn)?;
 
@@ -888,8 +888,7 @@ impl LuaEngine {
                 hyprland_request("j/clients").map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("clients", clients_fn)?;
 
@@ -1013,7 +1012,9 @@ impl LuaEngine {
                     .map_err(|_| LuaError::external("module context lock poisoned"))?
                     .clone()
                     .ok_or_else(|| {
-                        LuaError::external("bread.widget.register must be called from within a module")
+                        LuaError::external(
+                            "bread.widget.register must be called from within a module",
+                        )
                     })?;
                 let args: WidgetRegisterArgs = match lua.from_value(Value::Table(spec_table)) {
                     Ok(a) => a,
@@ -1039,13 +1040,17 @@ impl LuaEngine {
         let current_module = self.current_module.clone();
         let emit_tx = self.emit_tx.clone();
         let widget_update_fn = self.lua.create_function(
-            move |lua, (local_id, patch): (String, Table)| -> mlua::Result<(bool, Option<String>)> {
+            move |lua,
+                  (local_id, patch): (String, Table)|
+                  -> mlua::Result<(bool, Option<String>)> {
                 let module = current_module
                     .lock()
                     .map_err(|_| LuaError::external("module context lock poisoned"))?
                     .clone()
                     .ok_or_else(|| {
-                        LuaError::external("bread.widget.update must be called from within a module")
+                        LuaError::external(
+                            "bread.widget.update must be called from within a module",
+                        )
                     })?;
                 let args: WidgetUpdateArgs = match lua.from_value(Value::Table(patch)) {
                     Ok(a) => a,
@@ -1103,8 +1108,7 @@ impl LuaEngine {
                     LuaError::external("bread.widget.list must be called from within a module")
                 })?;
             let json = widget_list_json(&state_arc, &module);
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         widget_tbl.set("list", widget_list_fn)?;
 
@@ -1657,7 +1661,10 @@ impl LuaEngine {
         }
 
         let src = fs::read_to_string(path)?;
-        let chunk = self.lua.load(&src).set_name(path.to_string_lossy().as_ref());
+        let chunk = self
+            .lua
+            .load(&src)
+            .set_name(path.to_string_lossy().as_ref());
 
         match permissions {
             None => {
@@ -1742,7 +1749,8 @@ impl LuaEngine {
             }
         }
 
-        if granted.contains(&PermissionKind::StateRead) || granted.contains(&PermissionKind::StateWatch)
+        if granted.contains(&PermissionKind::StateRead)
+            || granted.contains(&PermissionKind::StateWatch)
         {
             let real_state: Table = real_bread.get("state")?;
             let scoped_state = self.lua.create_table()?;
@@ -2081,10 +2089,7 @@ impl LuaEngine {
         self.module_decls
             .lock()
             .ok()
-            .and_then(|map| {
-                map.get(name)
-                    .map(|d| !d.builtin && d.permissions.is_none())
-            })
+            .and_then(|map| map.get(name).map(|d| !d.builtin && d.permissions.is_none()))
             .unwrap_or(false)
     }
 
@@ -2413,7 +2418,9 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let status_fn = self.lua.create_function(move |lua, name: String| {
             match workflow_status_json(&state_arc, &name) {
-                Some(json) => json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string())),
+                Some(json) => {
+                    json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
+                }
                 None => Ok(Value::Nil),
             }
         })?;
@@ -2422,8 +2429,7 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let list_fn = self.lua.create_function(move |lua, ()| {
             let json = workflow_list_json(&state_arc);
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         bread.set("__workflow_list", list_fn)?;
 
@@ -2830,7 +2836,11 @@ fn widget_list_json(state_arc: &Arc<RwLock<RuntimeState>>, module: &str) -> Json
         std::hint::spin_loop();
         std::thread::yield_now();
     };
-    let mine: Vec<&WidgetSpec> = guard.widgets.iter().filter(|w| w.module == module).collect();
+    let mine: Vec<&WidgetSpec> = guard
+        .widgets
+        .iter()
+        .filter(|w| w.module == module)
+        .collect();
     serde_json::to_value(&mine).unwrap_or_else(|_| JsonValue::Array(vec![]))
 }
 
