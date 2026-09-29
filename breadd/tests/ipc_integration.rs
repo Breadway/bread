@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1550,39 +1552,6 @@ async fn poll_workflow_status(
     ))
 }
 
-/// Every test that spawns a real breadd with a third-party module needs
-/// `bread-module-host`'s actual binary on disk (breadd spawns it as a
-/// subprocess; see `module_host::resolve_module_host_binary`). It cannot be
-/// forced via `env!("CARGO_BIN_EXE_bread-module-host")` the way `breadd`'s
-/// own binary is below: `bread-module-host` deliberately has no `[lib]`
-/// target (see its Cargo.toml), so it cannot be added as a
-/// `[dev-dependencies]` path dependency, which is what that macro requires;
-/// Cargo's artifact-dependency feature that would otherwise cover a bin-only
-/// crate is still nightly-only (`-Z bindeps`). `cargo test --workspace`
-/// compiles `bread-module-host`'s own unit-test harness (proving the crate
-/// builds) but does not, on its own, produce `target/{debug,release}/
-/// bread-module-host` the way it does for `breadd` (forced by the
-/// `CARGO_BIN_EXE_breadd` reference below): a bin-only crate with nothing
-/// referencing its `CARGO_BIN_EXE_*` var has no reason for cargo to link its
-/// final executable. So build it here, once per test binary process,
-/// exactly as if the caller had run `cargo build -p bread-module-host`
-/// first (this repo's CI runs `cargo test --workspace`, not `cargo build
-/// --workspace` first, so relying on build order was never actually safe).
-fn ensure_module_host_built() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let status = Command::new(cargo)
-            .args(["build", "-p", "bread-module-host", "--locked"])
-            .status()
-            .expect("failed to run `cargo build -p bread-module-host`");
-        assert!(
-            status.success(),
-            "cargo build -p bread-module-host failed with {status}"
-        );
-    });
-}
-
 struct TestHarness {
     _temp: TempDir,
     child: Child,
@@ -1675,7 +1644,7 @@ enabled = false
         manifest_toml: Option<&str>,
         module_init_lua: &str,
     ) -> Result<Self> {
-        ensure_module_host_built();
+        let module_host_bin = common::ensure_module_host_built();
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -1732,6 +1701,7 @@ enabled = false
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env("XDG_CONFIG_HOME", &config_home)
             .env("HOME", &home)
+            .env(common::BREAD_MODULE_HOST_BIN_ENV, &module_host_bin)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

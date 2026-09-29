@@ -20,5 +20,13 @@ jobs:
       - name: clippy
         run: cd src && bash ci/build.sh cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: build --workspace
+        # Belt-and-braces alongside breadd/tests/common's own explicit
+        # `cargo build -p bread-module-host` before spawning it: this makes
+        # sure every workspace binary, bread-module-host included, is
+        # already built before any test runs, so a test's own build-and-wait
+        # is never the first time this CI container has compiled it.
+        run: cd src && bash ci/build.sh cargo build --workspace --locked
+
       - name: test
         run: cd src && bash ci/build.sh cargo test --workspace --locked
