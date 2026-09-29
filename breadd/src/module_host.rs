@@ -368,9 +368,24 @@ fn describe_exit(
     }
 }
 
-/// Resolve the `bread-module-host` binary's path: prefer the sibling of
-/// `breadd`'s own executable (the layout `cargo build --workspace` and this
-/// repo's packaging both produce: all workspace binaries land in the same
+/// The env var an explicit override is read from, checked before any of
+/// [`resolve_module_host_binary`]'s normal resolution. `breadd`'s own
+/// integration tests (`breadd/tests/common/mod.rs`'s
+/// `ensure_module_host_built`) set this to the exact path `cargo build
+/// -p bread-module-host --message-format=json` just produced, so a test run
+/// always spawns the binary it just built and verified, never one guessed
+/// from `current_exe()`'s location and never a bare `PATH` lookup that could
+/// silently pick up an unrelated, separately **installed**
+/// `~/.local/bin/bread-module-host`. Must match the literal string
+/// `ensure_module_host_built` uses; there's no shared symbol for it since
+/// `breadd` is a binary-only crate with no `[lib]` target integration tests
+/// can import from.
+pub const MODULE_HOST_BIN_ENV: &str = "BREAD_MODULE_HOST_BIN";
+
+/// Resolve the `bread-module-host` binary's path: first, an explicit
+/// [`MODULE_HOST_BIN_ENV`] override, then the sibling of `breadd`'s own
+/// executable (the layout `cargo build --workspace` and this repo's
+/// packaging both produce: all workspace binaries land in the same
 /// `target/{debug,release}` or install bindir). Test and bench binaries are
 /// built one level deeper, into `target/{debug,release}/deps/`, so when
 /// `current_exe()` resolves there (running under `cargo test`), also check
@@ -379,6 +394,9 @@ fn describe_exit(
 /// adds a fallback without changing where a real install resolves. Falls
 /// back to a bare `PATH` lookup for layouts where neither resolves.
 pub fn resolve_module_host_binary() -> PathBuf {
+    if let Ok(path) = std::env::var(MODULE_HOST_BIN_ENV) {
+        return PathBuf::from(path);
+    }
     resolve_module_host_binary_from(std::env::current_exe().ok().as_deref())
 }
 
@@ -727,6 +745,33 @@ mod tests {
         assert_eq!(resolved, PathBuf::from("bread-module-host"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Guards [`MODULE_HOST_BIN_ENV`] mutation: it's a process-global env
+    /// var, and `cargo test` runs this file's tests concurrently within one
+    /// process, so two tests setting/clearing it at once would race.
+    static MODULE_HOST_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The override [`breadd/tests/common/mod.rs`'s `ensure_module_host_built`]
+    /// relies on: when set, it must win outright, without even trying the
+    /// normal `current_exe()`-relative resolution first (this is what lets a
+    /// test always spawn the exact binary it just built, never a guess or a
+    /// bare `PATH` lookup that could hit a stale installed copy).
+    #[test]
+    fn resolve_module_host_binary_prefers_the_explicit_override() {
+        let _lock = MODULE_HOST_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(MODULE_HOST_BIN_ENV).ok();
+
+        std::env::set_var(MODULE_HOST_BIN_ENV, "/does/not/exist/bread-module-host");
+        let resolved = resolve_module_host_binary();
+        match previous {
+            Some(v) => std::env::set_var(MODULE_HOST_BIN_ENV, v),
+            None => std::env::remove_var(MODULE_HOST_BIN_ENV),
+        }
+
+        assert_eq!(resolved, PathBuf::from("/does/not/exist/bread-module-host"));
     }
 
     /// The single most important test in this whole workstream (see the
