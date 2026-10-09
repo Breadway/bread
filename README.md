@@ -259,6 +259,9 @@ breadbug list                     # installed bread apps, recent problems first
 breadbug --app clip --dry-run     # print the exact report
 breadbug --app clip --save r.json # save it to a file; nothing is sent
 breadbug config upload on         # allow sending (off by default)
+breadbug history [--refresh]      # what you sent or saved, with receipts and status
+breadbug delete <receipt>         # delete a sent report from the server
+breadbug queue [flush|cancel|clear] # reports waiting for the network
 ```
 
 ## Module system

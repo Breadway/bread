@@ -43,6 +43,26 @@ Configuration lives in `~/.config/bread/breadbug.toml` (`upload_enabled`,
 limits). Excluded apps store nothing
 and appear in no report.
 
+## Sending
+
+Sending needs `upload_enabled = true` in `breadbug.toml` (or `breadbug config
+upload on`); with it off, nothing in breadbug touches the network, including
+the queue, `history --refresh` and `delete`.
+
+* The endpoint must be https (plain http only for loopback) and redirects are
+  never followed.
+* The previewed bytes are sent unchanged with `X-Breadbug-Sha256`; the client
+  re-verifies the hash right before sending, and the server checks it too.
+* `X-Breadbug-Install` is a random 128-bit id kept in
+  `~/.local/state/bread/breadbug/install.json`, replaced every 30 days. There
+  is no account and no stable device identifier.
+* If the server is unreachable (network error, 429, 5xx) the exact bytes go to
+  an offline queue (at most 20) and are retried with exponential backoff up to
+  6 hours via `breadbug queue flush`. A report the server rejects is dropped.
+* A successful send returns a receipt and a deletion token, kept in
+  `history.jsonl` (0600). `breadbug delete <receipt>` removes it from the
+  server. An identical resend returns the original receipt.
+
 ## Freeze detection
 
 Apps send `bug.heartbeat` from their main loop. If heartbeats stop while the
