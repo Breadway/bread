@@ -64,6 +64,10 @@ const COMMON_NAMES: &[&str] = &[
     "var",
     "etc",
     "run",
+    "bos",
+    "archlinux",
+    "arch",
+    "linux",
 ];
 
 /// Local identity values the scrubber must remove from free text.

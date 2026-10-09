@@ -219,3 +219,28 @@ fn picker_orders_problem_apps_first_and_limits_to_installed() {
         .collect();
     assert!(fallback.contains(&"search".to_string()));
 }
+
+#[test]
+fn machine_facts_are_not_eaten_by_identity_literals() {
+    // On a default install the hostname equals the OS id; the OS id must
+    // survive while a hostname in the free-text sections is still redacted.
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(dir.path(), &BugConfig::default(), ScrubContext::default()).unwrap();
+    s.append_log("clip", "info", "running on mybox-7 now", 1)
+        .unwrap();
+    let mut o = opts(dir.path());
+    o.scrub = ScrubContext {
+        hostname: Some("mybox-7".into()),
+        ..ScrubContext::default()
+    };
+    let p = build(&o).unwrap();
+    assert!(
+        p.report.logs[0].msg.contains("<HOST>"),
+        "{:?}",
+        p.report.logs
+    );
+    let mut report = p.report.clone();
+    report.system.os_id = Some("mybox-7".into());
+    super::scrub_report(&mut report, &o.scrub).unwrap();
+    assert_eq!(report.system.os_id.as_deref(), Some("mybox-7"));
+}

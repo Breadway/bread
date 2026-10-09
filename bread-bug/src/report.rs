@@ -348,11 +348,26 @@ pub fn build(opts: &BuildOptions) -> Result<Prepared> {
     Prepared::from_report(report)
 }
 
-/// Run the whole report through a fresh scrubber. Build-ids are exempt from
+/// Sections that hold only machine facts and app ids. They still get the
+/// pattern rules (an IP in a version string would be caught) but not the
+/// identity literals: on a default install the hostname equals the OS id,
+/// and redacting `os_id` as a hostname would destroy useful data.
+const FACT_SECTIONS: &[&str] = &[
+    "app",
+    "system",
+    "installed_apps",
+    "runtime",
+    "schema",
+    "report_type",
+    "created_unix",
+];
+
+/// Run the whole report through fresh scrubbers. Build-ids are exempt from
 /// the long-hex rules because the server needs them for symbolication.
 fn scrub_report(report: &mut Report, ctx: &ScrubContext) -> Result<()> {
-    let mut scrubber = Scrubber::new(ctx.clone());
-    let ids = report
+    let mut full = Scrubber::new(ctx.clone());
+    let mut facts = Scrubber::new(ScrubContext::default());
+    let ids: Vec<String> = report
         .markers
         .iter()
         .flat_map(|m| {
@@ -361,18 +376,32 @@ fn scrub_report(report: &mut Report, ctx: &ScrubContext) -> Result<()> {
                 .chain(m.frames.iter().filter_map(|f| f.build_id.as_ref()))
         })
         .chain(report.app.build_id.iter())
-        .chain(report.live_stack.iter().filter_map(|f| f.build_id.as_ref()));
-    for id in ids {
-        scrubber.keep_build_id(id);
-    }
-    let value = serde_json::to_value(&*report)?;
-    let scrubbed = scrubber.scrub_value(&value);
-    *report = serde_json::from_value(scrubbed).context("scrubbed report no longer parses")?;
-    report.redactions = scrubber
-        .stats()
-        .iter()
-        .map(|(k, v)| ((*k).to_string(), *v))
+        .chain(report.live_stack.iter().filter_map(|f| f.build_id.as_ref()))
+        .cloned()
         .collect();
+    for id in &ids {
+        full.keep_build_id(id);
+        facts.keep_build_id(id);
+    }
+    let Value::Object(sections) = serde_json::to_value(&*report)? else {
+        bail!("report did not serialize to an object");
+    };
+    let mut out = serde_json::Map::new();
+    for (key, section) in sections {
+        let scrubber = if FACT_SECTIONS.contains(&key.as_str()) {
+            &mut facts
+        } else {
+            &mut full
+        };
+        out.insert(key, scrubber.scrub_value(&section));
+    }
+    *report =
+        serde_json::from_value(Value::Object(out)).context("scrubbed report no longer parses")?;
+    let mut redactions: BTreeMap<String, usize> = BTreeMap::new();
+    for (k, v) in full.stats().iter().chain(facts.stats().iter()) {
+        *redactions.entry((*k).to_string()).or_default() += *v;
+    }
+    report.redactions = redactions;
     Ok(())
 }
 

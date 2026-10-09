@@ -261,3 +261,13 @@ fn overflow_marker_after_cap() {
     let m = s.numbered("IP", "99.99.99.99");
     assert_eq!(m, "<IP:+>");
 }
+
+#[test]
+fn default_distro_names_are_not_treated_as_identity() {
+    let mut s = Scrubber::new(ScrubContext {
+        hostname: Some("bos".into()),
+        username: Some("arch".into()),
+        ..Default::default()
+    });
+    assert_eq!(s.scrub_text("bos-settings on arch"), "bos-settings on arch");
+}
