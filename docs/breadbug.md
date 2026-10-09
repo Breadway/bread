@@ -39,8 +39,24 @@ Feeders: apps push logs and markers over the `bug.log`, `bug.logs` and
 (names plus allowlisted fields) and its own tracing output.
 
 Configuration lives in `~/.config/bread/breadbug.toml` (`upload_enabled`,
-`excluded_apps`, `endpoint`, `[store]` limits). Excluded apps store nothing
+`excluded_apps`, `endpoint`, `watchdog_enabled`, `freeze_after_ms`, `[store]`
+limits). Excluded apps store nothing
 and appear in no report.
+
+## Freeze detection
+
+Apps send `bug.heartbeat` from their main loop. If heartbeats stop while the
+process is still alive for longer than `freeze_after_ms` (default 15 s) and
+four of the app's own intervals, breadd records a `freeze` marker and
+publishes `bread.bug.freeze`; a later heartbeat records `recovered`. Detection
+is paused for ten seconds after power or monitor events and after a stalled
+daemon tick, so suspend/resume and display hotplug do not look like freezes.
+An exited process is forgotten, not reported. Nothing is ever killed.
+
+For a frozen app that is still running, `breadbug` can include a stack trace
+(function names and offsets only) if the user agrees (`--live-stack` or the
+prompt). The pid comes from the freeze marker and is re-checked to be a live
+`bread*` process before anything attaches.
 
 ## Scrubbing
 

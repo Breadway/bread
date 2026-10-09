@@ -1686,6 +1686,103 @@ async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Result<()> {
+    let harness = TestHarness::spawn_with_config_file(
+        "breadbug.toml",
+        "freeze_after_ms = 1000\n",
+    )?;
+    harness.wait_until_ready().await?;
+
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe = json!({
+        "id": "sub-freeze",
+        "method": "events.subscribe",
+        "params": { "filter": "bread.bug.*" }
+    });
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+    let mut reader = BufReader::new(read_half).lines();
+    reader
+        .next_line()
+        .await?
+        .ok_or_else(|| anyhow!("missing subscribe ack"))?;
+
+    // This test process is alive, so silence means "frozen".
+    let beat = json!({ "app": "clip", "pid": std::process::id(), "interval_ms": 250 });
+    harness.send_request("bug.heartbeat", beat.clone()).await?;
+
+    let line = timeout(Duration::from_secs(10), reader.next_line())
+        .await??
+        .ok_or_else(|| anyhow!("no freeze event"))?;
+    let evt: Value = serde_json::from_str(&line)?;
+    assert_eq!(evt["event"], json!("bread.bug.freeze"));
+    assert_eq!(evt["data"]["app"], json!("clip"));
+
+    let marker = bread_bug::store::Reader::open(harness.bugstore_root())
+        .last_marker("clip")
+        .ok_or_else(|| anyhow!("freeze marker not stored"))?;
+    assert_eq!(marker.pid, Some(std::process::id()));
+
+    harness.send_request("bug.heartbeat", beat).await?;
+    let line = timeout(Duration::from_secs(5), reader.next_line())
+        .await??
+        .ok_or_else(|| anyhow!("no recovered event"))?;
+    let evt: Value = serde_json::from_str(&line)?;
+    assert_eq!(evt["event"], json!("bread.bug.recovered"));
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
+    let harness = TestHarness::spawn_with_config_file(
+        "breadbug.toml",
+        "freeze_after_ms = 1000\n",
+    )?;
+    harness.wait_until_ready().await?;
+
+    // A process that has already exited and been reaped.
+    let mut child = Command::new("true").spawn()?;
+    let dead_pid = child.id();
+    child.wait()?;
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({ "app": "clip", "pid": dead_pid, "interval_ms": 250 }),
+        )
+        .await?;
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({ "app": "pad", "pid": std::process::id(), "interval_ms": 250 }),
+        )
+        .await?;
+    harness
+        .send_request("bug.heartbeat", json!({ "app": "pad", "stopping": true }))
+        .await?;
+
+    sleep(Duration::from_secs(4)).await;
+    let reader = bread_bug::store::Reader::open(harness.bugstore_root());
+    assert!(reader.last_marker("clip").is_none());
+    assert!(reader.last_marker("pad").is_none());
+
+    assert!(harness
+        .send_request("bug.heartbeat", json!({ "app": "clip" }))
+        .await
+        .is_err());
+    assert!(harness
+        .send_request("bug.heartbeat", json!({ "app": "nope", "pid": 1 }))
+        .await
+        .is_err());
+
+    harness.shutdown();
+    Ok(())
+}
+
 struct TestHarness {
     _temp: TempDir,
     child: Child,
@@ -1706,6 +1803,24 @@ impl TestHarness {
     /// daemon, and exposes the synthetic `$HOME` so tests can point a
     /// `run = "..."` rule at a script file they've written under it.
     fn spawn_with_init_and_rules(init_lua: &str, rules_toml: Option<&str>) -> Result<Self> {
+        Self::spawn_inner(init_lua, rules_toml, None)
+    }
+
+    /// Like `spawn`, but also writes one extra file into the synthetic
+    /// `~/.config/bread` (e.g. `breadbug.toml`) before the daemon starts.
+    fn spawn_with_config_file(name: &str, content: &str) -> Result<Self> {
+        Self::spawn_inner(
+            "bread.on('bread.system.startup', function() end)\n",
+            None,
+            Some((name, content)),
+        )
+    }
+
+    fn spawn_inner(
+        init_lua: &str,
+        rules_toml: Option<&str>,
+        extra_config: Option<(&str, &str)>,
+    ) -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -1721,6 +1836,9 @@ impl TestHarness {
 
         if let Some(rules_toml) = rules_toml {
             fs::write(bread_cfg.join("rules.toml"), rules_toml)?;
+        }
+        if let Some((name, content)) = extra_config {
+            fs::write(bread_cfg.join(name), content)?;
         }
 
         fs::write(

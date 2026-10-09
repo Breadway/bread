@@ -32,6 +32,13 @@ fn env(dir: &std::path::Path) -> Env {
             },
         ])),
         include_journal: false,
+        live_capture: |_| {
+            Some(vec![Frame {
+                symbol: Some("__poll".into()),
+                ..Frame::default()
+            }])
+        },
+        pid_ok: |pid| pid == 4242,
     }
 }
 
@@ -187,4 +194,43 @@ fn missing_app_without_tty_is_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let e = env(dir.path());
     assert!(go(&[], &e, "", false).0.is_err());
+}
+
+fn freeze_env(dir: &std::path::Path, pid: u32) -> Env {
+    let e = env(dir);
+    let store = Store::open(&e.store_root, &BugConfig::default(), e.scrub.clone()).unwrap();
+    let mut m = Marker::new(MarkerKind::Freeze, 30);
+    m.pid = Some(pid);
+    store.record_marker("pad", m).unwrap();
+    e
+}
+
+#[test]
+fn live_stack_is_included_only_with_consent() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = freeze_env(dir.path(), 4242);
+    // --live-stack is explicit consent
+    let (r, out) = go(&["--app", "pad", "--type", "freeze", "--live-stack", "--dry-run"], &e, "", false);
+    r.unwrap();
+    assert!(out.contains("__poll"), "{out}");
+    // no flag, non-interactive: no capture
+    let (_, out) = go(&["--app", "pad", "--type", "freeze", "--dry-run"], &e, "", false);
+    assert!(!out.contains("__poll"));
+    // interactive: asked, and "n" means no
+    let (_, out) = go(&[], &e, "1\n\n\nn\nc\n", true);
+    assert!(out.contains("Capture one now"), "{out}");
+    assert!(out.contains("live stack frames      0"), "{out}");
+    // interactive yes
+    let (_, out) = go(&[], &e, "1\n\n\ny\nc\n", true);
+    assert!(out.contains("live stack frames      1"), "{out}");
+}
+
+#[test]
+fn live_stack_skips_dead_or_reused_pids() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = freeze_env(dir.path(), 9999);
+    let (r, out) = go(&["--app", "pad", "--type", "freeze", "--live-stack", "--dry-run"], &e, "", false);
+    r.unwrap();
+    assert!(out.contains("No running frozen pad process"), "{out}");
+    assert!(!out.contains("__poll"));
 }

@@ -1735,6 +1735,7 @@ Available methods:
 | `bug.log` | `app`, `msg`, optional `level`, `t` | Append one log line to breadbug's on-disk store, scrubbed on ingest. `app` must be a registered app id or `breadd`. Excluded apps store nothing and reply `{ stored: false }`. *(Since: v1.8)* |
 | `bug.logs` | `app`, `lines` (`[{msg, level?, t?}]`, at most 1000) | Batch form of `bug.log`. *(Since: v1.8)* |
 | `bug.marker` | `app`, `marker` (`kind` = `panic`/`crash`/`freeze`/`recovered`, optional `t`, `app_version`, `build_id`, `message`, `location`, `signal`, `frames`) | Record a crash or freeze marker (frames carry module, offset and build-id only, never memory). On success the daemon publishes `bread.bug.<kind>`. *(Since: v1.8)* |
+| `bug.heartbeat` | `app`, `pid`, optional `interval_ms`, `stopping` | Liveness signal from an app's main loop for freeze detection. If heartbeats stop while the process is alive (for longer than `freeze_after_ms`, default 15s, and four of the app's own intervals), breadd records a `freeze` marker and publishes `bread.bug.freeze`; a heartbeat afterwards publishes `bread.bug.recovered`. `stopping: true` announces a clean exit. Detection pauses for ten seconds after power or monitor events and after a stalled daemon tick (suspend/resume). *(Since: v1.8)* |
 | `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
 | `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
 

@@ -10,7 +10,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 use bread_bug::config::{self, BugConfig};
 use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
-use bread_bug::store::{MarkerKind, Reader};
+use bread_bug::livestack;
+use bread_bug::store::{Frame, MarkerKind, Reader};
 use bread_bug::system::{installed_apps, InstalledApp};
 use bread_scrub::ScrubContext;
 use clap::{Parser, Subcommand};
@@ -46,6 +47,11 @@ pub struct Cli {
     /// Send the previewed report (needs upload to be enabled in settings).
     #[arg(long)]
     pub send: bool,
+
+    /// For a frozen app that is still running, include a stack trace of it
+    /// (frames only, taken now with your consent).
+    #[arg(long)]
+    pub live_stack: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -84,6 +90,10 @@ pub struct Env {
     /// `None` reads bakery's real state.
     pub installed: Option<Option<Vec<InstalledApp>>>,
     pub include_journal: bool,
+    /// Captures the frames of a live process (injectable for tests).
+    pub live_capture: fn(u32) -> Option<Vec<Frame>>,
+    /// Whether a pid is still a running bread process.
+    pub pid_ok: fn(u32) -> bool,
 }
 
 impl Env {
@@ -95,6 +105,8 @@ impl Env {
             scrub: ScrubContext::from_environment(),
             installed: None,
             include_journal: true,
+            live_capture: livestack::capture,
+            pid_ok: livestack::is_bread_process,
         }
     }
 
@@ -154,6 +166,9 @@ pub fn run(
     opts.scrub = env.scrub.clone();
     opts.include_journal = env.include_journal;
     opts.notes = notes;
+    if report_type == ReportType::Freeze {
+        opts.live_stack = maybe_live_stack(cli, env, &app, input, out, interactive)?;
+    }
     let prepared = report::build(&opts).context("build report")?;
 
     if cli.dry_run {
@@ -186,6 +201,54 @@ pub fn run(
         return Ok(());
     }
     review_loop(&prepared, env, input, out)
+}
+
+/// Offer (or, with `--live-stack`, just do) a stack capture of a frozen
+/// process. Only for the pid recorded in the app's freeze marker, and only
+/// while that process is still a running bread process.
+fn maybe_live_stack(
+    cli: &Cli,
+    env: &Env,
+    app: &str,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+    interactive: bool,
+) -> Result<Vec<Frame>> {
+    let pid = Reader::open(&env.store_root)
+        .snapshot(app, 0, 0)
+        .ok()
+        .and_then(|s| s.markers.into_iter().rev().find(|m| m.kind != MarkerKind::Recovered))
+        .filter(|m| m.kind == MarkerKind::Freeze)
+        .and_then(|m| m.pid)
+        .filter(|p| (env.pid_ok)(*p));
+    let Some(pid) = pid else {
+        if cli.live_stack {
+            writeln!(out, "No running frozen {app} process found; skipping the live stack.")?;
+        }
+        return Ok(Vec::new());
+    };
+    let consent = if cli.live_stack {
+        true
+    } else if interactive && cli.app.is_none() {
+        writeln!(
+            out,
+            "\n{app} (pid {pid}) looks frozen and is still running. A stack trace shows where it is stuck.\nIt contains function names and offsets only, no memory."
+        )?;
+        prompt(input, out, "Capture one now and include it? [y/N]: ")?
+            .is_some_and(|a| matches!(a.to_lowercase().as_str(), "y" | "yes"))
+    } else {
+        false
+    };
+    if !consent {
+        return Ok(Vec::new());
+    }
+    match (env.live_capture)(pid) {
+        Some(frames) => Ok(frames),
+        None => {
+            writeln!(out, "Could not capture a stack (is elfutils' eu-stack installed?). Continuing without it.")?;
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn entries(env: &Env) -> Vec<AppEntry> {

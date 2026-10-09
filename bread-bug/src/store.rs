@@ -104,6 +104,10 @@ pub struct Marker {
     pub location: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
+    /// Process id at the time, so a frozen process can still be inspected
+    /// (with the user's consent) while it is alive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames: Vec<Frame>,
 }
@@ -118,6 +122,7 @@ impl Marker {
             message: None,
             location: None,
             signal: None,
+            pid: None,
             frames: Vec::new(),
         }
     }
