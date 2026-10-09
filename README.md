@@ -247,6 +247,20 @@ bread init --undo                     # Remove the previously installed integrat
 
 ---
 
+## Bug reports (breadbug)
+
+`breadbug` reviews and optionally sends a crash, freeze or bug report for a
+bread app. It is opt-in: nothing is sent unless you choose to, and you see
+exactly what would be sent first. See [docs/breadbug.md](docs/breadbug.md).
+
+```bash
+breadbug                          # pick an app, review the report, save or send
+breadbug list                     # installed bread apps, recent problems first
+breadbug --app clip --dry-run     # print the exact report
+breadbug --app clip --save r.json # save it to a file; nothing is sent
+breadbug config upload on         # allow sending (off by default)
+```
+
 ## Module system
 
 Modules are Lua files (or directories) installed to `~/.config/bread/modules/`. Each module must declare itself with `bread.module()` and have a `bread.module.toml` manifest.
