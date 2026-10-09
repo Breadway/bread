@@ -1,0 +1,25 @@
+[package]
+name = "breadbug-gui"
+version = "0.9.0"
+edition = "2021"
+description = "GTK4 front end for breadbug: pick an app, review exactly what a report contains, save or send it"
+
+[lib]
+name = "breadbug_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "breadbug-gui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+bread-bug = { path = "../bread-bug" }
+breadbug = { path = "../breadbug" }
+bread-theme = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.8.0", features = ["gtk"] }
+gtk4 = { version = "0.11", features = ["v4_12"] }
+
+# Deliberately its own workspace: GTK4 dev libraries are only needed to build
+# this crate, and the main bread workspace (and its CI image) should not
+# require them. Build it from this directory.
+[workspace]

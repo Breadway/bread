@@ -14,11 +14,11 @@ use bread_bug::livestack;
 use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
 use bread_bug::store::{Frame, MarkerKind, Reader};
 use bread_bug::system::{installed_apps, InstalledApp};
-use bread_bug::upload::{
-    install_id, state_dir, Client, History, HistoryEntry, HistoryKind, Queue, SendError,
-};
+use bread_bug::upload::{install_id, state_dir, Client, History, HistoryKind, Queue};
 use bread_scrub::ScrubContext;
 use clap::{Parser, Subcommand};
+
+pub mod session;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -323,12 +323,12 @@ fn consent_gate(env: &Env, input: &mut dyn BufRead, out: &mut dyn Write) -> Resu
     Ok(true)
 }
 
-fn entries(env: &Env) -> Vec<AppEntry> {
+pub(crate) fn entries(env: &Env) -> Vec<AppEntry> {
     let reader = Reader::open(&env.store_root);
     report::app_entries(&reader, env.installed_apps().as_deref())
 }
 
-fn default_type_for(e: &AppEntry) -> ReportType {
+pub(crate) fn default_type_for(e: &AppEntry) -> ReportType {
     match e.last_problem {
         Some((MarkerKind::Freeze, _)) => ReportType::Freeze,
         Some(_) => ReportType::Crash,
@@ -523,22 +523,7 @@ fn now() -> u64 {
 }
 
 fn save(p: &Prepared, path: &std::path::Path, env: &Env, out: &mut dyn Write) -> Result<()> {
-    p.save(path)?;
-    // Remembering that a file was saved is a convenience; never fail on it.
-    if let Ok(h) = History::open(&env.state_dir) {
-        let _ = h.append(&HistoryEntry {
-            t: now(),
-            kind: HistoryKind::Saved,
-            app: p.report.app.id.clone(),
-            sha256: p.sha256.clone(),
-            receipt: None,
-            deletion_token: None,
-            path: Some(path.display().to_string()),
-            status: None,
-            fixed_in: None,
-            told_fixed: false,
-        });
-    }
+    session::save(env, p, path)?;
     writeln!(
         out,
         "Saved to {} (sha256 {}). Nothing was sent.",
@@ -562,58 +547,32 @@ fn client_if_enabled(env: &Env, out: &mut dyn Write) -> Result<Option<Client>> {
 }
 
 fn send(p: &Prepared, env: &Env, out: &mut dyn Write) -> Result<()> {
-    let Some(client) = client_if_enabled(env, out)? else {
-        return Ok(());
-    };
-    if !p.verify() {
-        bail!("report bytes no longer match their hash; refusing to send");
-    }
-    let t = now();
-    let install = install_id(&env.state_dir, t)?;
-    let history = History::open(&env.state_dir)?;
-    match client.send(p, &install) {
-        Ok(acc) => {
-            history.append(&HistoryEntry {
-                t,
-                kind: HistoryKind::Sent,
-                app: p.report.app.id.clone(),
-                sha256: p.sha256.clone(),
-                receipt: Some(acc.receipt.clone()),
-                deletion_token: acc.deletion_token.clone(),
-                path: None,
-                status: Some("received".into()),
-                fixed_in: None,
-                told_fixed: false,
-            })?;
-            writeln!(out, "\nSent. Thank you. Your receipt: {}", acc.receipt)?;
-            if acc.deletion_token.is_some() {
+    match session::send(env, p)? {
+        session::SendOutcome::Disabled => writeln!(
+            out,
+            "Sending is turned off. Enable it in bos-settings (Bug reports) or run\n  breadbug config upload on\nYou can still save the report to a file."
+        )?,
+        session::SendOutcome::Sent { receipt, deletable } => {
+            writeln!(out, "\nSent. Thank you. Your receipt: {receipt}")?;
+            if deletable {
                 writeln!(
                     out,
-                    "To delete it from the server later: breadbug delete {}",
-                    acc.receipt
+                    "To delete it from the server later: breadbug delete {receipt}"
                 )?;
             }
         }
-        Err(SendError::Retriable(why)) => {
-            let queue = Queue::open(&env.state_dir)?;
-            if queue.enqueue(p, t)? {
-                writeln!(
-                    out,
-                    "\nCould not reach the server ({why}). The report is queued and will be retried; see `breadbug queue`."
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "\nCould not reach the server ({why}) and the queue is full. Save the report to a file instead."
-                )?;
-            }
-        }
-        Err(e @ SendError::Rejected(_)) => {
-            writeln!(
-                out,
-                "\n{e}. Nothing more will be tried; you can save the report to a file instead."
-            )?;
-        }
+        session::SendOutcome::Queued { why } => writeln!(
+            out,
+            "\nCould not reach the server ({why}). The report is queued and will be retried; see `breadbug queue`."
+        )?,
+        session::SendOutcome::QueueFull { why } => writeln!(
+            out,
+            "\nCould not reach the server ({why}) and the queue is full. Save the report to a file instead."
+        )?,
+        session::SendOutcome::Rejected { why } => writeln!(
+            out,
+            "\nThe server rejected the report ({why}). Nothing more will be tried; you can save the report to a file instead."
+        )?,
     }
     Ok(())
 }
