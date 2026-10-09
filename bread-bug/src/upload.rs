@@ -116,6 +116,12 @@ pub struct HistoryEntry {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The fix version the server reported, once fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_in: Option<String>,
+    /// Whether the user was already told this report was fixed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub told_fixed: bool,
 }
 
 pub struct History {
@@ -161,13 +167,25 @@ impl History {
             .find(|e| e.receipt.as_deref() == Some(receipt))
     }
 
-    pub fn set_status(&self, receipt: &str, status: &str) -> Result<()> {
+    pub fn set_status(&self, receipt: &str, status: &str, fixed_in: Option<&str>) -> Result<()> {
         let mut all = self.list();
         for e in all
             .iter_mut()
             .filter(|e| e.receipt.as_deref() == Some(receipt))
         {
             e.status = Some(status.to_string());
+            e.fixed_in = fixed_in.map(String::from);
+        }
+        self.rewrite(&all)
+    }
+
+    pub fn mark_told_fixed(&self, receipt: &str) -> Result<()> {
+        let mut all = self.list();
+        for e in all
+            .iter_mut()
+            .filter(|e| e.receipt.as_deref() == Some(receipt))
+        {
+            e.told_fixed = true;
         }
         self.rewrite(&all)
     }
@@ -188,6 +206,15 @@ impl History {
 }
 
 // --------------------------------------------------------------------- client
+
+/// The coarse state of a sent report, as the server reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteStatus {
+    /// `received`, `duplicate`, `investigating`, `fixed` or `closed`.
+    pub status: String,
+    /// The version the fix shipped in, when the server recorded one.
+    pub fixed_in: Option<String>,
+}
 
 /// What the server said about an accepted report.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,7 +358,7 @@ impl Client {
     }
 
     /// The coarse status of a report, or `None` if the server forgot it.
-    pub fn status(&self, receipt: &str) -> Result<Option<String>, SendError> {
+    pub fn status(&self, receipt: &str) -> Result<Option<RemoteStatus>, SendError> {
         match self
             .agent
             .get(&format!("{}/v1/reports/{receipt}/status", self.base))
@@ -341,7 +368,15 @@ impl Client {
                 let resp = Self::ensure_success(resp)?;
                 let v: serde_json::Value = serde_json::from_str(&Self::read_body(resp))
                     .map_err(|e| SendError::Retriable(e.to_string()))?;
-                Ok(v.get("status").and_then(|s| s.as_str()).map(String::from))
+                Ok(v.get("status")
+                    .and_then(|s| s.as_str())
+                    .map(|status| RemoteStatus {
+                        status: status.chars().take(32).collect(),
+                        fixed_in: v
+                            .get("fixed_in")
+                            .and_then(|s| s.as_str())
+                            .map(|f| f.chars().take(64).collect()),
+                    }))
             }
             Err(ureq::Error::Status(404, _)) => Ok(None),
             Err(e) => Err(Self::classify(e)),
@@ -471,6 +506,8 @@ impl Queue {
                         deletion_token: acc.deletion_token,
                         path: None,
                         status: Some("received".into()),
+                        fixed_in: None,
+                        told_fixed: false,
                     })?;
                     self.cancel(&meta.sha256);
                     sent += 1;

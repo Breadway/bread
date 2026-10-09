@@ -53,6 +53,9 @@ pub struct BugConfig {
     pub endpoint: String,
     /// Local store bounds.
     pub store: StoreLimits,
+    /// Tell me (desktop notification) when a report I sent is fixed and an
+    /// update is available. Opt-in; only receipts I hold are polled.
+    pub notify_fixed: bool,
     /// Whether breadd watches app heartbeats for freezes.
     pub watchdog_enabled: bool,
     /// An app that sends heartbeats and goes silent for this long (and
@@ -67,6 +70,7 @@ impl Default for BugConfig {
             excluded_apps: Vec::new(),
             endpoint: DEFAULT_ENDPOINT.to_string(),
             store: StoreLimits::default(),
+            notify_fixed: false,
             watchdog_enabled: true,
             freeze_after_ms: 15_000,
         }

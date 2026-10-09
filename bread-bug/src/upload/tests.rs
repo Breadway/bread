@@ -242,7 +242,7 @@ fn delete_and_status() {
     let (url, seen) = serve(vec![
         (204, ""),
         (404, r#"{"error":"not found"}"#),
-        (200, r#"{"status":"fixed"}"#),
+        (200, r#"{"status":"fixed","fixed_in":"0.4.0"}"#),
         (404, "{}"),
     ]);
     let c = Client::new(&url).unwrap();
@@ -252,7 +252,11 @@ fn delete_and_status() {
         seen.lock().unwrap()[0].header("authorization"),
         Some("Bearer tok")
     );
-    assert_eq!(c.status(RECEIPT).unwrap().as_deref(), Some("fixed"));
+    let st = c.status(RECEIPT).unwrap().unwrap();
+    assert_eq!(
+        (st.status.as_str(), st.fixed_in.as_deref()),
+        ("fixed", Some("0.4.0"))
+    );
     assert_eq!(c.status(RECEIPT).unwrap(), None);
 }
 
@@ -269,6 +273,8 @@ fn history_roundtrip_status_and_remove() {
         deletion_token: Some("tok".into()),
         path: None,
         status: None,
+        fixed_in: None,
+        told_fixed: false,
     })
     .unwrap();
     h.append(&HistoryEntry {
@@ -280,11 +286,18 @@ fn history_roundtrip_status_and_remove() {
         deletion_token: None,
         path: Some("/tmp/x.json".into()),
         status: None,
+        fixed_in: None,
+        told_fixed: false,
     })
     .unwrap();
     assert_eq!(h.list().len(), 2);
-    h.set_status(RECEIPT, "fixed").unwrap();
-    assert_eq!(h.find(RECEIPT).unwrap().status.as_deref(), Some("fixed"));
+    h.set_status(RECEIPT, "fixed", Some("0.4.0")).unwrap();
+    h.mark_told_fixed(RECEIPT).unwrap();
+    let e = h.find(RECEIPT).unwrap();
+    assert_eq!(
+        (e.status.as_deref(), e.fixed_in.as_deref(), e.told_fixed),
+        (Some("fixed"), Some("0.4.0"), true)
+    );
     assert!(h.remove(RECEIPT).unwrap());
     assert!(!h.remove(RECEIPT).unwrap());
     assert_eq!(h.list().len(), 1);
@@ -304,6 +317,8 @@ fn history_is_bounded() {
             deletion_token: None,
             path: None,
             status: None,
+            fixed_in: None,
+            told_fixed: false,
         })
         .unwrap();
     }

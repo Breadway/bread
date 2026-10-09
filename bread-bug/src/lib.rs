@@ -8,3 +8,4 @@ pub mod runcmd;
 pub mod store;
 pub mod system;
 pub mod upload;
+pub mod version;

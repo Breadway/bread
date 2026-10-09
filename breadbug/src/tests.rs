@@ -1,6 +1,15 @@
 use super::*;
 use bread_bug::store::{Marker, Store};
 
+thread_local! {
+    /// Notifications this test's thread has shown (tests run on separate threads).
+    static NOTIFIED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn notified() -> usize {
+    NOTIFIED.with(std::cell::Cell::get)
+}
+
 fn env(dir: &std::path::Path) -> Env {
     let ctx = ScrubContext {
         home: Some("/home/alicesmith".into()),
@@ -40,6 +49,7 @@ fn env(dir: &std::path::Path) -> Env {
             }])
         },
         pid_ok: |pid| pid == 4242,
+        notifier: |_, _| NOTIFIED.with(|n| n.set(n.get() + 1)),
     }
 }
 
@@ -456,4 +466,113 @@ fn saved_files_appear_in_history() {
     .unwrap();
     let (_, out) = go(&["history"], &e, "", false);
     assert!(out.contains("saved") && out.contains("r.json"), "{out}");
+}
+
+// ---- status & fixed notifications ---------------------------------------
+
+fn sent_env(
+    dir: &std::path::Path,
+    server_replies: Vec<(u16, &'static str)>,
+    installed: &str,
+    notify: bool,
+) -> Env {
+    let mut e = env(dir);
+    e.installed = Some(Some(vec![InstalledApp {
+        id: "clip".into(),
+        version: installed.into(),
+    }]));
+    let url = serve(server_replies);
+    let cfg = BugConfig {
+        upload_enabled: true,
+        notify_fixed: notify,
+        endpoint: url,
+        ..BugConfig::default()
+    };
+    cfg.save_to(&e.config_path).unwrap();
+    e
+}
+
+const SEND_OK: (u16, &str) = (
+    201,
+    r#"{"receipt":"0123456789abcdef0123456789abcdef","deletion_token":"tok","status":"received"}"#,
+);
+const FIXED: (u16, &str) = (200, r#"{"status":"fixed","fixed_in":"0.4.0"}"#);
+
+#[test]
+fn status_reports_a_fix_and_suggests_the_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = sent_env(dir.path(), vec![SEND_OK, FIXED], "0.3.1", false);
+    go(&["--app", "clip", "--send"], &e, "", false).0.unwrap();
+    let (r, out) = go(&["status"], &e, "", false);
+    r.unwrap();
+    assert!(
+        out.contains("fixed in 0.4.0") && out.contains("bakery update"),
+        "{out}"
+    );
+    let (_, hist) = go(&["history"], &e, "", false);
+    assert!(hist.contains("fixed in 0.4.0"), "{hist}");
+}
+
+#[test]
+fn notifications_are_opt_in_and_sent_once() {
+    let dir = tempfile::tempdir().unwrap();
+    // opt-in off: no notification even with --notify
+    let before = notified();
+    let e = sent_env(dir.path(), vec![SEND_OK, FIXED], "0.3.1", false);
+    go(&["--app", "clip", "--send"], &e, "", false).0.unwrap();
+    go(&["status", "--notify"], &e, "", false).0.unwrap();
+    assert_eq!(notified(), before);
+
+    // opt-in on: exactly one notification across repeated runs
+    let dir2 = tempfile::tempdir().unwrap();
+    let e2 = sent_env(dir2.path(), vec![SEND_OK, FIXED], "0.3.1", true);
+    go(&["--app", "clip", "--send"], &e2, "", false).0.unwrap();
+    go(&["status", "--notify"], &e2, "", false).0.unwrap();
+    assert_eq!(notified(), before + 1);
+    // a later run (status already fixed) says nothing new and notifies nothing
+    let url = serve(vec![FIXED, FIXED]);
+    BugConfig {
+        upload_enabled: true,
+        notify_fixed: true,
+        endpoint: url,
+        ..BugConfig::default()
+    }
+    .save_to(&e2.config_path)
+    .unwrap();
+    let (_, out) = go(&["status", "--notify"], &e2, "", false);
+    assert!(out.contains("No news"), "{out}");
+    assert_eq!(notified(), before + 1);
+}
+
+#[test]
+fn no_update_suggested_when_already_on_the_fixed_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let before = notified();
+    let e = sent_env(dir.path(), vec![SEND_OK, FIXED], "0.5.0", true);
+    go(&["--app", "clip", "--send"], &e, "", false).0.unwrap();
+    let (_, out) = go(&["status", "--notify"], &e, "", false);
+    assert!(
+        out.contains("fixed in 0.4.0") && !out.contains("bakery update"),
+        "{out}"
+    );
+    assert_eq!(notified(), before);
+}
+
+#[test]
+fn status_is_quiet_and_offline_while_upload_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    // nothing sent yet
+    let (_, out) = go(&["status"], &e, "", false);
+    assert!(out.contains("No sent reports"), "{out}");
+    let (_, out) = go(&["status", "--quiet"], &e, "", false);
+    assert!(out.is_empty());
+    // something sent, then upload turned off: no network, quiet mode prints nothing
+    let e = sent_env(dir.path(), vec![SEND_OK], "0.3.1", false);
+    go(&["--app", "clip", "--send"], &e, "", false).0.unwrap();
+    BugConfig::default().save_to(&e.config_path).unwrap();
+    let (_, out) = go(&["status"], &e, "", false);
+    assert!(out.contains("turned off"), "{out}");
+    let (_, out) = go(&["status", "--quiet"], &e, "", false);
+    assert!(out.is_empty(), "{out}");
 }
