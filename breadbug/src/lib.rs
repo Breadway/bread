@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use bread_bug::config::{self, BugConfig};
+use bread_bug::consent;
 use bread_bug::livestack;
 use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
 use bread_bug::store::{Frame, MarkerKind, Reader};
@@ -177,6 +178,12 @@ pub fn run(
         None => {}
     }
 
+    let first_run_candidate =
+        interactive && cli.app.is_none() && !cli.dry_run && cli.save.is_none() && !cli.send;
+    if first_run_candidate && !consent_gate(env, input, out)? {
+        return Ok(());
+    }
+
     let entries = entries(env);
     let (app, default_type) = match &cli.app {
         Some(app) => {
@@ -295,6 +302,25 @@ fn maybe_live_stack(
             Ok(Vec::new())
         }
     }
+}
+
+/// Show the consent notice on the first interactive session. Returns false
+/// if the user chose to stop.
+fn consent_gate(env: &Env, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool> {
+    if consent::seen(&env.state_dir) {
+        return Ok(true);
+    }
+    writeln!(out, "{}\n", consent::CONSENT_TEXT)?;
+    let Some(answer) = prompt(input, out, "Press Enter to continue, or q to quit: ")? else {
+        return Ok(false);
+    };
+    if matches!(answer.to_lowercase().as_str(), "q" | "quit") {
+        writeln!(out, "Nothing was done.")?;
+        return Ok(false);
+    }
+    consent::mark_seen(&env.state_dir);
+    writeln!(out)?;
+    Ok(true)
 }
 
 fn entries(env: &Env) -> Vec<AppEntry> {

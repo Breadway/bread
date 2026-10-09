@@ -136,12 +136,18 @@ events and logs, to fit.
 
 ## Consent copy (single source for CLI, GUI, settings, help)
 
+The text is `bread_bug::consent::CONSENT_TEXT`. It is shown once, before the
+first interactive `breadbug` session (Enter acknowledges and records it; `q`
+stops without recording, so it is shown again next time). The GUI,
+bos-settings and breadhelp reuse the same constant. In short:
+
 > A report contains your app's recent log lines, crash frames, event names and
-> basic system facts such as OS, kernel, GPU driver and bread versions. Personal
-> values such as your name, home folder, hostname, IP addresses, emails and
-> tokens are replaced before anything is stored or shown. You can read the
-> whole report before deciding. Nothing is sent unless you choose Send. You can
-> save the report to a file instead.
+> basic system facts such as OS, kernel, GPU driver and bread versions.
+> Personal values such as your name, home folder, hostname, IP addresses,
+> emails and tokens are replaced before anything is stored or shown. You can
+> read the whole report before deciding. Nothing is sent unless you choose
+> Send, and sending is off by default. You can save the report to a file
+> instead.
 
 ## Server and threat model (summary; details in breadbug-server)
 
