@@ -1738,6 +1738,7 @@ Available methods:
 | `bug.heartbeat` | `app`, `pid`, optional `interval_ms`, `stopping` | Liveness signal from an app's main loop for freeze detection. If heartbeats stop while the process is alive (for longer than `freeze_after_ms`, default 15s, and four of the app's own intervals), breadd records a `freeze` marker and publishes `bread.bug.freeze`; a heartbeat afterwards publishes `bread.bug.recovered`. `stopping: true` announces a clean exit. Detection pauses for ten seconds after power or monitor events and after a stalled daemon tick (suspend/resume). *(Since: v1.8)* |
 | `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
 | `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
+| `bug.reload` | none | Re-read `~/.config/bread/breadbug.toml` and apply its `excluded_apps` now; newly excluded apps have their stored data wiped. *(Since: v1.8)* |
 
 *Since: v1.6*: `module_host.*`, the RPC bridge an out-of-process
 `bread-module-host` child uses in place of direct in-process `bread.*`

@@ -457,6 +457,7 @@ impl Server {
             ),
             "bug.status" => Ok(bugstore::ipc_status(self.bug_store.as_deref())),
             "bug.wipe" => bugstore::ipc_wipe(self.bug_store.as_deref(), &req.params),
+            "bug.reload" => bugstore::ipc_reload(self.bug_store.as_deref()),
             _ => Err("unknown method".to_string()),
         };
 

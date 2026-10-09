@@ -1783,6 +1783,38 @@ async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn bug_reload_applies_exclusions_and_wipes_newly_excluded_apps() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request("bug.log", json!({ "app": "clip", "msg": "stored before" }))
+        .await?;
+    let reader = bread_bug::store::Reader::open(harness.bugstore_root());
+    assert!(reader.apps().contains(&"clip".to_string()));
+
+    // The user excludes clip in settings, which rewrites breadbug.toml.
+    fs::write(
+        harness.config_home().join("bread/breadbug.toml"),
+        "excluded_apps = [\"clip\"]\n",
+    )?;
+    let res = harness.send_request("bug.reload", json!({})).await?;
+    assert_eq!(res["excluded"], json!(["clip"]));
+    assert!(!reader.apps().contains(&"clip".to_string()), "excluded app's data must be wiped");
+    let after = harness
+        .send_request("bug.log", json!({ "app": "clip", "msg": "after" }))
+        .await?;
+    assert_eq!(after["stored"], json!(false));
+    // other apps are unaffected
+    let other = harness
+        .send_request("bug.log", json!({ "app": "pad", "msg": "still ok" }))
+        .await?;
+    assert_eq!(other["stored"], json!(true));
+
+    harness.shutdown();
+    Ok(())
+}
+
 struct TestHarness {
     _temp: TempDir,
     child: Child,
@@ -1981,6 +2013,10 @@ enabled = false
         }
 
         Err(anyhow!("daemon did not become ready in time"))
+    }
+
+    fn config_home(&self) -> PathBuf {
+        self._temp.path().join("config")
     }
 
     /// Where the daemon keeps breadbug's on-disk store inside the synthetic
