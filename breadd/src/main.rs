@@ -1,4 +1,5 @@
 mod adapters;
+mod bugstore;
 mod core;
 mod ipc;
 mod lua;
@@ -22,9 +23,16 @@ use crate::core::types::RuntimeState;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load()?;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(config.daemon.log_level.clone()))
-        .init();
+    let bug_store = bugstore::open();
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        tracing_subscriber::registry()
+            .with(EnvFilter::new(config.daemon.log_level.clone()))
+            .with(tracing_subscriber::fmt::layer())
+            .with(bug_store.clone().map(bugstore::BugLayer::new))
+            .init();
+    }
 
     info!("starting breadd");
 
@@ -95,6 +103,10 @@ async fn main() -> Result<()> {
 
     let adapter_status = adapter_manager.status_handle();
 
+    if let Some(store) = bug_store.clone() {
+        bugstore::spawn_event_recorder(store, event_stream_tx.subscribe());
+    }
+
     let event_buffer = Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(1000)));
     {
         let mut rx = event_stream_tx.subscribe();
@@ -126,6 +138,7 @@ async fn main() -> Result<()> {
         subscription_count,
         event_buffer,
         module_host_registry.clone(),
+        bug_store,
     );
 
     info!("breadd fully started");

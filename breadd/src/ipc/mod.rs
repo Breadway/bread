@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tracing::{error, info, warn};
 
 use crate::adapters::AdapterStatus;
+use crate::bugstore;
 use crate::core::state_engine::StateHandle;
 use crate::lua::RuntimeHandle;
 use crate::module_host::ModuleHostRegistry;
@@ -41,7 +42,9 @@ mod module_host_bridge;
 /// sourced `AdapterSource::App` emit may publish commands to another known
 /// app. `command` stays in `RESERVED_DOMAINS` so it cannot be claimed as
 /// an app id.
-const API_VERSION: &str = "1.7.1";
+///
+/// *Since 1.8.0*: breadbug's `bug.*` IPC methods and `bread.bug.*` events.
+const API_VERSION: &str = "1.8.0";
 
 #[derive(Clone)]
 pub struct Server {
@@ -61,6 +64,9 @@ pub struct Server {
     /// `crate::module_host` and `module_host_bridge` (this module's
     /// `module_host.*` method handling).
     module_host_registry: ModuleHostRegistry,
+    /// breadbug's on-disk log/event store (`bug.*` methods). `None` when it
+    /// could not be opened; the methods then report it as unavailable.
+    bug_store: Option<Arc<bread_bug::store::Store>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,6 +101,7 @@ impl Server {
         subscription_count: Arc<AtomicU64>,
         event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
         module_host_registry: ModuleHostRegistry,
+        bug_store: Option<Arc<bread_bug::store::Store>>,
     ) -> Self {
         Self {
             socket_path,
@@ -105,6 +112,7 @@ impl Server {
             raw_tx,
             adapter_status,
             module_host_registry,
+            bug_store,
             subscription_count,
             event_buffer,
             started_at: Instant::now(),
@@ -405,6 +413,7 @@ impl Server {
                     "modules": modules,
                     "subscriptions": subscription_count,
                     "recent_errors": recent_errors,
+                    "bugstore": bugstore::ipc_status(self.bug_store.as_deref()),
                 }))
             }
             "events.replay" => {
@@ -426,6 +435,26 @@ impl Server {
                     .unwrap_or_default();
                 Ok(serde_json::to_value(replay).unwrap_or_else(|_| json!([])))
             }
+            "bug.log" => bugstore::ipc_log(self.bug_store.as_deref(), &req.params),
+            "bug.logs" => bugstore::ipc_logs(self.bug_store.as_deref(), &req.params),
+            "bug.marker" => bugstore::ipc_marker(self.bug_store.as_deref(), &req.params).map(
+                |(app, marker, stored)| {
+                    if stored {
+                        let kind = serde_json::to_value(marker.kind)
+                            .ok()
+                            .and_then(|v| v.as_str().map(ToString::to_string))
+                            .unwrap_or_default();
+                        let _ = self.emit_tx.send(BreadEvent::new(
+                            format!("bread.bug.{kind}"),
+                            AdapterSource::System,
+                            json!({ "app": app, "kind": kind, "t": marker.t }),
+                        ));
+                    }
+                    json!({ "stored": stored })
+                },
+            ),
+            "bug.status" => Ok(bugstore::ipc_status(self.bug_store.as_deref())),
+            "bug.wipe" => bugstore::ipc_wipe(self.bug_store.as_deref(), &req.params),
             _ => Err("unknown method".to_string()),
         };
 

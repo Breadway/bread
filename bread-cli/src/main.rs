@@ -787,6 +787,21 @@ fn render_doctor(health: &Value) {
         println!("subscriptions  {count}");
     }
 
+    if let Some(bug) = health.get("bugstore") {
+        println!();
+        println!("breadbug store");
+        if bug.get("available").and_then(Value::as_bool) == Some(true) {
+            let bytes = bug.get("total_bytes").and_then(Value::as_u64).unwrap_or(0);
+            let apps = bug
+                .get("apps")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            println!("  ✓ {} KiB across {apps} app(s)", bytes / 1024);
+        } else {
+            println!("  ✗ unavailable (crash and freeze reports are disabled)");
+        }
+    }
+
     if let Some(errors) = health.get("recent_errors").and_then(Value::as_array) {
         if !errors.is_empty() {
             println!();

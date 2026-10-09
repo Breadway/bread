@@ -1405,6 +1405,7 @@ Events are delivered as a `BreadEvent`:
 |-------|------|
 | `bread.system.startup` | `{}` |
 | `bread.module.crashed` *(Since: v1.6)* | `{ module, pid, reason, exit_code, signal }`: an out-of-process `bread-module-host` child exited (crash, panic, `kill -9`, ...). `exit_code`/`signal` are mutually exclusive (whichever applies); see [Out-of-process module sandboxing](#out-of-process-module-sandboxing-since-v16). |
+| `bread.bug.panic` / `.crash` / `.freeze` / `.recovered` *(Since: v1.8)* | `{ app, kind, t }`: breadbug recorded a Rust panic, native crash, freeze, or recovery for a sibling app (see `bug.marker` in the IPC table). Published only by the daemon; the `bug` domain is reserved. |
 
 #### Devices (udev / Bluetooth)
 
@@ -1590,7 +1591,7 @@ Two dotted-name segments are reserved, permanent parts of the schema, not one-of
 
 - **`bread.<app>.*`**: inbound events published *by* a sibling `bread*` application about its own state (e.g. `bread.clip.copied`). An app may only publish within its own segment; the daemon enforces this at the IPC boundary (a socket client claiming a `source` of an app id it doesn't own is rejected the same way spoofing `power`/`hyprland` is rejected today).
 - **`bread.command.<app>.<verb>`**: outbound commands *to* a sibling application (e.g. `bread.command.clip.clear`). Any module or app may publish; only the target app subscribes. This reuses the existing event bus in both directions: there is no separate request/response protocol. *Since: v1.7, well-formed `bread.command.<known-app>.<verb>` names (`known-app` ∈ `KNOWN_APPS`, verb a non-empty extra dotted segment) are allowed on the unsourced/`bread-emit` path and via sourced `AdapterSource::App` emit (an app may publish a command to another known app). `BreadClient::command` in bread-utils is the typed helper for the same path. `command` remains in `RESERVED_DOMAINS` so it cannot be claimed as an app id; `bread.command.power.off` and `bread.command.notanapp.x` are still rejected. See [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
-- The second dotted segment is drawn from a small known-apps registry (`bread_shared::apps::KNOWN_APPS` in `bread-shared/src/apps.rs`); daemon-internal domains (`terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow`) are reserved and cannot be claimed as app ids. *Since: v1.5, `bluetooth`, `workspace`, `window`, and `monitor` added to this list (event families the Bluetooth and Hyprland adapters already published under, but that were missing from it); this same list is now also the boundary the IPC `emit` method's no-`source` path checks event names against, see [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
+- The second dotted segment is drawn from a small known-apps registry (`bread_shared::apps::KNOWN_APPS` in `bread-shared/src/apps.rs`); daemon-internal domains (`terminal`, `git`, `hyprland`, `device`, `power`, `network`, `bluetooth`, `workspace`, `window`, `monitor`, `service`, `container`, `project`, `remote`, `system`, `profile`, `notify`, `command`, `workflow`, `bug`) are reserved and cannot be claimed as app ids. *Since: v1.5, `bluetooth`, `workspace`, `window`, and `monitor` added to this list (event families the Bluetooth and Hyprland adapters already published under, but that were missing from it); this same list is now also the boundary the IPC `emit` method's no-`source` path checks event names against, see [Dictionary: IPC protocol](#dictionary-ipc-protocol).*
 - **Commands are best-effort.** Publishing `bread.command.<app>.<verb>` with no subscriber (the app isn't installed or isn't running) is a silent no-op: there is nothing to special-case, and no error is raised. An app that acts on a command *should* emit a corresponding `bread.<app>.<verb>.done` (or `.failed`) confirmation; a module that needs to know a command was actually honored must `bread.wait`/`bread.wait_any` on that confirmation with a timeout rather than assume success. There is no mandatory request/response correlation layer: most commands are legitimately fire-and-forget, and building one would contradict the "no listener, no-op" degradation property.
 - **`bread.exec("<cli> ...")`** remains the zero-infrastructure fallback for triggering a sibling app that has a synchronous CLI and no need for a structured response.
 
@@ -1719,7 +1720,7 @@ Available methods:
 | Method | Params | Description |
 |--------|--------|-------------|
 | `ping` | none | Connectivity check |
-| `health` | none | Version, uptime, PID, adapter status, `api_version` |
+| `health` | none | Version, uptime, PID, adapter status, `api_version`, and the breadbug store status under `bugstore` |
 | `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
 | `state.dump` | none | Return the full `RuntimeState` as JSON |
 | `modules.list` | none | List all loaded modules and their status |
@@ -1731,6 +1732,11 @@ Available methods:
 | `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly, tagged `Manual` *(Since: v1.5, previously tagged `System`; see below)*, for manually testing Lua handlers (this is what `bread emit <event>` and `bread-emit` use). Well-formed `bread.command.<known-app>.<verb>` is allowed on this path *(Since: v1.7)*; other reserved domains stay rejected. With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. A sourced app may also publish a well-formed command to another known app. Any other `source` value is rejected: this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
 | `workflows.list` | none | List running/completed workflow instances and their step/status *(Since: v1.2)* |
 | `widgets.list` | none | List all registered widgets across every module *(Since: v1.3)* |
+| `bug.log` | `app`, `msg`, optional `level`, `t` | Append one log line to breadbug's on-disk store, scrubbed on ingest. `app` must be a registered app id or `breadd`. Excluded apps store nothing and reply `{ stored: false }`. *(Since: v1.8)* |
+| `bug.logs` | `app`, `lines` (`[{msg, level?, t?}]`, at most 1000) | Batch form of `bug.log`. *(Since: v1.8)* |
+| `bug.marker` | `app`, `marker` (`kind` = `panic`/`crash`/`freeze`/`recovered`, optional `t`, `app_version`, `build_id`, `message`, `location`, `signal`, `frames`) | Record a crash or freeze marker (frames carry module, offset and build-id only, never memory). On success the daemon publishes `bread.bug.<kind>`. *(Since: v1.8)* |
+| `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
+| `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
 
 *Since: v1.6*: `module_host.*`, the RPC bridge an out-of-process
 `bread-module-host` child uses in place of direct in-process `bread.*`

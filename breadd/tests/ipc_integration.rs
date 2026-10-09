@@ -1544,6 +1544,148 @@ async fn poll_workflow_status(
     ))
 }
 
+#[tokio::test]
+async fn bug_log_is_scrubbed_before_it_reaches_disk() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let res = harness
+        .send_request(
+            "bug.log",
+            json!({
+                "app": "clip",
+                "level": "warn",
+                "msg": "sync failed for mail@example.org from 203.0.113.42"
+            }),
+        )
+        .await?;
+    assert_eq!(res["stored"], json!(true));
+
+    let reader = bread_bug::store::Reader::open(harness.bugstore_root());
+    let snap = reader.snapshot("clip", 10, 0)?;
+    assert_eq!(snap.logs.len(), 1);
+    assert_eq!(snap.logs[0].msg, "sync failed for <EMAIL:1> from <IP:1>");
+
+    let status = harness.send_request("bug.status", json!({})).await?;
+    assert_eq!(status["available"], json!(true));
+    assert!(status["apps"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|e| e["app"] == "clip")));
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_marker_is_stored_and_published_on_the_bus() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe = json!({
+        "id": "sub-bug",
+        "method": "events.subscribe",
+        "params": { "filter": "bread.bug.*" }
+    });
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+    let mut reader = BufReader::new(read_half).lines();
+    reader
+        .next_line()
+        .await?
+        .ok_or_else(|| anyhow!("missing subscribe ack"))?;
+
+    let res = harness
+        .send_request(
+            "bug.marker",
+            json!({
+                "app": "clip",
+                "marker": {
+                    "kind": "panic",
+                    "message": "called unwrap on None",
+                    "frames": [{ "module": "breadclip", "offset": 4660 }]
+                }
+            }),
+        )
+        .await?;
+    assert_eq!(res["stored"], json!(true));
+
+    let line = timeout(Duration::from_secs(5), reader.next_line())
+        .await??
+        .ok_or_else(|| anyhow!("no bug event"))?;
+    let evt: Value = serde_json::from_str(&line)?;
+    assert_eq!(evt["event"], json!("bread.bug.panic"));
+    assert_eq!(evt["data"]["app"], json!("clip"));
+
+    let marker = bread_bug::store::Reader::open(harness.bugstore_root())
+        .last_marker("clip")
+        .ok_or_else(|| anyhow!("marker not on disk"))?;
+    assert_eq!(marker.frames[0].offset, Some(4660));
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_methods_reject_unregistered_apps_and_bad_input() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+
+    for bad in ["../etc", "notanapp", ""] {
+        let r = harness
+            .send_request("bug.log", json!({ "app": bad, "msg": "x" }))
+            .await;
+        assert!(r.is_err(), "app {bad:?} was accepted");
+    }
+    assert!(harness
+        .send_request("bug.log", json!({ "app": "clip" }))
+        .await
+        .is_err());
+    assert!(harness
+        .send_request(
+            "bug.marker",
+            json!({ "app": "clip", "marker": { "kind": "nope" } })
+        )
+        .await
+        .is_err());
+    // Apps cannot claim the reserved `bug` event domain either.
+    assert!(harness
+        .send_request(
+            "emit",
+            json!({ "source": "clip", "kind": "bread.bug.panic", "data": {} })
+        )
+        .await
+        .is_err());
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    for app in ["clip", "pad"] {
+        harness
+            .send_request("bug.log", json!({ "app": app, "msg": "hello" }))
+            .await?;
+    }
+    let reader = bread_bug::store::Reader::open(harness.bugstore_root());
+    assert!(reader.apps().contains(&"clip".to_string()));
+
+    harness.send_request("bug.wipe", json!({ "app": "clip" })).await?;
+    assert!(!reader.apps().contains(&"clip".to_string()));
+    assert!(reader.apps().contains(&"pad".to_string()));
+
+    harness.send_request("bug.wipe", json!({})).await?;
+    assert!(!reader.apps().contains(&"pad".to_string()));
+
+    harness.shutdown();
+    Ok(())
+}
+
 struct TestHarness {
     _temp: TempDir,
     child: Child,
@@ -1721,6 +1863,15 @@ enabled = false
         }
 
         Err(anyhow!("daemon did not become ready in time"))
+    }
+
+    /// Where the daemon keeps breadbug's on-disk store inside the synthetic
+    /// `$HOME` (`$HOME/.local/state/bread/bugstore`).
+    fn bugstore_root(&self) -> PathBuf {
+        self._temp
+            .path()
+            .join("home")
+            .join(".local/state/bread/bugstore")
     }
 
     async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
