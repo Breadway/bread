@@ -1024,17 +1024,47 @@ CLI (e.g. `kitty @ ls`).
 
 The `bread.hyprland` namespace provides compositor bindings.
 
-```lua
--- Dispatch a Hyprland command
-bread.hyprland.dispatch("workspace", "2")
-bread.hyprland.dispatch("exec", "kitty")
+Hyprland is configured either with `hyprland.conf` or with `hyprland.lua`
+(BOS uses `hyprland.lua`). The IPC socket accepts different request shapes in
+the two modes, so prefer the Lua forms below, which work with `hyprland.lua`.
 
--- Set a keyword
+`dispatch` and `keyword` raise a Lua error when Hyprland answers anything
+other than `ok`, so wrap a call in `pcall` if a failure should not abort your
+handler. Both first try the classic request (so a plain `hyprland.conf` keeps
+working). If Hyprland refuses it, bread translates the common legacy commands
+into the Lua call and retries through `eval`:
+
+- `dispatch`: `workspace`, `focusworkspaceoncurrentmonitor`, `movetoworkspace`,
+  `movetoworkspacesilent`, `moveworkspacetomonitor`, `focusmonitor`,
+  `focuswindow`, `movefocus`, `movewindow`, `dpms`, `exec`, `killactive`,
+  `togglefloating`, `pseudo`, `fullscreen`, `togglespecialworkspace`, `submap`,
+  `layoutmsg`, `exit`.
+- `keyword`: `monitor`, `bind`/`binde`/`bindl`, `unbind`, and `section:option`
+  config values such as `general:gaps_in`.
+
+Anything else raises an error that names the unsupported command; use the Lua
+form or `eval` for it.
+
+```lua
+-- Dispatch: pass a Lua dispatcher expression as the only argument.
+bread.hyprland.dispatch("hl.dsp.focus({ workspace = '2' })")
+bread.hyprland.dispatch("hl.dsp.exec_cmd('kitty')")
+bread.hyprland.dispatch("hl.dsp.dpms({ action = 'off', monitor = 'DP-1' })")
+
+-- The classic two-argument form still works and is translated when needed.
+bread.hyprland.dispatch("workspace", "2")
+
+-- Configure through eval with the hl.* API (hyprland.lua).
+bread.hyprland.eval("hl.monitor({ output = 'HDMI-A-1', mode = '2560x1440', position = '0x0', scale = '1' })")
+bread.hyprland.eval("hl.config({ general = { gaps_in = 5 } })")
+bread.hyprland.eval("hl.bind('SUPER + F9', hl.dsp.exec_cmd('kitty'))")
+
+-- keyword takes the classic key/value pair and is translated when needed.
 bread.hyprland.keyword("monitor", "HDMI-A-1, 2560x1440, 0x0, 1")
 
--- Send a raw request to the Hyprland socket, e.g. to evaluate a config-file
--- expression the way `hyprctl eval <expr>` does; returns the raw response string
-local result = bread.hyprland.eval("some expression")
+-- Send a raw request through eval, the way `hyprctl eval <expr>` does.
+-- Returns the raw response string: "ok" on success, otherwise the error text.
+local result = bread.hyprland.eval("hl.config({ cursor = { zoom_factor = 2 } })")
 
 -- Query compositor state (returns deserialized Lua tables)
 local win        = bread.hyprland.active_window()
