@@ -1,6 +1,6 @@
 name = "bread"
 description = "Reactive automation daemon and CLI for Linux desktops"
-binaries = ["breadd", "bread", "bread-emit", "bread-module-host"]
+binaries = ["breadd", "bread", "bread-emit", "bread-module-host", "breadbug"]
 system_deps = ["systemd-libs", "openssl", "zlib"]
 optional_system_deps = ["bluez", "hyprland"]
 bread_deps = []
@@ -8,6 +8,16 @@ license_file = "LICENSE"
 
 [[service]]
 unit = "breadd.service"
+enable = true
+
+# breadbug checks daily on bug reports you sent. It does nothing unless you
+# have turned sending on and have sent a report, and never sends anything.
+[[service]]
+unit = "breadbug-status.service"
+enable = false
+
+[[service]]
+unit = "breadbug-status.timer"
 enable = true
 
 [config]

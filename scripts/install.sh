@@ -19,10 +19,12 @@ ln -sf "$REPO_ROOT/target/release/breadd" "$BIN_DIR/breadd"
 ln -sf "$REPO_ROOT/target/release/bread"  "$BIN_DIR/bread"
 ln -sf "$REPO_ROOT/target/release/bread-emit" "$BIN_DIR/bread-emit"
 ln -sf "$REPO_ROOT/target/release/bread-module-host" "$BIN_DIR/bread-module-host"
+ln -sf "$REPO_ROOT/target/release/breadbug" "$BIN_DIR/breadbug"
 echo "  $BIN_DIR/breadd -> $REPO_ROOT/target/release/breadd"
 echo "  $BIN_DIR/bread  -> $REPO_ROOT/target/release/bread"
 echo "  $BIN_DIR/bread-emit -> $REPO_ROOT/target/release/bread-emit"
 echo "  $BIN_DIR/bread-module-host -> $REPO_ROOT/target/release/bread-module-host"
+echo "  $BIN_DIR/breadbug -> $REPO_ROOT/target/release/breadbug"
 
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
