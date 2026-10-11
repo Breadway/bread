@@ -6,6 +6,7 @@
 //! is only layout and wiring. Slow work (building a report runs helper
 //! commands; sending touches the network) runs off the UI thread.
 
+mod style;
 pub mod text;
 
 use std::cell::RefCell;
@@ -17,8 +18,9 @@ use breadbug::session::{self, SendOutcome};
 use breadbug::Env;
 use gtk4::prelude::*;
 use gtk4::{
-    gio, glib, Application, ApplicationWindow, Box as GBox, Button, CheckButton, DropDown, Label,
-    ListBox, ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Stack, TextView, WrapMode,
+    gio, glib, Application, ApplicationWindow, Box as GBox, Button, CheckButton, DropDown,
+    Expander, Image, Label, ListBox, ListBoxRow, Orientation, ScrolledWindow, SelectionMode, Stack,
+    TextView, WrapMode,
 };
 
 struct State {
@@ -39,7 +41,7 @@ fn now_ms() -> u64 {
 
 fn page() -> GBox {
     let b = GBox::new(Orientation::Vertical, 12);
-    b.set_margin_top(20);
+    b.set_margin_top(24);
     b.set_margin_bottom(20);
     b.set_margin_start(24);
     b.set_margin_end(24);
@@ -47,11 +49,8 @@ fn page() -> GBox {
 }
 
 fn heading(s: &str) -> Label {
-    let l = Label::new(None);
-    l.set_markup(&format!(
-        "<span size='x-large' weight='bold'>{}</span>",
-        glib::markup_escape_text(s)
-    ));
+    let l = para(s);
+    l.add_css_class("report-title");
     l.set_xalign(0.0);
     l
 }
@@ -67,8 +66,69 @@ fn para(s: &str) -> Label {
 
 fn buttons() -> GBox {
     let b = GBox::new(Orientation::Horizontal, 8);
-    b.set_halign(gtk4::Align::End);
+    b.add_css_class("report-footer");
     b.set_margin_top(8);
+    b
+}
+
+fn spacer() -> GBox {
+    let b = GBox::new(Orientation::Vertical, 0);
+    b.set_vexpand(true);
+    b
+}
+
+fn muted(s: &str) -> Label {
+    let l = para(s);
+    l.add_css_class("muted");
+    l
+}
+
+fn primary(button: &Button) {
+    button.add_css_class("suggested-action");
+    button.add_css_class("primary");
+}
+
+fn actions(left: Option<&Button>, right: &[&Button]) -> GBox {
+    let b = buttons();
+    if let Some(button) = left {
+        b.append(button);
+    }
+    let space = GBox::new(Orientation::Horizontal, 0);
+    space.set_hexpand(true);
+    b.append(&space);
+    for button in right {
+        b.append(*button);
+    }
+    b
+}
+
+fn notice(s: &str) -> GBox {
+    let b = GBox::new(Orientation::Horizontal, 12);
+    b.add_css_class("notice");
+    let icon = Image::from_icon_name("security-high-symbolic");
+    icon.set_valign(gtk4::Align::Start);
+    b.append(&icon);
+    let label = para(s);
+    label.set_hexpand(true);
+    b.append(&label);
+    b
+}
+
+fn section(title: &str, child: &impl IsA<gtk4::Widget>) -> Expander {
+    let e = Expander::new(Some(title));
+    e.set_child(Some(child));
+    e
+}
+
+fn metric(value: usize, title: &str) -> GBox {
+    let b = GBox::new(Orientation::Vertical, 4);
+    b.set_hexpand(true);
+    let number = para(&value.to_string());
+    number.add_css_class("metric-value");
+    let label = para(title);
+    label.add_css_class("metric-label");
+    b.append(&number);
+    b.append(&label);
     b
 }
 
@@ -78,12 +138,68 @@ fn mono_view(content: &str) -> ScrolledWindow {
     tv.set_cursor_visible(false);
     tv.set_monospace(true);
     tv.set_wrap_mode(WrapMode::None);
+    tv.set_top_margin(12);
+    tv.set_bottom_margin(12);
+    tv.set_left_margin(12);
+    tv.set_right_margin(12);
     tv.buffer().set_text(content);
     let sw = ScrolledWindow::new();
     sw.set_child(Some(&tv));
     sw.set_vexpand(true);
     sw.set_min_content_height(220);
+    sw.add_css_class("report-data");
     sw
+}
+
+fn report_overview(prepared: &Prepared) -> GBox {
+    let report = &prepared.report;
+    let b = GBox::new(Orientation::Vertical, 12);
+    let counts = GBox::new(Orientation::Horizontal, 16);
+    counts.add_css_class("report-card");
+    counts.append(&metric(
+        report.logs.len() + report.daemon_logs.len(),
+        "Log lines",
+    ));
+    counts.append(&metric(report.markers.len(), "Crash / freeze records"));
+    counts.append(&metric(report.events.len(), "Events"));
+    counts.append(&metric(report.journal.len(), "Journal lines"));
+    b.append(&counts);
+    b.append(&notice(&format!(
+        "{} Nothing has been sent.",
+        text::redaction_summary(&report.redactions)
+    )));
+    if let Some(notes) = report.notes.as_deref().filter(|s| !s.is_empty()) {
+        let card = GBox::new(Orientation::Vertical, 6);
+        card.add_css_class("report-card");
+        let label = para("Your notes, after scrubbing");
+        label.add_css_class("field-label");
+        card.append(&label);
+        let notes = para(notes);
+        notes.set_selectable(true);
+        card.append(&notes);
+        b.append(&card);
+    }
+    let system = para(&format!(
+        "App: {} {}\nSystem: {} · {}\nKernel: {}\nAlso includes: installed app versions, runtime status and any consented stack trace.",
+        text::app_name(&report.app.id),
+        report.app.version.as_deref().unwrap_or("(version unknown)"),
+        report.system.os_id.as_deref().unwrap_or("unknown"),
+        report.system.arch,
+        report.system.kernel.as_deref().unwrap_or("unknown"),
+    ));
+    system.set_selectable(true);
+    b.append(&section("App and system details", &system));
+    let full = section(
+        "Full report · exact data saved or sent",
+        &mono_view(&String::from_utf8_lossy(&prepared.bytes)),
+    );
+    b.append(&full);
+    let fingerprint = para(&format!("SHA-256  {}", prepared.sha256));
+    fingerprint.add_css_class("hash");
+    fingerprint.add_css_class("muted");
+    fingerprint.set_selectable(true);
+    b.append(&fingerprint);
+    b
 }
 
 /// The widgets a front-end test or screenshot tool needs to drive the window
@@ -122,107 +238,171 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Report a problem")
-        .default_width(780)
-        .default_height(660)
+        .default_width(820)
+        .default_height(760)
         .build();
-    bread_theme::gtk::bind_window_auto_with_app_css(&window, |_| String::new());
+    window.add_css_class("breadbug");
+    bread_theme::gtk::bind_window_auto_with_app_css(&window, |_| style::CSS.to_string());
 
     let stack = Stack::new();
     stack.set_vexpand(true);
+    let root = GBox::new(Orientation::Vertical, 0);
+    let header = GBox::new(Orientation::Horizontal, 16);
+    header.add_css_class("report-header");
+    let brand = Label::new(Some("breadbug"));
+    brand.add_css_class("brand");
+    brand.set_hexpand(true);
+    brand.set_xalign(0.0);
+    header.append(&brand);
+    let steps: Vec<Label> = ["1  Choose app", "2  Describe", "3  Review"]
+        .iter()
+        .map(|name| {
+            let l = Label::new(Some(name));
+            l.add_css_class("step");
+            l.set_visible(false);
+            header.append(&l);
+            l
+        })
+        .collect();
+    root.append(&header);
+    root.append(&stack);
 
     // ------------------------------------------------------------ consent
     let consent_page = page();
+    let eyebrow = muted("YOUR REPORT, YOUR CHOICE");
+    eyebrow.add_css_class("eyebrow");
+    consent_page.append(&eyebrow);
     consent_page.append(&heading("Before you start"));
-    consent_page.append(&para(CONSENT_TEXT));
+    let consent_card = GBox::new(Orientation::Vertical, 12);
+    consent_card.add_css_class("report-card");
+    consent_card.append(&para(CONSENT_TEXT));
+    let consent_scroll = ScrolledWindow::new();
+    consent_scroll.set_child(Some(&consent_card));
+    consent_scroll.set_propagate_natural_height(true);
+    consent_scroll.set_vexpand(false);
+    consent_page.append(&consent_scroll);
+    consent_page.append(&spacer());
+    consent_page.append(&notice(
+        "Review first. Save a copy or choose to send it. You stay in control.",
+    ));
     let (c_quit, c_go) = (Button::with_label("Quit"), Button::with_label("Continue"));
-    c_go.add_css_class("suggested-action");
-    let cb = buttons();
-    cb.append(&c_quit);
-    cb.append(&c_go);
-    consent_page.append(&cb);
+    primary(&c_go);
+    consent_page.append(&actions(Some(&c_quit), &[&c_go]));
     stack.add_named(&consent_page, Some("consent"));
 
     // --------------------------------------------------------------- pick
     let pick_page = page();
     pick_page.append(&heading("Which app has the problem?"));
+    pick_page.append(&muted(
+        "Choose an installed app. Recent crashes and freezes appear first.",
+    ));
     let list = ListBox::new();
     list.set_selection_mode(SelectionMode::Single);
-    list.add_css_class("boxed-list");
+    list.add_css_class("app-list");
     {
         let st = state.borrow();
         let now = now_ms();
         for e in &st.apps {
             let row = ListBoxRow::new();
-            let l = Label::new(Some(&text::app_line(e, now)));
-            l.set_xalign(0.0);
-            l.set_margin_top(8);
-            l.set_margin_bottom(8);
-            l.set_margin_start(12);
-            row.set_child(Some(&l));
+            let line = GBox::new(Orientation::Horizontal, 14);
+            let icon = Image::from_icon_name(text::app_icon(&e.app));
+            icon.add_css_class("app-icon");
+            icon.set_pixel_size(24);
+            line.append(&icon);
+            let labels = GBox::new(Orientation::Vertical, 4);
+            labels.set_hexpand(true);
+            let name = para(&text::app_name(&e.app));
+            name.add_css_class("app-name");
+            labels.append(&name);
+            labels.append(&muted(&text::app_problem(e, now)));
+            line.append(&labels);
+            let version = muted(e.version.as_deref().unwrap_or("Version unknown"));
+            version.add_css_class("version");
+            line.append(&version);
+            row.set_child(Some(&line));
             list.append(&row);
         }
     }
     let list_scroll = ScrolledWindow::new();
     list_scroll.set_child(Some(&list));
-    list_scroll.set_vexpand(true);
+    list_scroll.set_propagate_natural_height(true);
+    list_scroll.set_max_content_height(360);
     pick_page.append(&list_scroll);
-    let empty_hint = para("No bread apps were found to report on.");
+    let empty_hint = notice("No reportable apps found. Installed bread apps appear here unless excluded in Bug reports settings.");
     empty_hint.set_visible(state.borrow().apps.is_empty());
     pick_page.append(&empty_hint);
-    let (p_cancel, p_next) = (Button::with_label("Cancel"), Button::with_label("Next"));
-    p_next.add_css_class("suggested-action");
+    pick_page.append(&spacer());
+    pick_page.append(&notice(
+        "Nothing is sent automatically. You can inspect the report before deciding.",
+    ));
+    let (p_cancel, p_next) = (
+        Button::with_label("Cancel"),
+        Button::with_label("Describe problem"),
+    );
+    primary(&p_next);
     p_next.set_sensitive(false);
-    let pb = buttons();
-    pb.append(&p_cancel);
-    pb.append(&p_next);
-    pick_page.append(&pb);
+    pick_page.append(&actions(Some(&p_cancel), &[&p_next]));
     stack.add_named(&pick_page, Some("pick"));
 
     // ------------------------------------------------------------ details
     let details_page = page();
     let details_title = heading("");
     details_page.append(&details_title);
-    details_page.append(&para("What happened?"));
+    details_page.append(&muted("A few details help us understand what went wrong."));
+    let type_label = para("What happened?");
+    type_label.add_css_class("field-label");
+    details_page.append(&type_label);
     let type_dd = DropDown::from_strings(&text::TYPE_LABELS);
+    type_dd.set_tooltip_text(Some("Choose the kind of problem you experienced"));
     details_page.append(&type_dd);
-    details_page.append(&para(
-        "Anything you want to add, in your own words (optional). Please do not paste passwords or private text: it is scrubbed like everything else, but you are the best judge.",
+    let notes_label = para("Anything else? (optional)");
+    notes_label.add_css_class("field-label");
+    details_page.append(&notes_label);
+    details_page.append(&muted(
+        "What were you doing, and what did you expect to happen?",
     ));
     let notes = TextView::new();
     notes.set_wrap_mode(WrapMode::WordChar);
-    notes.set_top_margin(6);
-    notes.set_bottom_margin(6);
-    notes.set_left_margin(8);
-    notes.set_right_margin(8);
+    notes.add_css_class("notes");
+    notes.set_tooltip_text(Some(
+        "Describe the problem in your own words. Do not include passwords or private text.",
+    ));
+    notes.set_top_margin(12);
+    notes.set_bottom_margin(12);
+    notes.set_left_margin(12);
+    notes.set_right_margin(12);
     let notes_scroll = ScrolledWindow::new();
     notes_scroll.set_child(Some(&notes));
     notes_scroll.set_vexpand(true);
     notes_scroll.set_min_content_height(120);
+    notes_scroll.add_css_class("notes-frame");
     details_page.append(&notes_scroll);
     let live_check = CheckButton::with_label(
         "Include a stack trace of the frozen app (function names and offsets only, no memory)",
     );
     live_check.set_visible(false);
     details_page.append(&live_check);
+    details_page.append(&notice("Please leave out passwords and private text. Personal details are scrubbed, and you can review the result next."));
     let (d_back, d_preview) = (
         Button::with_label("Back"),
         Button::with_label("Preview report"),
     );
-    d_preview.add_css_class("suggested-action");
-    let db = buttons();
-    db.append(&d_back);
-    db.append(&d_preview);
-    details_page.append(&db);
+    primary(&d_preview);
+    details_page.append(&actions(Some(&d_back), &[&d_preview]));
     stack.add_named(&details_page, Some("details"));
 
     // ------------------------------------------------------------ preview
     let preview_page = page();
-    preview_page.append(&heading("This is exactly what would be reported"));
+    preview_page.append(&heading("Review your report"));
     let summary = para("");
+    summary.add_css_class("muted");
     preview_page.append(&summary);
     let preview_holder = GBox::new(Orientation::Vertical, 0);
     preview_holder.set_vexpand(true);
-    preview_page.append(&preview_holder);
+    let preview_scroll = ScrolledWindow::new();
+    preview_scroll.set_child(Some(&preview_holder));
+    preview_scroll.set_vexpand(true);
+    preview_page.append(&preview_scroll);
     let status_line = para("");
     preview_page.append(&status_line);
     let (v_back, v_save, v_send, v_cancel) = (
@@ -231,13 +411,10 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
         Button::with_label("Send"),
         Button::with_label("Cancel"),
     );
-    v_send.add_css_class("suggested-action");
-    let vb = buttons();
-    vb.append(&v_back);
-    vb.append(&v_cancel);
-    vb.append(&v_save);
-    vb.append(&v_send);
-    preview_page.append(&vb);
+    v_save.set_sensitive(false);
+    v_send.set_sensitive(false);
+    primary(&v_send);
+    preview_page.append(&actions(Some(&v_back), &[&v_cancel, &v_save, &v_send]));
     stack.add_named(&preview_page, Some("preview"));
 
     // --------------------------------------------------------------- done
@@ -246,12 +423,50 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
     let done_body = para("");
     done_page.append(&done_title);
     done_page.append(&done_body);
+    done_page.append(&spacer());
     let d_close = Button::with_label("Close");
     d_close.set_halign(gtk4::Align::End);
-    done_page.append(&d_close);
+    primary(&d_close);
+    done_page.append(&actions(None, &[&d_close]));
     stack.add_named(&done_page, Some("done"));
 
-    window.set_child(Some(&stack));
+    window.set_child(Some(&root));
+
+    // Keep progress and the keyboard default in sync, including preselection.
+    {
+        let window = window.clone();
+        let defaults = [p_next.clone(), d_preview.clone(), v_save.clone()];
+        let consent = c_go.clone();
+        let close = d_close.clone();
+        stack.connect_visible_child_name_notify(move |stack| {
+            let name = stack.visible_child_name();
+            let index = match name.as_deref() {
+                Some("pick") => Some(0),
+                Some("details") => Some(1),
+                Some("preview") => Some(2),
+                _ => None,
+            };
+            for (i, step) in steps.iter().enumerate() {
+                step.set_visible(index.is_some());
+                if index == Some(i) {
+                    step.add_css_class("current");
+                } else {
+                    step.remove_css_class("current");
+                }
+            }
+            let default = index.map_or_else(
+                || {
+                    if name.as_deref() == Some("consent") {
+                        &consent
+                    } else {
+                        &close
+                    }
+                },
+                |i| &defaults[i],
+            );
+            window.set_default_widget(Some(default));
+        });
+    }
 
     // ------------------------------------------------------------ wiring
     {
@@ -296,10 +511,7 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
             let mut st = state.borrow_mut();
             st.app = Some(app.to_string());
             st.live_pid = session::live_stack_pid(&st.env, app);
-            title.set_markup(&format!(
-                "<span size='x-large' weight='bold'>{}</span>",
-                glib::markup_escape_text(&format!("Report a problem with {app}"))
-            ));
+            title.set_text(&format!("What went wrong with {}?", text::app_name(app)));
             dd.set_selected(text::index_of_type(session::default_type(&st.env, app)));
             notes.buffer().set_text("");
             live.set_active(false);
@@ -317,6 +529,20 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
         });
     }
     {
+        let enter = enter_details.clone();
+        let state = state.clone();
+        list.connect_row_activated(move |_, row| {
+            let app = state
+                .borrow()
+                .apps
+                .get(row.index() as usize)
+                .map(|e| e.app.clone());
+            if let Some(app) = app {
+                enter(&app);
+            }
+        });
+    }
+    {
         let st = stack.clone();
         d_back.connect_clicked(move |_| st.set_visible_child_name("pick"));
         let st = stack.clone();
@@ -327,11 +553,12 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
     {
         let (state, stack) = (state.clone(), stack.clone());
         let (dd, notes, live) = (type_dd.clone(), notes.clone(), live_check.clone());
-        let (summary, holder, status_line, send_btn, preview_btn) = (
+        let (summary, holder, status_line, send_btn, save_btn, preview_btn) = (
             summary.clone(),
             preview_holder.clone(),
             status_line.clone(),
             v_send.clone(),
+            v_save.clone(),
             d_preview.clone(),
         );
         d_preview.connect_clicked(move |_| {
@@ -344,15 +571,23 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
             let buf = notes.buffer();
             let note_text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
             let live_pid = if live.is_active() { pid } else { None };
+            state.borrow_mut().prepared = None;
+            save_btn.set_sensitive(false);
+            send_btn.set_sensitive(false);
+            summary.set_text("");
+            while let Some(child) = holder.first_child() {
+                holder.remove(&child);
+            }
             preview_btn.set_sensitive(false);
             preview_btn.set_label("Preparing…");
-            let (state, stack, summary, holder, status_line, send_btn, preview_btn) = (
+            let (state, stack, summary, holder, status_line, send_btn, save_btn, preview_btn) = (
                 state.clone(),
                 stack.clone(),
                 summary.clone(),
                 holder.clone(),
                 status_line.clone(),
                 send_btn.clone(),
+                save_btn.clone(),
                 preview_btn.clone(),
             );
             glib::spawn_future_local(async move {
@@ -368,23 +603,28 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
                     Ok(Ok(prepared)) => {
                         let r = &prepared.report;
                         summary.set_text(&format!(
-                            "{} report for {}. {:.1} KiB, sha256 {}. {} log lines, {} markers, {} events, {} journal lines.\n{} Nothing has been sent.",
+                            "{} · {} report · {:.1} KiB. Expand the full report to inspect every detail.",
+                            text::app_name(&r.app.id),
                             r.report_type.as_str(),
-                            r.app.id,
                             prepared.bytes.len() as f64 / 1024.0,
-                            &prepared.sha256[..16],
-                            r.logs.len(),
-                            r.markers.len(),
-                            r.events.len(),
-                            r.journal.len(),
-                            text::redaction_summary(&r.redactions),
                         ));
                         while let Some(c) = holder.first_child() {
                             holder.remove(&c);
                         }
-                        holder.append(&mono_view(&String::from_utf8_lossy(&prepared.bytes)));
+                        holder.append(&report_overview(&prepared));
                         let enabled = session::upload_enabled(&env).unwrap_or(false);
+                        save_btn.set_sensitive(true);
                         send_btn.set_sensitive(enabled);
+                        if enabled {
+                            send_btn.add_css_class("primary");
+                            send_btn.add_css_class("suggested-action");
+                            save_btn.remove_css_class("primary");
+                            save_btn.remove_css_class("suggested-action");
+                        } else {
+                            send_btn.remove_css_class("primary");
+                            send_btn.remove_css_class("suggested-action");
+                            primary(&save_btn);
+                        }
                         status_line.set_text(if enabled {
                             "Send uploads exactly this report. You will get a receipt you can use to delete it."
                         } else {
@@ -394,12 +634,15 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
                         stack.set_visible_child_name("preview");
                     }
                     Ok(Err(e)) => {
+                        summary.set_text("The report could not be prepared. Go back to try again.");
                         status_line.set_text(&format!("Could not build the report: {e}"));
                         stack.set_visible_child_name("preview");
                         send_btn.set_sensitive(false);
                     }
                     Err(_) => {
+                        summary.set_text("The report could not be prepared. Go back to try again.");
                         status_line.set_text("Building the report failed unexpectedly.");
+                        stack.set_visible_child_name("preview");
                     }
                 }
             });
@@ -522,6 +765,7 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
     }
     if first_run {
         stack.set_visible_child_name("consent");
+        window.set_default_widget(Some(&c_go));
     } else if let Some(app) = &preselected {
         enter_details(app);
     } else {

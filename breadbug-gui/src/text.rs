@@ -31,6 +31,37 @@ pub fn app_line(e: &AppEntry, now_ms: u64) -> String {
 
 pub const TYPE_LABELS: [&str; 3] = ["It crashed", "It froze", "It is behaving wrongly"];
 
+pub fn app_name(id: &str) -> String {
+    match id {
+        "bakery" => "bakery".into(),
+        "daemon" => "breadd".into(),
+        "crumbs" => "breadcrumbs".into(),
+        id if id.starts_with("bread") => id.into(),
+        id => format!("bread{id}"),
+    }
+}
+
+pub fn app_icon(id: &str) -> &'static str {
+    match id {
+        "clip" => "edit-paste-symbolic",
+        "pad" => "document-edit-symbolic",
+        "search" => "system-search-symbolic",
+        "lock" => "system-lock-screen-symbolic",
+        "shot" | "cast" => "camera-photo-symbolic",
+        "crumbs" => "network-wireless-symbolic",
+        "paper" => "preferences-desktop-wallpaper-symbolic",
+        _ => "application-x-executable-symbolic",
+    }
+}
+
+pub fn app_problem(e: &AppEntry, now_ms: u64) -> String {
+    match e.last_problem {
+        Some((MarkerKind::Freeze, t)) => format!("Froze {}", ago(now_ms, t)),
+        Some((_, t)) => format!("Crashed {}", ago(now_ms, t)),
+        None => "No recent crash or freeze recorded".into(),
+    }
+}
+
 pub fn type_from_index(i: u32) -> ReportType {
     match i {
         0 => ReportType::Crash,

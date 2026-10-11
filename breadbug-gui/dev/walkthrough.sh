@@ -29,7 +29,7 @@ XDG_RUNTIME_DIR="$T/runtime" gtk4-broadwayd --address 127.0.0.1 --port "$((8080 
 PIDS+=($!)
 sleep 1
 env -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
-    GDK_BACKEND=broadway BROADWAY_DISPLAY=":$N" GTK_USE_PORTAL=0 \
+    GDK_BACKEND=broadway BROADWAY_DISPLAY=":$N" GTK_USE_PORTAL=0 BREADBUG_WALKTHROUGH_CHECK_ERRORS=1 \
     HOME="$T/home" XDG_STATE_HOME="$T/state" XDG_CONFIG_HOME="$T/cfg" XDG_RUNTIME_DIR="$T/runtime" \
     dbus-run-session -- "$BIN" "$OUT" 2>&1 \
     | grep -v "portal\|dbus-daemon\|xdph\|^$"
