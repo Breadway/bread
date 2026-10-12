@@ -232,7 +232,10 @@ fn rules() -> &'static Rules {
                 r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
                 r"|(?i:\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,})",
             )),
-            url: re(r#"(?i)\b[a-z][a-z0-9+.-]{1,15}://[^\s"'<>`]+"#),
+            url: re(concat!(
+                r#"(?i)\b[a-z][a-z0-9+.-]{1,15}://(?:[^\s"'<>`]|"#,
+                r"<(?:HOME|USER|HOST|REDACTED|SECRET|CRED|QUERY|SSID|TITLE|SERIAL|EMAIL|MAC|UUID|IP|HEX|TOKEN|TRUNCATED)(?::(?:[0-9]+|\+))?>)+",
+            )),
             kv_secret: re(concat!(
                 r"(?i)\b(?P<key>[A-Za-z0-9_.-]*",
                 r"(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|apikey|auth(?:orization)?",
@@ -515,8 +518,16 @@ impl Scrubber {
     }
 
     fn pass(&mut self, input: &str) -> String {
-        let mut pieces = split_markers(input);
-        pieces = self.apply(pieces, Self::rule_urls);
+        // URLs are structural spans: existing markers inside credentials or
+        // queries must not shield adjacent personal data from this rule.
+        let urls: String = self
+            .rule_urls(input)
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Text(s) | Piece::Marker(s) => s,
+            })
+            .collect();
+        let mut pieces = split_markers(&urls);
         pieces = self.apply(pieces, Self::rule_secret_tokens);
         pieces = self.apply(pieces, Self::rule_kv_secret);
         pieces = self.apply(pieces, Self::rule_kv_free);

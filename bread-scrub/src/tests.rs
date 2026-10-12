@@ -302,3 +302,22 @@ fn ingest_markers_do_not_collide_with_report_notes() {
     assert_eq!(result["stored"], "<IP:1>");
     assert_eq!(result["notes"], "<IP:2>");
 }
+
+#[test]
+fn url_markers_do_not_shield_credentials_or_query_fields() {
+    for input in [
+        "https://bob:<SECRET>@example.com/x?account=alice",
+        "https://example.com/x?ip=<IP:1>&owner=alice",
+    ] {
+        let mut scrubber = Scrubber::new(ScrubContext::default());
+        let result = scrubber.scrub_text(input);
+        assert!(!result.contains("bob"), "{result}");
+        assert!(!result.contains("alice"), "{result}");
+        assert!(result.contains("?<QUERY>"), "{result}");
+        assert_eq!(scrubber.scrub_text(&result), result);
+        assert_eq!(
+            Scrubber::new(ScrubContext::default()).scrub_text(&result),
+            result
+        );
+    }
+}
