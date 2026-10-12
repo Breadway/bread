@@ -67,7 +67,12 @@ fn longer_dotted_numbers_are_not_ips() {
 fn rust_paths_are_not_ipv6() {
     let mut s = scrubber();
     let line = "at core::fmt::Write::write_fmt cafe::bad 12:34:56";
-    assert_eq!(s.scrub_text(line), line);
+    // Alphabetic hextets are valid IPv6. Ambiguous Rust paths deliberately
+    // err toward privacy, while unambiguous symbols remain readable.
+    assert_eq!(
+        s.scrub_text(line),
+        "at core::fmt::Write::write_fmt <IP:1> 12:34:56"
+    );
 }
 
 #[test]
@@ -215,15 +220,12 @@ fn event_patterns() {
 }
 
 #[test]
-fn unlisted_event_payload_is_dropped_keeping_only_safe_key_names() {
+fn unlisted_event_payload_drops_key_names_too() {
     let mut s = scrubber();
     let allow = EventAllowlist::new().allow("bread.power.**", &["battery_percent"]);
     let payload = json!({"title": "Inbox", "class": "firefox", "Weird Key": 1, "address": "0xabc"});
     let out = s.scrub_event_payload("bread.window.opened", &payload, &allow);
-    assert_eq!(
-        out,
-        json!({"_dropped": true, "_keys": ["address", "class", "title"]})
-    );
+    assert_eq!(out, json!({"_dropped": true, "_keys": []}));
 }
 
 #[test]
@@ -260,4 +262,43 @@ fn overflow_marker_after_cap() {
     }
     let m = s.numbered("IP", "99.99.99.99");
     assert_eq!(m, "<IP:+>");
+}
+
+#[test]
+fn review_privacy_regressions() {
+    let mut scrubber = Scrubber::new(ScrubContext::default());
+    for (input, secret) in [
+        ("connect dead:beef::abcd", "dead:beef::abcd"),
+        ("remote 2001:db8::1: connected", "2001:db8::1"),
+        ("AWS <AKIAIOSFODNN7EXAMPLE>", "AKIAIOSFODNN7EXAMPLE"),
+        (
+            "https://bob:ghp_16C7e42F292c6912E7710c838347Ae178B4a@example.com/x",
+            "bob",
+        ),
+    ] {
+        let result = scrubber.scrub_text(input);
+        assert!(!result.contains(secret), "{input} -> {result}");
+        assert_eq!(scrubber.scrub_text(&result), result);
+    }
+    let mut scrubber = Scrubber::new(ScrubContext {
+        hostname: Some("pi".into()),
+        ..ScrubContext::default()
+    });
+    assert!(!scrubber.scrub_text("host pi").contains("pi"));
+    let dropped = scrubber.scrub_event_payload(
+        "unknown",
+        &json!({"alicesmith": 1}),
+        &EventAllowlist::default(),
+    );
+    assert!(!dropped.to_string().contains("alicesmith"));
+}
+
+#[test]
+fn ingest_markers_do_not_collide_with_report_notes() {
+    let mut scrubber = Scrubber::new(ScrubContext::default());
+    let result = scrubber.scrub_value(&json!({
+        "notes": "198.51.100.7", "stored": "<IP:1>",
+    }));
+    assert_eq!(result["stored"], "<IP:1>");
+    assert_eq!(result["notes"], "<IP:2>");
 }
