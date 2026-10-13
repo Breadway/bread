@@ -1683,7 +1683,9 @@ async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
     let reader = bread_bug::store::Reader::open(harness.bugstore_root());
     assert!(reader.apps().contains(&"clip".to_string()));
 
-    harness.send_request("bug.wipe", json!({ "app": "clip" })).await?;
+    harness
+        .send_request("bug.wipe", json!({ "app": "clip" }))
+        .await?;
     assert!(!reader.apps().contains(&"clip".to_string()));
     assert!(reader.apps().contains(&"pad".to_string()));
 
