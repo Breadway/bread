@@ -11,7 +11,7 @@
 /// (commands) namespaces.
 pub const KNOWN_APPS: &[&str] = &[
     "clip", "pad", "bar", "box", "lock", "mon", "paper", "search", "shot", "arr", "crumbs", "help",
-    "bakery", "cast",
+    "bakery", "cast", "cloud",
 ];
 
 /// Daemon-internal domains that are reserved and can never be claimed as an
@@ -140,6 +140,7 @@ mod tests {
     fn known_apps_are_recognized() {
         assert!(is_known_app("clip"));
         assert!(is_known_app("bakery"));
+        assert!(is_known_app("cloud"));
     }
 
     #[test]

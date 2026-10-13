@@ -1,6 +1,6 @@
-mod init;
 mod hooks_git;
 mod hooks_shell;
+mod init;
 mod modules_mgmt;
 
 use anyhow::Result;
@@ -286,29 +286,17 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
 
         ModulesCommand::List => {
             let modules = modules_mgmt::list_modules(&mods_dir)?;
-            // Try to get daemon module status
-            let daemon_statuses = match send_request(socket, "modules.list", json!({})).await {
-                Ok(resp) => resp
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter_map(|v| {
-                        let name = v.get("name").and_then(Value::as_str)?.to_string();
-                        let status = v.get("status").and_then(Value::as_str)?.to_string();
-                        Some((name, status))
-                    })
-                    .collect::<std::collections::HashMap<_, _>>(),
-                Err(_) => std::collections::HashMap::new(),
-            };
-            for m in &modules {
-                let status = daemon_statuses
-                    .get(&m.name)
-                    .map(String::as_str)
-                    .unwrap_or("unknown");
+            // The daemon knows about built-in modules as well as modules
+            // installed under the user's config directory. Use that live list
+            // as the source of rows, then retain local installs absent from
+            // the daemon response so they remain visible as unknown.
+            let daemon_modules = send_request(socket, "modules.list", json!({}))
+                .await
+                .unwrap_or_else(|_| json!([]));
+            for row in module_list_rows(modules, &daemon_modules) {
                 println!(
                     "  {:20} {:10} {:10} {}",
-                    m.name, m.version, status, m.source
+                    row.name, row.version, row.status, row.source
                 );
             }
         }
@@ -386,6 +374,160 @@ async fn handle_modules_cmd(cmd: ModulesCommand, socket: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ModuleListRow {
+    name: String,
+    version: String,
+    status: String,
+    source: String,
+}
+
+fn module_list_rows(
+    installed: Vec<modules_mgmt::ModuleManifest>,
+    daemon_modules: &Value,
+) -> Vec<ModuleListRow> {
+    let mut installed_by_name: HashMap<_, _> = installed
+        .into_iter()
+        .map(|module| (module.name.clone(), module))
+        .collect();
+    let mut rows = Vec::new();
+
+    if let Some(modules) = daemon_modules.as_array() {
+        for module in modules {
+            let Some(name) = module.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let status = module
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            if let Some(manifest) = installed_by_name.remove(name) {
+                rows.push(ModuleListRow {
+                    name: manifest.name,
+                    version: manifest.version,
+                    status,
+                    source: manifest.source,
+                });
+            } else {
+                let source = if module
+                    .get("builtin")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    "builtin"
+                } else {
+                    "daemon"
+                };
+                rows.push(ModuleListRow {
+                    name: name.to_string(),
+                    version: "-".to_string(),
+                    status,
+                    source: source.to_string(),
+                });
+            }
+        }
+    }
+
+    rows.extend(
+        installed_by_name
+            .into_values()
+            .map(|manifest| ModuleListRow {
+                name: manifest.name,
+                version: manifest.version,
+                status: "unknown".to_string(),
+                source: manifest.source,
+            }),
+    );
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
+
+#[cfg(test)]
+mod module_list_tests {
+    use super::*;
+
+    fn manifest(name: &str, source: &str) -> modules_mgmt::ModuleManifest {
+        modules_mgmt::ModuleManifest {
+            name: name.to_string(),
+            version: "1.2.3".to_string(),
+            description: String::new(),
+            author: String::new(),
+            source: source.to_string(),
+            installed_at: String::new(),
+            permissions: None,
+        }
+    }
+
+    #[test]
+    fn lists_daemon_modules_without_local_manifests() {
+        let daemon = json!([
+            {"name": "builtin-module", "status": "loaded", "builtin": true},
+            {"name": "external-module", "status": "degraded", "builtin": false}
+        ]);
+
+        let rows = module_list_rows(Vec::new(), &daemon);
+
+        assert_eq!(
+            rows,
+            vec![
+                ModuleListRow {
+                    name: "builtin-module".to_string(),
+                    version: "-".to_string(),
+                    status: "loaded".to_string(),
+                    source: "builtin".to_string(),
+                },
+                ModuleListRow {
+                    name: "external-module".to_string(),
+                    version: "-".to_string(),
+                    status: "degraded".to_string(),
+                    source: "daemon".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn combines_installed_metadata_with_daemon_status_and_keeps_unloaded_installs() {
+        let daemon = json!([
+            {"name": "installed", "status": "loaded", "builtin": false},
+            {"name": "builtin", "status": "loaded", "builtin": true}
+        ]);
+
+        let rows = module_list_rows(
+            vec![
+                manifest("installed", "local"),
+                manifest("unloaded", "local"),
+            ],
+            &daemon,
+        );
+
+        assert_eq!(
+            rows,
+            vec![
+                ModuleListRow {
+                    name: "builtin".to_string(),
+                    version: "-".to_string(),
+                    status: "loaded".to_string(),
+                    source: "builtin".to_string(),
+                },
+                ModuleListRow {
+                    name: "installed".to_string(),
+                    version: "1.2.3".to_string(),
+                    status: "loaded".to_string(),
+                    source: "local".to_string(),
+                },
+                ModuleListRow {
+                    name: "unloaded".to_string(),
+                    version: "1.2.3".to_string(),
+                    status: "unknown".to_string(),
+                    source: "local".to_string(),
+                },
+            ]
+        );
+    }
 }
 
 fn install_module(
