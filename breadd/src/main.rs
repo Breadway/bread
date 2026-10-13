@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
     let adapter_status = adapter_manager.status_handle();
 
     if let Some(store) = bug_store.clone() {
+        bugstore::spawn_journal_recorder(store.clone(), shutdown_rx.clone());
         bugstore::spawn_event_recorder(store, event_stream_tx.subscribe());
     }
 
