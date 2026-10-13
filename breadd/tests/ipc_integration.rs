@@ -1553,6 +1553,33 @@ async fn poll_workflow_status(
 }
 
 #[tokio::test]
+async fn bug_store_survives_module_reload_and_reports_health() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request("bug.log", json!({"app": "clip", "msg": "before reload"}))
+        .await?;
+    harness.send_request("modules.reload", json!({})).await?;
+    harness
+        .send_request("bug.log", json!({"app": "clip", "msg": "after reload"}))
+        .await?;
+    let health = harness.send_request("health", json!({})).await?;
+    assert_eq!(health["bugstore"]["available"], json!(true));
+    let snapshot =
+        bread_bug::store::Reader::open(harness.bugstore_root()).snapshot("clip", 10, 0)?;
+    assert_eq!(
+        snapshot
+            .logs
+            .iter()
+            .map(|log| log.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["before reload", "after reload"]
+    );
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn bug_log_is_scrubbed_before_it_reaches_disk() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
