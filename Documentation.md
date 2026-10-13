@@ -1045,6 +1045,12 @@ into the Lua call and retries through `eval`:
 Anything else raises an error that names the unsupported command; use the Lua
 form or `eval` for it.
 
+`keyword "bind"`, `"binde"`, `"bindl"` and `"unbind"` read `binds -j` back after
+Hyprland accepts the change and raise an error if the bind is not listed (or,
+for `unbind`, is still listed). `keyword "monitor"` checks `monitors all -j`
+first and raises an error, without changing anything, when the named output
+does not exist.
+
 ```lua
 -- Dispatch: pass a Lua dispatcher expression as the only argument.
 bread.hyprland.dispatch("hl.dsp.focus({ workspace = '2' })")

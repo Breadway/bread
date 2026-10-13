@@ -65,13 +65,21 @@ where
 
 /// Run a legacy-style `keyword <key> <value>`, falling back to the equivalent
 /// `hl.config` / `hl.monitor` / `hl.bind` / `hl.unbind` call through `eval`.
+///
+/// An `ok` reply is not trusted on its own for binds, unbinds and monitors:
+/// the result is read back over the same socket (`binds -j`, `monitors all -j`)
+/// and an error is returned when the state does not match.
 pub(super) fn keyword<F>(mut send: F, key: &str, value: &str) -> Result<()>
 where
     F: FnMut(&str) -> Result<String>,
 {
+    if key == "monitor" {
+        require_output(&mut send, value)?;
+    }
+
     let reply = send(&format!("keyword {key} {value}"))?;
     if is_ok(&reply) {
-        return Ok(());
+        return confirm_keyword(&mut send, key, value);
     }
 
     let stmt = match legacy_keyword_to_lua(key, value) {
@@ -83,13 +91,107 @@ where
     };
     let lua_reply = send(&format!("eval {stmt}"))?;
     if is_ok(&lua_reply) {
-        return Ok(());
+        return confirm_keyword(&mut send, key, value);
     }
     Err(anyhow!(
         "hyprland rejected `keyword {key} {value}`: {} (eval fallback: {})",
         reply.trim(),
         lua_reply.trim()
     ))
+}
+
+/// Read back Hyprland state after a bind, unbind or monitor keyword was
+/// accepted. `j/...` is the socket form of `hyprctl <cmd> -j`.
+fn confirm_keyword<F>(send: &mut F, key: &str, value: &str) -> Result<()>
+where
+    F: FnMut(&str) -> Result<String>,
+{
+    match key {
+        "bind" | "binde" | "bindl" => {
+            let (mods, k) = split_bind_head(value)?;
+            let binds = read_json(send, "j/binds")?;
+            if has_bind(&binds, modmask(&mods)?, &k) {
+                return Ok(());
+            }
+            bail!(
+                "hyprland accepted `keyword {key} {value}` but `binds -j` does not list `{}`",
+                bind_key(&mods, &k)
+            )
+        }
+        "unbind" => {
+            let (mods, k) = split_bind_head(value)?;
+            let binds = read_json(send, "j/binds")?;
+            if !has_bind(&binds, modmask(&mods)?, &k) {
+                return Ok(());
+            }
+            bail!(
+                "hyprland accepted `keyword unbind {value}` but `binds -j` still lists `{}`",
+                bind_key(&mods, &k)
+            )
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Refuse `keyword monitor` for an output that `monitors all -j` does not list,
+/// because Hyprland answers `ok` for an eval that creates nothing.
+fn require_output<F>(send: &mut F, value: &str) -> Result<()>
+where
+    F: FnMut(&str) -> Result<String>,
+{
+    let name = value.split(',').next().unwrap_or("").trim();
+    let monitors = read_json(send, "j/monitors all")?;
+    let present = monitors
+        .as_array()
+        .is_some_and(|list| list.iter().any(|m| m["name"].as_str() == Some(name)));
+    if present {
+        Ok(())
+    } else {
+        bail!("keyword monitor: no output named `{name}` (monitors all -j); nothing was changed")
+    }
+}
+
+fn read_json<F>(send: &mut F, request: &str) -> Result<serde_json::Value>
+where
+    F: FnMut(&str) -> Result<String>,
+{
+    let reply = send(request)?;
+    serde_json::from_str(&reply).map_err(|e| {
+        anyhow!(
+            "hyprland replied to `{request}` with something other than JSON ({e}): {}",
+            reply.trim()
+        )
+    })
+}
+
+/// True when `binds -j` lists `key` with the given modifier mask.
+fn has_bind(binds: &serde_json::Value, mask: u32, key: &str) -> bool {
+    binds.as_array().is_some_and(|list| {
+        list.iter().any(|b| {
+            b["key"]
+                .as_str()
+                .is_some_and(|k| k.eq_ignore_ascii_case(key))
+                && b["modmask"].as_u64() == Some(u64::from(mask))
+        })
+    })
+}
+
+/// Hyprland's `modmask` bits for the modifier names bind lines use.
+fn modmask(mods: &[String]) -> Result<u32> {
+    mods.iter().try_fold(0u32, |acc, m| {
+        let bit = match m.to_ascii_uppercase().as_str() {
+            "SHIFT" => 1,
+            "CAPS" => 2,
+            "CTRL" | "CONTROL" => 4,
+            "ALT" | "MOD1" => 8,
+            "MOD2" => 16,
+            "MOD3" => 32,
+            "SUPER" | "WIN" | "LOGO" | "MOD4" => 64,
+            "MOD5" => 128,
+            other => bail!("cannot verify bind: unknown modifier `{other}`"),
+        };
+        Ok(acc | bit)
+    })
 }
 
 fn join_cmd(cmd: &str, args: &str) -> String {
@@ -698,5 +800,139 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("socket gone"));
+    }
+
+    const F9_BIND: &str = r#"[{"key":"F9","modmask":0,"dispatcher":"__lua"}]"#;
+    const SUPER_Q_BIND: &str = r#"[{"key":"Q","modmask":64,"dispatcher":"__lua"}]"#;
+
+    fn run_keyword(
+        replies: Vec<&'static str>,
+        key: &str,
+        value: &str,
+    ) -> (Result<()>, Vec<String>) {
+        let (seen, replies) = fake(replies);
+        let res = keyword(
+            |req| {
+                seen.borrow_mut().push(req.to_string());
+                Ok(replies.borrow_mut().pop().unwrap().to_string())
+            },
+            key,
+            value,
+        );
+        let requests = seen.borrow().clone();
+        (res, requests)
+    }
+
+    #[test]
+    fn bind_refused_then_eval_ok_is_confirmed_by_binds_json() {
+        let (res, seen) = run_keyword(
+            vec![
+                "keyword can't work with non-legacy parsers. Use eval.",
+                "ok",
+                F9_BIND,
+            ],
+            "bind",
+            ", F9, exec, touch /tmp/x",
+        );
+        res.unwrap();
+        assert_eq!(seen.last().unwrap(), "j/binds");
+    }
+
+    #[test]
+    fn bind_eval_ok_but_missing_from_binds_is_an_error() {
+        let (res, _) = run_keyword(
+            vec![
+                "keyword can't work with non-legacy parsers. Use eval.",
+                "ok",
+                "[]",
+            ],
+            "bind",
+            ", F9, exec, touch /tmp/x",
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("binds -j"), "{err}");
+        assert!(err.contains("F9"), "{err}");
+    }
+
+    #[test]
+    fn bind_listed_with_wrong_modifiers_is_an_error() {
+        let (res, _) = run_keyword(vec!["ok", SUPER_Q_BIND], "bind", ", Q, exec, kitty");
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn bind_accepted_by_legacy_is_still_read_back() {
+        let (res, seen) = run_keyword(vec!["ok", "[]"], "bind", "SUPER, Q, exec, kitty");
+        assert!(res.is_err());
+        assert_eq!(seen, vec!["keyword bind SUPER, Q, exec, kitty", "j/binds"]);
+    }
+
+    #[test]
+    fn bind_read_back_non_json_is_an_error() {
+        let (res, _) = run_keyword(vec!["ok", "not json"], "bind", ", F9, exec, x");
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("JSON"), "{err}");
+    }
+
+    #[test]
+    fn bind_eval_refused_reports_both_replies_without_reading_back() {
+        let (res, seen) = run_keyword(
+            vec!["refused legacy", "eval exploded"],
+            "bind",
+            ", F9, exec, x",
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("eval exploded"), "{err}");
+        assert_eq!(seen.len(), 2);
+    }
+
+    #[test]
+    fn unbind_removed_passes_read_back() {
+        let (res, seen) = run_keyword(vec!["ok", "[]"], "unbind", ", F9");
+        res.unwrap();
+        assert_eq!(seen.last().unwrap(), "j/binds");
+    }
+
+    #[test]
+    fn unbind_still_listed_is_an_error() {
+        let (res, _) = run_keyword(
+            vec![
+                "keyword can't work with non-legacy parsers. Use eval.",
+                "ok",
+                F9_BIND,
+            ],
+            "unbind",
+            ", F9",
+        );
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("still lists"), "{err}");
+    }
+
+    const MONITORS: &str = r#"[{"name":"Virtual-1","width":1280},{"name":"TEST-1","width":1920}]"#;
+
+    #[test]
+    fn monitor_for_missing_output_is_refused_before_any_change() {
+        let (res, seen) = run_keyword(vec![MONITORS], "monitor", "NOPE-9,preferred,auto,1");
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("NOPE-9"), "{err}");
+        assert_eq!(seen, vec!["j/monitors all"]);
+    }
+
+    #[test]
+    fn monitor_present_output_is_applied_and_checked() {
+        let (res, seen) = run_keyword(vec![MONITORS, "ok"], "monitor", "TEST-1,preferred,auto,1");
+        res.unwrap();
+        assert_eq!(
+            seen,
+            vec!["j/monitors all", "keyword monitor TEST-1,preferred,auto,1"]
+        );
+    }
+
+    #[test]
+    fn monitor_output_list_that_is_not_json_is_an_error() {
+        let (res, seen) = run_keyword(vec!["garbage"], "monitor", "TEST-1,preferred,auto,1");
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("JSON"), "{err}");
+        assert_eq!(seen, vec!["j/monitors all"]);
     }
 }
