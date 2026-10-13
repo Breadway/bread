@@ -203,6 +203,20 @@ fn failed_eviction_does_not_allow_append() {
         .unwrap();
     s.append_log("clip", "info", "seed", 2).unwrap();
     let app = dir.path().join("apps/pad");
+    // Filesystem timestamp resolution can tie consecutive writes. Establish
+    // the unwritable pad file as the oldest victim, without relying on sleep.
+    let pad_file = app.join("log.jsonl");
+    fs::File::open(&pad_file)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    assert!(
+        fs::metadata(&pad_file).unwrap().modified().unwrap()
+            < fs::metadata(dir.path().join("apps/clip/log.jsonl"))
+                .unwrap()
+                .modified()
+                .unwrap()
+    );
     fs::set_permissions(&app, fs::Permissions::from_mode(0o500)).unwrap();
     let result = s.append_log("clip", "info", &"boring message ".repeat(30), 3);
     fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).unwrap();
