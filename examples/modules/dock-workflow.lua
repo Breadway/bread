@@ -17,8 +17,7 @@ local M = bread.module({ name = "dock-workflow", version = "1.0.0" })
 
 bread.workflow.define("dock-connected", function()
     bread.workflow.step("applying layout")
-    bread.hyprland.eval(
-        "hl.monitor({ output = 'HDMI-A-1', mode = 'preferred', position = '1920x0', scale = '1' })")
+    bread.hyprland.keyword("monitor", "HDMI-A-1,preferred,1920x0,1")
 
     bread.workflow.step("waiting for monitor")
     local event = bread.wait_any(
