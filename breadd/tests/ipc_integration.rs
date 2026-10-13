@@ -1553,6 +1553,48 @@ async fn poll_workflow_status(
 }
 
 #[tokio::test]
+async fn bug_store_survives_daemon_restart_without_marker_collisions() -> Result<()> {
+    let mut harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request(
+            "bug.log",
+            json!({"app": "clip", "msg": "remote 203.0.113.42"}),
+        )
+        .await?;
+    harness.child.kill()?;
+    harness.child.wait()?;
+    let _ = fs::remove_file(harness.socket_path());
+    harness.child = Command::new(env!("CARGO_BIN_EXE_breadd"))
+        .env("XDG_RUNTIME_DIR", harness._temp.path().join("runtime"))
+        .env("XDG_CONFIG_HOME", harness._temp.path().join("config"))
+        .env("HOME", harness._temp.path().join("home"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request(
+            "bug.log",
+            json!({"app": "clip", "msg": "remote 198.51.100.8"}),
+        )
+        .await?;
+    let snapshot =
+        bread_bug::store::Reader::open(harness.bugstore_root()).snapshot("clip", 10, 0)?;
+    assert_eq!(
+        snapshot
+            .logs
+            .iter()
+            .map(|log| log.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["remote <IP:1>", "remote <IP:2>"]
+    );
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn bug_store_survives_module_reload_and_reports_health() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
