@@ -4,6 +4,36 @@ use crate::store::Store;
 
 const BID: &str = "3f2a9c1de4b5a6978081726354453423a1b2c3d4";
 
+#[test]
+fn reopened_store_markers_and_report_notes_remain_distinct() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), &BugConfig::default(), ctx()).unwrap();
+        store
+            .append_log("clip", "info", "remote 203.0.113.42", 10)
+            .unwrap();
+    }
+    {
+        let store = Store::open(dir.path(), &BugConfig::default(), ctx()).unwrap();
+        store
+            .append_log("clip", "info", "remote 198.51.100.8", 11)
+            .unwrap();
+    }
+    let mut options = opts(dir.path());
+    options.notes =
+        Some("remote 192.0.2.9 https://bob:<SECRET>@example.com/x?account=alice".into());
+    let prepared = build(&options).unwrap();
+    assert_eq!(prepared.report.logs.len(), 2);
+    assert_eq!(prepared.report.logs[0].msg, "remote <IP:1>");
+    assert_eq!(prepared.report.logs[1].msg, "remote <IP:2>");
+    let notes = prepared.report.notes.as_ref().unwrap();
+    assert_eq!(notes, "remote <IP:3> https://<CRED>@example.com/x?<QUERY>");
+    for secret in ["203.0.113.42", "198.51.100.8", "192.0.2.9", "bob", "alice"] {
+        assert!(!String::from_utf8_lossy(&prepared.bytes).contains(secret));
+    }
+    assert!(prepared.verify());
+}
+
 fn ctx() -> ScrubContext {
     ScrubContext {
         home: Some("/home/alicesmith".into()),
