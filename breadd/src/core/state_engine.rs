@@ -935,7 +935,10 @@ mod tests {
         );
         apply_event_to_state(
             &mut state,
-            &ev("bread.hyprland.workspace.created", json!({"workspace": "9"})),
+            &ev(
+                "bread.hyprland.workspace.created",
+                json!({"workspace": "9"}),
+            ),
         );
         assert_eq!(state.monitors.len(), 1);
         assert_eq!(state.monitors[0].name, "HDMI-A-1");

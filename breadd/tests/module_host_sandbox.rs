@@ -20,6 +20,8 @@
 //!    itself and a second, unrelated module both keep responding, and that
 //!    `breadd` detects the death and reports it via `bread.module.crashed`.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -32,17 +34,25 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
 
-// NOTE: these tests need `target/{debug,release}/bread-module-host` to
-// already exist: `breadd::module_host::resolve_module_host_binary` looks
-// for it as a sibling of `breadd`'s own executable. `bread-module-host` is
-// a bin-only crate (no `[lib]` target, deliberately, see its Cargo.toml),
-// so it can't be pulled in as a `[dev-dependencies]` entry to force cargo
-// to build it via `env!("CARGO_BIN_EXE_...")`, the usual trick for this.
-// Running via `cargo test --workspace` (this repo's documented/required
-// verification command, see Documentation.md) builds every workspace
-// member, including `bread-module-host`, before any test runs, so this
-// isn't a problem in practice; running `cargo test -p breadd` in isolation
-// without a prior `cargo build --workspace` would need one first.
+// NOTE: these tests need a real `bread-module-host` binary to spawn:
+// `breadd::module_host::resolve_module_host_binary` looks for one, and
+// `bread-module-host` is a bin-only crate (no `[lib]` target, deliberately,
+// see its Cargo.toml), so it can't be pulled in as a `[dev-dependencies]`
+// entry to force cargo to build it via `env!("CARGO_BIN_EXE_...")`, the
+// usual trick for this. This file used to just assume `cargo test
+// --workspace` had already built it and left it discoverable next to
+// `breadd`'s own executable; that assumption was wrong (proved in
+// `ipc_integration.rs`'s history: `cargo test --workspace` does not, on its
+// own, force cargo to link a bin-only crate with nothing referencing its
+// `CARGO_BIN_EXE_*` var), and silently falling through to a bare `PATH`
+// lookup could pick up an unrelated, separately **installed**
+// `~/.local/bin/bread-module-host` instead. `common::ensure_module_host_built`
+// builds it explicitly and returns the exact path cargo produced (via
+// `cargo build -p bread-module-host --message-format=json`, not a guessed
+// `target/{debug,release}` location), and every `breadd` this file spawns
+// gets that path pinned through the `common::BREAD_MODULE_HOST_BIN_ENV`
+// override, so resolution never falls back to guessing or `PATH` here
+// either.
 
 struct TestHarness {
     _temp: TempDir,
@@ -58,6 +68,7 @@ impl TestHarness {
     /// the same on-disk shape `bread modules install` produces
     /// (`<modules_dir>/<name>/{bread.module.toml,init.lua}`).
     fn spawn_with_modules(modules: &[(&str, &str, &str)]) -> Result<Self> {
+        let module_host_bin = common::ensure_module_host_built();
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -117,6 +128,7 @@ enabled = false
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env("XDG_CONFIG_HOME", &config_home)
             .env("HOME", &home)
+            .env(common::BREAD_MODULE_HOST_BIN_ENV, &module_host_bin)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -175,7 +187,9 @@ enabled = false
             }
             sleep(Duration::from_millis(100)).await;
         }
-        Err(anyhow!("module '{name}' did not reach Loaded within timeout"))
+        Err(anyhow!(
+            "module '{name}' did not reach Loaded within timeout"
+        ))
     }
 
     async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
@@ -409,9 +423,18 @@ return M
         .get("data")
         .ok_or_else(|| anyhow!("event missing data"))?;
 
-    let allowed_result = data.get("allowed_result").and_then(Value::as_str).unwrap_or("");
-    let denied_result = data.get("denied_result").and_then(Value::as_str).unwrap_or("");
-    let exec_result = data.get("exec_result").and_then(Value::as_str).unwrap_or("");
+    let allowed_result = data
+        .get("allowed_result")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let denied_result = data
+        .get("denied_result")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let exec_result = data
+        .get("exec_result")
+        .and_then(Value::as_str)
+        .unwrap_or("");
 
     assert!(
         allowed_result.starts_with("ALLOWED_READ_OK"),
@@ -487,8 +510,13 @@ return M
     let _ack = crash_reader.next_line().await?;
 
     let victim_pid = harness.find_module_host_pid("victim")?;
-    let kill_status = Command::new("kill").args(["-9", &victim_pid.to_string()]).status()?;
-    assert!(kill_status.success(), "failed to send SIGKILL to victim module-host");
+    let kill_status = Command::new("kill")
+        .args(["-9", &victim_pid.to_string()])
+        .status()?;
+    assert!(
+        kill_status.success(),
+        "failed to send SIGKILL to victim module-host"
+    );
 
     // breadd itself must keep responding.
     let ping = harness.send_request("ping", json!({})).await?;

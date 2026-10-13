@@ -114,7 +114,10 @@ fn remove_rejects_path_traversal_name() {
 
     let result = modules_mgmt::remove_module("../victim-dir", modules_tmp.path());
     assert!(result.is_err(), "path traversal name must be rejected");
-    assert!(victim.join("keepme.txt").exists(), "victim dir must survive");
+    assert!(
+        victim.join("keepme.txt").exists(),
+        "victim dir must survive"
+    );
 
     let _ = fs::remove_dir_all(&victim);
 }
@@ -152,8 +155,7 @@ installed_at = ""
     fs::write(src_tmp.path().join("bread.module.toml"), manifest).unwrap();
     fs::write(src_tmp.path().join("init.lua"), "-- evil\n").unwrap();
 
-    let result =
-        modules_mgmt::install_from_local(src_tmp.path(), "test:evil", modules_tmp.path());
+    let result = modules_mgmt::install_from_local(src_tmp.path(), "test:evil", modules_tmp.path());
     assert!(
         result.is_err(),
         "install must reject a manifest name containing path traversal"
