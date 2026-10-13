@@ -2,6 +2,29 @@ use super::*;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn reopened_store_reserves_markers_across_apps_and_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = open(dir.path(), StoreLimits::default(), &[]);
+        store
+            .append_log("clip", "info", "remote 203.0.113.42", 10)
+            .unwrap();
+        store
+            .append_log(DAEMON_APP, "warn", "remote 198.51.100.8", 11)
+            .unwrap();
+    }
+    let clip = dir.path().join("apps/clip");
+    fs::rename(clip.join(LOG_FILE), clip.join(format!("{LOG_FILE}.1"))).unwrap();
+    let store = open(dir.path(), StoreLimits::default(), &[]);
+    store
+        .append_log("clip", "info", "remote 192.0.2.9", 12)
+        .unwrap();
+    let snapshot = Reader::open(dir.path()).snapshot("clip", 10, 0).unwrap();
+    assert_eq!(snapshot.logs[0].msg, "remote <IP:1>");
+    assert_eq!(snapshot.logs[1].msg, "remote <IP:3>");
+}
+
 fn ctx() -> ScrubContext {
     ScrubContext {
         home: Some("/home/alicesmith".into()),
