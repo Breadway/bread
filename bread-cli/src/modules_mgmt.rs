@@ -300,7 +300,10 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 /// classify each into a permission, accumulating into `found` (keyed by
 /// kind, so repeated call sites for the same permission collapse to one
 /// suggestion: first-seen scoping hint wins).
-fn scan_lua_source(src: &str, found: &mut std::collections::BTreeMap<PermissionKind, ModulePermission>) {
+fn scan_lua_source(
+    src: &str,
+    found: &mut std::collections::BTreeMap<PermissionKind, ModulePermission>,
+) {
     const NEEDLE: &str = "bread.";
     let mut cursor = 0usize;
     while let Some(rel) = src[cursor..].find(NEEDLE) {
@@ -324,7 +327,11 @@ fn classify_call_site(
     found: &mut std::collections::BTreeMap<PermissionKind, ModulePermission>,
 ) {
     let (kind, bin, path): (PermissionKind, Option<String>, Option<String>) = match ident {
-        "fs.write" => (PermissionKind::FsWrite, None, extract_first_string_arg(tail)),
+        "fs.write" => (
+            PermissionKind::FsWrite,
+            None,
+            extract_first_string_arg(tail),
+        ),
         "fs.read" | "fs.exists" | "fs.readlink" | "fs.expand" => {
             (PermissionKind::FsRead, None, extract_first_string_arg(tail))
         }
@@ -335,10 +342,16 @@ fn classify_call_site(
         }
         "notify" => (PermissionKind::Notify, None, None),
         "profile.activate" => (PermissionKind::ProfileActivate, None, None),
-        "state.watch" => (PermissionKind::StateWatch, None, extract_first_string_arg(tail)),
-        other if other == "state" || other.starts_with("state.") => {
-            (PermissionKind::StateRead, None, extract_first_string_arg(tail))
-        }
+        "state.watch" => (
+            PermissionKind::StateWatch,
+            None,
+            extract_first_string_arg(tail),
+        ),
+        other if other == "state" || other.starts_with("state.") => (
+            PermissionKind::StateRead,
+            None,
+            extract_first_string_arg(tail),
+        ),
         other if other == "machine" || other.starts_with("machine.") => {
             (PermissionKind::Machine, None, None)
         }
@@ -411,8 +424,14 @@ mod audit_tests {
         assert!(!kinds.contains(&PermissionKind::Exec));
         assert!(!kinds.contains(&PermissionKind::Bluetooth));
 
-        let fs_perm = perms.iter().find(|p| p.kind == PermissionKind::FsRead).unwrap();
-        assert_eq!(fs_perm.path.as_deref(), Some("/sys/class/hwmon/hwmon6/temp1_input"));
+        let fs_perm = perms
+            .iter()
+            .find(|p| p.kind == PermissionKind::FsRead)
+            .unwrap();
+        assert_eq!(
+            fs_perm.path.as_deref(),
+            Some("/sys/class/hwmon/hwmon6/temp1_input")
+        );
     }
 
     #[test]

@@ -412,12 +412,8 @@ mod tests {
 
     #[test]
     fn bread_event_with_timestamp_preserves_timestamp_and_assigns_id() {
-        let event = BreadEvent::with_timestamp(
-            "bread.test.c",
-            42,
-            AdapterSource::Udev,
-            json!({ "x": 1 }),
-        );
+        let event =
+            BreadEvent::with_timestamp("bread.test.c", 42, AdapterSource::Udev, json!({ "x": 1 }));
         assert_eq!(event.timestamp, 42);
         assert!(!event.id.is_empty());
         assert_eq!(event.caused_by, None);

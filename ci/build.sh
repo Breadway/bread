@@ -11,11 +11,29 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REV="$(cat "${ROOT}/ci/bread-ecosystem.rev")"
 
-CACHE_DIR="/tmp/bread-ecosystem-ci-${REV}"
-if [ ! -d "$CACHE_DIR" ]; then
-    rm -rf /tmp/bread-ecosystem-ci-*
-    git clone https://git.breadway.dev/Breadway/bread-ecosystem.git "$CACHE_DIR"
-    git -C "$CACHE_DIR" checkout --quiet "$REV"
+CACHE_ROOT="${BREAD_CI_CACHE_ROOT:-/tmp/bread-ci-cache}"
+CACHE_DIR="${CACHE_ROOT}/${REV}"
+mkdir -p "$CACHE_ROOT"
+
+# A clone is invisible to other jobs until its pinned checkout is complete.
+# Keep the cache outside the old bread-ecosystem-ci-* prefix so older release
+# jobs cannot remove it while this job is building.
+exec {CACHE_LOCK_FD}>"${CACHE_ROOT}/${REV}.lock"
+flock "$CACHE_LOCK_FD"
+if [ ! -e "$CACHE_DIR" ]; then
+    CACHE_TMP="$(mktemp -d "${CACHE_ROOT}/checkout.XXXXXXXX")"
+    trap 'rm -rf -- "$CACHE_TMP"' EXIT
+    git clone https://git.breadway.dev/Breadway/bread-ecosystem.git "$CACHE_TMP"
+    git -C "$CACHE_TMP" checkout --quiet "$REV"
+    mv -- "$CACHE_TMP" "$CACHE_DIR"
+    trap - EXIT
 fi
+
+if [ "$(git -C "$CACHE_DIR" rev-parse HEAD)" != "$REV" ]; then
+    echo "CI cache at $CACHE_DIR does not match pinned revision $REV" >&2
+    exit 1
+fi
+flock -u "$CACHE_LOCK_FD"
+exec {CACHE_LOCK_FD}>&-
 
 bash "${CACHE_DIR}/ci/build.sh" bread "$ROOT" "$@"

@@ -120,18 +120,27 @@ impl Server {
         }
     }
 
-    pub async fn serve(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
-        if let Some(parent) = self.socket_path.parent() {
+    /// Bind before starting the Lua runtime: module hosts connect immediately
+    /// during initial module loading and must never race socket creation.
+    pub fn bind(socket_path: &std::path::Path) -> Result<UnixListener> {
+        if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        if self.socket_path.exists() {
-            fs::remove_file(&self.socket_path)?;
+        if socket_path.exists() {
+            fs::remove_file(socket_path)?;
         }
 
-        let listener = UnixListener::bind(&self.socket_path)?;
-        fs::set_permissions(&self.socket_path, fs::Permissions::from_mode(0o600))?;
+        let listener = UnixListener::bind(socket_path)?;
+        fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+        Ok(listener)
+    }
 
+    pub async fn serve(
+        &self,
+        listener: UnixListener,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         info!(socket = %self.socket_path.display(), "ipc server listening");
 
         // Emit the startup event after the socket is bound so that clients
@@ -518,3 +527,24 @@ impl Server {
 // drift out of sync despite the docs claiming parity. Both now delegate to
 // the single implementation in `bread_shared::glob::matches_pattern`; see
 // that module for the pattern-matching test suite.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn clients_can_connect_before_server_starts_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/breadd.sock");
+        let listener = Server::bind(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Initial module hosts must be able to queue their connection even
+        // before the daemon begins polling the accept loop.
+        let client = UnixStream::connect(&path).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        drop((client, server));
+    }
+}
