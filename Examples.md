@@ -131,21 +131,26 @@ return M
 
 Source inspiration: `~/.config/hypr/scripts/display/monitors.lua`.
 
-This uses Bread events and `hl.monitor` (through `bread.hyprland.eval`) to update monitor layout when external displays change. `bread.hyprland.keyword("monitor", ...)` is translated to the same call, but the Lua form is the one that works with `hyprland.lua` directly.
+This uses Bread events and `bread.hyprland.keyword("monitor", ...)`, which works under both `hyprland.conf` (legacy `monitor` keyword) and `hyprland.lua` (translated to `hl.monitor` through eval). Refusals are raised as Lua errors, so the `pcall` below turns them into a visible warning instead of silent success.
 
 ```lua
 -- ~/.config/bread/modules/monitors.lua
 local M = bread.module({ name = "monitors", version = "1.0.0" })
 
+local function set_monitor(spec)
+    local ok, err = pcall(bread.hyprland.keyword, "monitor", spec)
+    if not ok then
+        bread.warn("monitors: could not apply '" .. spec .. "': " .. tostring(err))
+    end
+end
+
 local function apply_internal_mode(has_external)
     local mode = has_external and "1920x1080@60" or "1920x1200@60"
-    bread.hyprland.eval(string.format(
-        "hl.monitor({ output = 'eDP-1', mode = %q, position = '0x0', scale = '1' })", mode))
+    set_monitor("eDP-1," .. mode .. ",0x0,1")
 end
 
 local function apply_external()
-    bread.hyprland.eval(
-        "hl.monitor({ output = 'DP-3', mode = '1920x1080@60', position = 'auto', scale = '1', mirror = 'eDP-1' })")
+    set_monitor("DP-3,1920x1080@60,auto,1,mirror,eDP-1")
 end
 
 local externals = 0
@@ -193,8 +198,9 @@ local M = bread.module({ name = "dock-workflow", version = "1.0.0" })
 
 bread.workflow.define("dock-connected", function()
     bread.workflow.step("applying layout")
-    bread.hyprland.eval(
-        "hl.monitor({ output = 'HDMI-A-1', mode = 'preferred', position = '1920x0', scale = '1' })")
+    -- keyword falls back to the hl.monitor eval form under hyprland.lua and
+    -- raises an error when Hyprland refuses it, which fails the workflow step.
+    bread.hyprland.keyword("monitor", "HDMI-A-1,preferred,1920x0,1")
 
     bread.workflow.step("waiting for monitor")
     -- wait_any resolves on whichever of these patterns fires first, or

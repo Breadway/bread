@@ -480,6 +480,30 @@ mod tests {
     }
 
     #[test]
+    fn doc_snippets_surface_refused_keyword_instead_of_succeeding() {
+        let lua = mlua::Lua::new();
+        lua.load(
+            "warnings = 0; bread = { warn = function() warnings = warnings + 1 end, \
+             hyprland = { keyword = function() error('hyprland rejected keyword') end } }",
+        )
+        .exec()
+        .unwrap();
+        lua.load(
+            "local function set_monitor(spec)
+                local ok = pcall(bread.hyprland.keyword, 'monitor', spec)
+                if not ok then bread.warn('could not apply ' .. spec) end
+            end
+            set_monitor('eDP-1,1920x1080@60,0x0,1')
+            set_monitor('DP-3,1920x1080@60,auto,1,mirror,eDP-1')",
+        )
+        .exec()
+        .unwrap();
+        assert_eq!(lua.globals().get::<_, i64>("warnings").unwrap(), 2);
+        let workflow = "bread.hyprland.keyword('monitor', 'HDMI-A-1,preferred,1920x0,1')";
+        assert!(lua.load(workflow).exec().is_err());
+    }
+
+    #[test]
     fn dispatch_exec_escapes_quotes_and_backslashes() {
         assert_eq!(
             legacy_dispatch_to_lua("exec", r"notify-send 'it\'s'").unwrap(),
