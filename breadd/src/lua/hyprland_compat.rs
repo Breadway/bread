@@ -232,11 +232,9 @@ pub(super) fn legacy_dispatch_to_lua(cmd: &str, args: &str) -> Result<String> {
 
 /// `movetoworkspace[silent] <workspace>[,<window>]`.
 ///
-/// `hl.dsp.window.move` has `workspace` and `follow` fields in both stubs but
-/// no window-selector field, so a window-targeted move focuses that window
-/// first (`hl.dsp.focus` does take `window`) and then moves the focused
-/// window. This is the part of the translation that could not be confirmed
-/// against a window-selector field and is the closest available behaviour.
+/// Upstream Hyprland 0.56.2's hlWindowMove captures the optional `window`
+/// selector directly. Do not focus first: silent moves must preserve focus,
+/// and a missing selector must never fall back to an unrelated active window.
 fn move_to_workspace(args: &str, follow: bool) -> Result<String> {
     if args.is_empty() {
         bail!("movetoworkspace needs a workspace");
@@ -249,14 +247,20 @@ fn move_to_workspace(args: &str, follow: bool) -> Result<String> {
         bail!("movetoworkspace needs a workspace");
     }
     let follow_field = if follow { "" } else { ", follow = false" };
+    let window_field = match window {
+        None | Some("") => String::new(),
+        Some(window) => format!(", window = {}", lua_str(window)),
+    };
     let mv = format!(
-        "hl.dsp.window.move({{ workspace = {}{follow_field} }})",
+        "hl.dsp.window.move({{ workspace = {}{follow_field}{window_field} }})",
         lua_str(ws)
     );
     match window {
         None | Some("") => Ok(mv),
         Some(window) => Ok(format!(
-            "function() hl.dispatch(hl.dsp.focus({{ window = {} }})); hl.dispatch({mv}) end",
+            "function() assert(hl.get_window({}), 'window selector did not match'); \
+             local result = hl.dispatch({mv}); assert(result and result.ok, \
+             result and result.error or 'window move failed'); return result end",
             lua_str(window)
         )),
     }
@@ -449,9 +453,30 @@ mod tests {
         let targeted = legacy_dispatch_to_lua("movetoworkspacesilent", "2,address:0xabc").unwrap();
         assert_eq!(
             targeted,
-            "function() hl.dispatch(hl.dsp.focus({ window = 'address:0xabc' })); \
-             hl.dispatch(hl.dsp.window.move({ workspace = '2', follow = false })) end"
+            "function() assert(hl.get_window('address:0xabc'), 'window selector did not match'); \
+             local result = hl.dispatch(hl.dsp.window.move({ workspace = '2', follow = false, window = 'address:0xabc' })); \
+             assert(result and result.ok, result and result.error or 'window move failed'); return result end"
         );
+    }
+
+    #[test]
+    fn targeted_moves_check_selector_and_dispatch_result_without_focusing() {
+        let lua = mlua::Lua::new();
+        lua.load("moves = 0; hl = { dsp = { window = { move = function(opts) assert(opts.window == 'address:0xabc'); assert(opts.follow == false); return opts end } }, get_window = function() return matched end, dispatch = function() moves = moves + 1; return { ok = succeeded, error = 'fixture failure' } end }").exec().unwrap();
+        let expr = legacy_dispatch_to_lua("movetoworkspacesilent", "2,address:0xabc").unwrap();
+        let run = format!("return ({expr})()");
+        lua.load("matched = false; succeeded = true")
+            .exec()
+            .unwrap();
+        assert!(lua.load(&run).eval::<mlua::Value>().is_err());
+        assert_eq!(lua.globals().get::<_, i64>("moves").unwrap(), 0);
+        lua.load("matched = true; succeeded = false")
+            .exec()
+            .unwrap();
+        assert!(lua.load(&run).eval::<mlua::Value>().is_err());
+        lua.load("succeeded = true").exec().unwrap();
+        assert!(lua.load(&run).eval::<mlua::Value>().is_ok());
+        assert!(!expr.contains("focus"));
     }
 
     #[test]
