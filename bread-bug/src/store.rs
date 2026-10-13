@@ -231,7 +231,40 @@ impl Store {
                 store.wipe_app(app)?;
             }
         }
+        // A new daemon must not reuse numbers still present in retained
+        // records from an earlier ingest scope. Include rotations and all
+        // apps because a report can combine app and daemon records.
+        store.reserve_retained_markers()?;
         Ok(store)
+    }
+
+    fn reserve_retained_markers(&self) -> Result<()> {
+        let mut inner = self.lock();
+        for app in fs::read_dir(self.root.join("apps"))? {
+            let app = app?;
+            if !app.file_type()?.is_dir() {
+                continue;
+            }
+            for file in [LOG_FILE, EVENT_FILE, MARKER_FILE] {
+                for name in [file.to_string(), format!("{file}.1")] {
+                    let path = app.path().join(name);
+                    let f = match fs::File::open(&path) {
+                        Ok(f) => f,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => {
+                            return Err(e).with_context(|| format!("read {}", path.display()))
+                        }
+                    };
+                    for line in BufReader::new(f).split(b'\n') {
+                        let line = line?;
+                        if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                            inner.scrubber.reserve_value_markers(&value);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn root(&self) -> &Path {
