@@ -157,9 +157,110 @@ fn total_cap_drops_oldest_first() {
         let app = ["clip", "pad", "bar"][(i % 3) as usize];
         s.append_log(app, "info", &format!("payload line {i} xxxxxxxxxxxx"), i)
             .unwrap();
+        assert!(s.usage().unwrap().total_bytes <= 1500);
     }
     let total = s.usage().unwrap().total_bytes;
-    assert!(total <= 1500 + 3 * 400, "total {total}");
+    assert!(total <= 1500, "total {total}");
+}
+
+#[test]
+fn total_cap_is_enforced_without_rotation_and_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = StoreLimits {
+        max_bytes_per_file: 100_000,
+        max_total_bytes: 1000,
+        ..StoreLimits::default()
+    };
+    {
+        let s = open(dir.path(), limits.clone(), &[]);
+        for i in 0..50 {
+            assert!(s
+                .append_log("clip", "info", &"boring message ".repeat(30), i)
+                .unwrap());
+            assert!(s.usage().unwrap().total_bytes <= 1000);
+        }
+        assert!(!Reader::open(dir.path())
+            .snapshot("clip", 100, 0)
+            .unwrap()
+            .logs
+            .is_empty());
+    }
+    let smaller = StoreLimits {
+        max_total_bytes: 100,
+        ..limits
+    };
+    let s = open(dir.path(), smaller, &[]);
+    assert!(s.usage().unwrap().total_bytes <= 100);
+}
+
+#[test]
+fn oversized_serialized_records_are_dropped_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = StoreLimits {
+        max_bytes_per_file: 100,
+        max_total_bytes: 100,
+        ..StoreLimits::default()
+    };
+    let s = open(dir.path(), limits, &[]);
+    // Escaping, not just the input length, counts towards the limit.
+    assert!(!s.append_log("clip", "info", &"\"".repeat(90), 1).unwrap());
+    assert!(!s
+        .append_event("clip", &"x".repeat(128), &json!({}), 2)
+        .unwrap());
+    let mut marker = Marker::new(MarkerKind::Crash, 2);
+    marker.message = Some("x".repeat(100));
+    assert!(!s.record_marker("clip", marker).unwrap());
+    assert_eq!(s.usage().unwrap().total_bytes, 0);
+    assert!(s.append_log("clip", "info", "small", 3).unwrap());
+    assert!(s.usage().unwrap().total_bytes <= 100);
+}
+
+#[test]
+fn mixed_records_and_lowered_file_caps_stay_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = StoreLimits {
+        max_bytes_per_file: 500,
+        max_total_bytes: 900,
+        ..StoreLimits::default()
+    };
+    {
+        let s = open(dir.path(), limits.clone(), &[]);
+        for i in 0..100 {
+            let app = ["clip", "pad", "bar"][(i % 3) as usize];
+            s.append_log(app, "info", "message", i).unwrap();
+            assert!(s.usage().unwrap().total_bytes <= 900);
+            s.append_event(
+                app,
+                "bread.power.ac.connected",
+                &json!({"ac_connected": true}),
+                i,
+            )
+            .unwrap();
+            assert!(s.usage().unwrap().total_bytes <= 900);
+            s.record_marker(app, Marker::new(MarkerKind::Crash, i))
+                .unwrap();
+            assert!(s.usage().unwrap().total_bytes <= 900);
+            for app in fs::read_dir(dir.path().join("apps")).unwrap() {
+                for file in fs::read_dir(app.unwrap().path()).unwrap() {
+                    assert!(file.unwrap().metadata().unwrap().len() <= 500);
+                }
+            }
+        }
+    }
+    let s = open(
+        dir.path(),
+        StoreLimits {
+            max_bytes_per_file: 20,
+            ..limits
+        },
+        &[],
+    );
+    for app in fs::read_dir(dir.path().join("apps")).unwrap() {
+        for file in fs::read_dir(app.unwrap().path()).unwrap() {
+            assert!(file.unwrap().metadata().unwrap().len() <= 20);
+        }
+    }
+    assert!(s.usage().unwrap().total_bytes <= 900);
 }
 
 #[test]
