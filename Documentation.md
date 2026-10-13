@@ -1738,6 +1738,23 @@ Available methods:
 | `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
 | `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
 
+The breadbug store lives at `$XDG_STATE_HOME/bread/bugstore` (or
+`~/.local/state/bread/bugstore` when unset). Records are scrubbed before
+writing; files are private JSONL and remain readable with breadd stopped.
+Storage caps count serialized bytes including JSON escaping and newlines.
+Oversized records are dropped intact, and the oldest retained files are
+evicted before every append to reserve space. Lowered limits apply on reopen.
+
+breadd also follows journal entries from registered app user units using
+`journalctl --user --follow --lines=0 --output=json`. The explicit unit map
+includes `breadclipd.service`, `breadclip.service`, `breadcastd.service`,
+`breadcrumbs.service`, `bakery.service`, and `bread<app>.service` for the
+remaining registered apps. Only new entries are followed: existing journal
+history is not imported again after restart. Messages pass through the same
+scrub-on-ingest and exclusion rules as IPC logs. Journal JSON lines larger
+than 64 KiB are discarded in memory. If journalctl is missing or exits, the
+feeder retries after five seconds without preventing daemon startup.
+
 *Since: v1.6*: `module_host.*`, the RPC bridge an out-of-process
 `bread-module-host` child uses in place of direct in-process `bread.*`
 bindings (see [Out-of-process module

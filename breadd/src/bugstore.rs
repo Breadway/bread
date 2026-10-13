@@ -13,7 +13,205 @@ use bread_scrub::ScrubContext;
 use bread_shared::apps::{is_known_app, KNOWN_APPS};
 use bread_shared::{now_unix_ms, BreadEvent};
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
+use tokio::io::AsyncReadExt;
+use tokio::sync::{broadcast, watch};
+
+// Explicit unit names, rather than trusting a journal-supplied app id.
+const APP_UNITS: &[(&str, &str)] = &[
+    ("breadclipd.service", "clip"),
+    ("breadclip.service", "clip"),
+    ("breadpad.service", "pad"),
+    ("breadbar.service", "bar"),
+    ("breadbox.service", "box"),
+    ("breadlock.service", "lock"),
+    ("breadmon.service", "mon"),
+    ("breadpaper.service", "paper"),
+    ("breadsearch.service", "search"),
+    ("breadshot.service", "shot"),
+    ("breadarr.service", "arr"),
+    ("breadcrumbs.service", "crumbs"),
+    ("breadhelp.service", "help"),
+    ("bakery.service", "bakery"),
+    ("breadcastd.service", "cast"),
+    ("breadcloud.service", "cloud"),
+];
+
+fn ingest_journal_line(store: &Store, line: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        return;
+    };
+    let Some(unit) = value.get("_SYSTEMD_USER_UNIT").and_then(Value::as_str) else {
+        return;
+    };
+    let Some((_, app)) = APP_UNITS.iter().find(|(name, _)| *name == unit) else {
+        return;
+    };
+    let Some(message) = value.get("MESSAGE").and_then(Value::as_str) else {
+        return;
+    };
+    let level = match value.get("PRIORITY").and_then(Value::as_str) {
+        Some("0" | "1" | "2" | "3") => "error",
+        Some("4") => "warn",
+        Some("7") => "debug",
+        _ => "info",
+    };
+    let t = value
+        .get("__REALTIME_TIMESTAMP")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|us| us / 1000)
+        .unwrap_or_else(now_unix_ms);
+    let _ = store.append_log(app, level, message, t);
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn journal_child_streams_records_and_stops_on_shutdown() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("fixture-journalctl");
+        std::fs::write(&executable, "#!/bin/sh\nprintf '%s\\n' '{\"_SYSTEMD_USER_UNIT\":\"breadclipd.service\",\"MESSAGE\":\"remote 203.0.113.42\"}'\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Arc::new(
+            Store::open(
+                dir.path().join("store"),
+                &BugConfig::default(),
+                ScrubContext::default(),
+            )
+            .unwrap(),
+        );
+        let (tx, rx) = watch::channel(false);
+        let task = journal_recorder(store.clone(), rx, executable);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let snapshot = bread_bug::store::Reader::open(store.root())
+                    .snapshot("clip", 10, 0)
+                    .unwrap();
+                if !snapshot.logs.is_empty() {
+                    assert_eq!(snapshot.logs[0].msg, "remote <IP:1>");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tx.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[test]
+    fn journal_records_are_routed_scrubbed_and_exclusions_honored() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = BugConfig {
+            excluded_apps: vec!["cast".into()],
+            ..BugConfig::default()
+        };
+        let store = Store::open(dir.path(), &cfg, ScrubContext::default()).unwrap();
+        ingest_journal_line(&store, br#"{"_SYSTEMD_USER_UNIT":"breadclipd.service","MESSAGE":"remote 203.0.113.42","PRIORITY":"3","__REALTIME_TIMESTAMP":"123000"}"#);
+        ingest_journal_line(
+            &store,
+            br#"{"_SYSTEMD_USER_UNIT":"breadcastd.service","MESSAGE":"excluded"}"#,
+        );
+        ingest_journal_line(
+            &store,
+            br#"{"_SYSTEMD_USER_UNIT":"unrelated.service","MESSAGE":"not ours"}"#,
+        );
+        ingest_journal_line(&store, b"invalid json");
+        let reader = bread_bug::store::Reader::open(dir.path());
+        let snapshot = reader.snapshot("clip", 10, 0).unwrap();
+        assert_eq!(snapshot.logs.len(), 1);
+        assert_eq!(snapshot.logs[0].msg, "remote <IP:1>");
+        assert_eq!(snapshot.logs[0].t, 123);
+        assert_eq!(snapshot.logs[0].level, "ERROR");
+        assert_eq!(reader.apps(), vec!["clip"]);
+        let disk = std::fs::read_to_string(dir.path().join("apps/clip/log.jsonl")).unwrap();
+        assert!(!disk.contains("203.0.113.42"));
+    }
+}
+
+/// Follow relevant user units. Only scrubbed records reach the disk store;
+/// journal input and oversized lines are bounded in memory, never spooled.
+pub fn spawn_journal_recorder(store: Arc<Store>, shutdown: watch::Receiver<bool>) {
+    journal_recorder(store, shutdown, "journalctl".into());
+}
+
+fn journal_recorder(
+    store: Arc<Store>,
+    mut shutdown: watch::Receiver<bool>,
+    executable: std::path::PathBuf,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            if *shutdown.borrow() {
+                break;
+            }
+            let mut command = tokio::process::Command::new(&executable);
+            command
+                .args([
+                    "--user",
+                    "--follow",
+                    "--lines=0",
+                    "--output=json",
+                    "--no-pager",
+                ])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            for (unit, _) in APP_UNITS {
+                command.arg(format!("--unit={unit}"));
+            }
+            if let Ok(mut child) = command.spawn() {
+                if let Some(mut stdout) = child.stdout.take() {
+                    let mut chunk = [0; 4096];
+                    let mut line = Vec::new();
+                    let mut oversized = false;
+                    loop {
+                        let read = tokio::select! {
+                            _ = shutdown.changed() => { break; }
+                            read = stdout.read(&mut chunk) => read,
+                        };
+                        let Ok(n) = read else { break };
+                        if n == 0 {
+                            break;
+                        }
+                        for byte in &chunk[..n] {
+                            if *byte == b'\n' {
+                                if !oversized {
+                                    ingest_journal_line(&store, &line);
+                                }
+                                line.clear();
+                                oversized = false;
+                            } else if !oversized {
+                                if line.len() == 65536 {
+                                    line.clear();
+                                    oversized = true;
+                                } else {
+                                    line.push(*byte);
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+            if *shutdown.borrow() {
+                break;
+            }
+            tokio::select! {
+                _ = shutdown.changed() => break,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+            }
+        }
+    })
+}
 use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::Context;

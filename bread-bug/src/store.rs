@@ -235,6 +235,10 @@ impl Store {
         // records from an earlier ingest scope. Include rotations and all
         // apps because a report can combine app and daemon records.
         store.reserve_retained_markers()?;
+        {
+            let mut inner = store.lock();
+            store.enforce_total(&mut inner, 0)?;
+        }
         Ok(store)
     }
 
@@ -297,7 +301,8 @@ impl Store {
         self.lock().excluded.contains(app)
     }
 
-    /// Store one log line. Returns `Ok(false)` if the app is excluded.
+    /// Store one log line. Returns `Ok(false)` if excluded or too large
+    /// for the configured serialized-record storage budget.
     pub fn append_log(&self, app: &str, level: &str, msg: &str, t: u64) -> Result<bool> {
         check_app(app)?;
         let mut inner = self.lock();
@@ -311,8 +316,7 @@ impl Store {
             level: normalize_level(level).to_string(),
             msg,
         };
-        self.write_line(&mut inner, app, LOG_FILE, &serde_json::to_string(&rec)?)?;
-        Ok(true)
+        self.write_line(&mut inner, app, LOG_FILE, &serde_json::to_string(&rec)?)
     }
 
     /// Store one event: its name and the allowlisted fields of `data`.
@@ -331,8 +335,7 @@ impl Store {
             name: name_s,
             data,
         };
-        self.write_line(&mut inner, app, EVENT_FILE, &serde_json::to_string(&rec)?)?;
-        Ok(true)
+        self.write_line(&mut inner, app, EVENT_FILE, &serde_json::to_string(&rec)?)
     }
 
     /// Store a crash/freeze marker after scrubbing its text and frames.
@@ -375,8 +378,7 @@ impl Store {
             app,
             MARKER_FILE,
             &serde_json::to_string(&marker)?,
-        )?;
-        Ok(true)
+        )
     }
 
     /// Delete everything stored for one app.
@@ -420,7 +422,13 @@ impl Store {
         self.root.join("apps").join(app)
     }
 
-    fn write_line(&self, inner: &mut Inner, app: &str, file: &str, line: &str) -> Result<()> {
+    fn write_line(&self, inner: &mut Inner, app: &str, file: &str, line: &str) -> Result<bool> {
+        let add = line.len() as u64 + 1;
+        // Drop an oversized record intact rather than store invalid JSON or
+        // momentarily exceed a cap. All accounting includes JSON escaping.
+        if add > inner.limits.max_bytes_per_file || add > inner.limits.max_total_bytes {
+            return Ok(false);
+        }
         let dir = self.app_dir(app);
         if !dir.exists() {
             self.make_room_for_new_app(inner)?;
@@ -428,7 +436,6 @@ impl Store {
         }
         let path = dir.join(file);
         let cap = inner.limits.max_bytes_per_file;
-        let add = line.len() as u64 + 1;
         let size = match inner.sizes.get(&path) {
             Some(s) => *s,
             None => fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
@@ -442,7 +449,11 @@ impl Store {
                 Err(e) => return Err(e).with_context(|| format!("rotate {}", path.display())),
             }
             size = 0;
-            self.enforce_total(inner)?;
+        }
+        // Reserve space before writing, even when no rotation occurred.
+        self.enforce_total(inner, add)?;
+        if !path.exists() {
+            size = 0;
         }
         let mut f = OpenOptions::new()
             .create(true)
@@ -453,7 +464,7 @@ impl Store {
         f.write_all(line.as_bytes())?;
         f.write_all(b"\n")?;
         inner.sizes.insert(path, size + add);
-        Ok(())
+        Ok(true)
     }
 
     /// Drop the least recently written app directory when at the app cap.
@@ -477,7 +488,7 @@ impl Store {
     }
 
     /// Keep the whole store under `max_total_bytes`, oldest data first.
-    fn enforce_total(&self, inner: &mut Inner) -> Result<()> {
+    fn enforce_total(&self, inner: &mut Inner, reserve: u64) -> Result<()> {
         let mut files = Vec::new();
         let mut total = 0u64;
         for app in fs::read_dir(self.root.join("apps"))?.filter_map(|e| e.ok()) {
@@ -485,6 +496,12 @@ impl Store {
                 let Ok(meta) = f.metadata() else { continue };
                 let rotated = f.file_name().to_string_lossy().ends_with(".1");
                 let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                // A lowered per-file cap also applies to retained files.
+                if meta.len() > inner.limits.max_bytes_per_file {
+                    fs::remove_file(f.path())?;
+                    inner.sizes.remove(&f.path());
+                    continue;
+                }
                 total += meta.len();
                 files.push((!rotated, mtime, f.path(), meta.len()));
             }
@@ -492,13 +509,12 @@ impl Store {
         // Rotated generations go before live files; older before newer.
         files.sort();
         for (_, _, path, len) in files {
-            if total <= inner.limits.max_total_bytes {
+            if total <= inner.limits.max_total_bytes.saturating_sub(reserve) {
                 break;
             }
-            if fs::remove_file(&path).is_ok() {
-                total = total.saturating_sub(len);
-                inner.sizes.remove(&path);
-            }
+            fs::remove_file(&path).with_context(|| format!("evict {}", path.display()))?;
+            total = total.saturating_sub(len);
+            inner.sizes.remove(&path);
         }
         Ok(())
     }
