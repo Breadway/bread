@@ -68,6 +68,25 @@ fn ingest_journal_line(store: &Store, line: &[u8]) {
 mod journal_tests {
     use super::*;
 
+    #[test]
+    fn health_exposes_accounting_failure_without_false_byte_count() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(dir.path(), &BugConfig::default(), ScrubContext::default()).unwrap();
+        store.append_log("pad", "info", "seed", 1).unwrap();
+        let app = dir.path().join("apps/pad");
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let status = ipc_status(Some(&store));
+        std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(status["available"], false);
+        assert!(status["error"]
+            .as_str()
+            .unwrap()
+            .contains("accounting failed"));
+        assert!(status.get("total_bytes").is_none());
+    }
+
     #[tokio::test]
     async fn journal_child_streams_records_and_stops_on_shutdown() {
         use std::os::unix::fs::PermissionsExt;
@@ -404,7 +423,15 @@ pub fn ipc_status(store: Option<&Store>) -> Value {
     let Some(store) = store else {
         return json!({ "available": false });
     };
-    let usage = store.usage().ok().unwrap_or_default();
+    let usage = match store.usage() {
+        Ok(usage) => usage,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "error": format!("store accounting failed: {err:#}"),
+            })
+        }
+    };
     let reader = bread_bug::store::Reader::open(store.root());
     let apps: Vec<Value> = reader
         .apps()

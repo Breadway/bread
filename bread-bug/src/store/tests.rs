@@ -145,6 +145,83 @@ fn snapshot_tail_limits() {
 }
 
 #[test]
+fn unreadable_app_fails_closed_and_usage_reports_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(
+        dir.path(),
+        StoreLimits {
+            max_bytes_per_file: 100_000,
+            max_total_bytes: 1000,
+            ..StoreLimits::default()
+        },
+        &[],
+    );
+    s.append_log("pad", "info", &"boring message ".repeat(30), 1)
+        .unwrap();
+    s.append_log("clip", "info", "seed", 2).unwrap();
+    let app = dir.path().join("apps/pad");
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o000)).unwrap();
+    // Permission probes must run unprivileged, never silently pass as root.
+    let unreadable = fs::read_dir(&app).is_err();
+    let usage = s.usage();
+    let first = s.append_log("clip", "info", &"boring message ".repeat(30), 3);
+    let second = s.append_log("clip", "info", &"boring message ".repeat(30), 4);
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        unreadable,
+        "permission regression requires an unprivileged test runner"
+    );
+    assert!(usage.is_err());
+    assert!(first.is_err());
+    assert!(second.is_err());
+    assert!(s.usage().unwrap().total_bytes <= 1000);
+    assert_eq!(
+        Reader::open(dir.path())
+            .snapshot("clip", 10, 0)
+            .unwrap()
+            .logs
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn failed_eviction_does_not_allow_append() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(
+        dir.path(),
+        StoreLimits {
+            max_bytes_per_file: 100_000,
+            max_total_bytes: 600,
+            ..StoreLimits::default()
+        },
+        &[],
+    );
+    s.append_log("pad", "info", &"boring message ".repeat(30), 1)
+        .unwrap();
+    s.append_log("clip", "info", "seed", 2).unwrap();
+    let app = dir.path().join("apps/pad");
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o500)).unwrap();
+    let result = s.append_log("clip", "info", &"boring message ".repeat(30), 3);
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        result.is_err(),
+        "eviction failure must propagate (requires unprivileged runner)"
+    );
+    assert!(s.usage().unwrap().total_bytes <= 600);
+    assert_eq!(
+        Reader::open(dir.path())
+            .snapshot("clip", 10, 0)
+            .unwrap()
+            .logs
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn total_cap_drops_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
     let limits = StoreLimits {
