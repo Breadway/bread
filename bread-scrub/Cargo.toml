@@ -1,0 +1,9 @@
+[package]
+name = "bread-scrub"
+version = "0.9.0"
+edition = "2021"
+description = "Allowlist-first PII scrubber used by breadbug on ingest and at report time"
+
+[dependencies]
+regex = "1"
+serde_json.workspace = true

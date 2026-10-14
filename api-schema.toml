@@ -523,6 +523,31 @@ name = "widgets.list"
 kind = "ipc_method"
 since = "1.3"
 
+[[entry]]
+name = "bug.log"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "bug.logs"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "bug.marker"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "bug.status"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "bug.wipe"
+kind = "ipc_method"
+since = "1.8"
+
 # ---------------------------------------------------------------------------
 # CLI commands (bread-cli/src/main.rs): checked against README.md's "CLI
 # reference" section, not Documentation.md (which has no CLI section of its

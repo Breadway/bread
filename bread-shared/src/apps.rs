@@ -11,7 +11,7 @@
 /// (commands) namespaces.
 pub const KNOWN_APPS: &[&str] = &[
     "clip", "pad", "bar", "box", "lock", "mon", "paper", "search", "shot", "arr", "crumbs", "help",
-    "bakery", "cast", "cloud",
+    "bakery", "cast", "cloud", "ram",
 ];
 
 /// Daemon-internal domains that are reserved and can never be claimed as an
@@ -59,6 +59,7 @@ const RESERVED_DOMAINS: &[&str] = &[
     "state",
     "widget",
     "reload",
+    "bug",
 ];
 
 /// Whether `id` is a registered sibling-app id.
@@ -141,6 +142,7 @@ mod tests {
         assert!(is_known_app("clip"));
         assert!(is_known_app("bakery"));
         assert!(is_known_app("cloud"));
+        assert!(is_known_app("ram"));
     }
 
     #[test]
@@ -185,6 +187,7 @@ mod tests {
             "state",
             "widget",
             "reload",
+            "bug",
         ] {
             assert!(
                 is_reserved_domain(domain),
