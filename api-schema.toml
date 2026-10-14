@@ -555,6 +555,111 @@ since = "1.8"
 # file's header.
 
 [[entry]]
+name = "module_host.hello"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.on"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.once"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.off"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.after"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.every"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.cancel"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.emit"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.log"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.warn"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.error"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.fs_read"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.fs_write"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.exec"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.exec_capture"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.state_get"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.status"
+kind = "ipc_method"
+since = "1.6"
+
+[[entry]]
+name = "module_host.hyprland_dispatch"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "module_host.hyprland_keyword"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "module_host.hyprland_eval"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
+name = "module_host.hyprland_query"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
 name = "reload"
 kind = "cli_command"
 since = "0.7"

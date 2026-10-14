@@ -1809,12 +1809,12 @@ direct use by other clients.
 | Method | Params | Description |
 |--------|--------|-------------|
 | `module_host.hello` | `token` | One-time handshake. Consumes the token, replies with `{ module, permissions, api_version }` or an error for an unknown/expired token. Takes over the rest of the connection's lifetime as a bidirectional RPC bridge, same as `events.subscribe` does for a plain event stream. |
-| `module_host.on` / `.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
+| `module_host.on` / `module_host.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
 | `module_host.off` | `id` | Cancel a subscription. |
-| `module_host.after` / `.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
+| `module_host.after` / `module_host.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
 | `module_host.cancel` | `id` | Cancel a timer. |
 | `module_host.emit` | `event`, `data` | Same manual-emit semantics (and reserved-domain guard) as the top-level `emit` method. |
-| `module_host.log` / `.warn` / `.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
+| `module_host.log` / `module_host.warn` / `module_host.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
 | `module_host.fs_read` | `path` | Requires `fs.read` granted; path-prefix-checked against the manifest's `path` hint if one was declared. Replies `{ content }` (`null` if unreadable). |
 | `module_host.fs_write` | `path`, `content` | Requires `fs.write`, same scoping check. |
 | `module_host.exec` | `cmd` | Requires `exec`; `bin`-hint-checked (by leading command word) if declared. Fire-and-forget, matching `bread.exec`'s own semantics. |
@@ -1836,6 +1836,27 @@ The `hyprland` grant is checked for every method name under the
 without the grant gets `hyprland not granted to this module` for any such
 method, real or invented. The compositor request is made by `breadd`, never by
 the child, which is sandboxed and holds no Hyprland socket.
+
+Each `module_host.hyprland_*` call is one bounded operation:
+
+- **One deadline.** The first request, any `hyprland.lua` `eval` fallback and
+  any bind/unbind/monitor read-back all share a single 8 second budget, and
+  socket connect, write and read each stop at it. Once it has expired (or the
+  module's connection has closed) nothing further is sent to the compositor, so
+  a call that returned `hyprland request timed out` can never execute later.
+- **Size caps.** A request line over 32 KiB, a string parameter over 16 KiB, or
+  a compositor reply over 1 MiB is refused with an error mentioning the byte
+  limit. Parameters must have the documented types: `args` must be a string
+  when present, and a non-string value is an error rather than being treated as
+  empty.
+- **Bounded concurrency.** A module has at most one such call in flight (a
+  second is refused with `hyprland busy`) and the daemon at most 8 across all
+  modules (`hyprland busy: too many requests in flight`). Refused calls never
+  reach the compositor, and a stalled compositor cannot hold more than 8
+  short-lived workers or delay daemon shutdown.
+
+The in-process `bread.hyprland.*` functions share the socket deadline and size
+caps, with a 5 second budget per call.
 
 The `health` response's `api_version` field lets a client (the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app) assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).
 
