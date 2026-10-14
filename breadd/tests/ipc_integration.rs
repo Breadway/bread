@@ -1314,6 +1314,7 @@ async fn rules_toml_absent_is_a_no_op() -> Result<()> {
     // `loaded` with nothing registered, not `load_error` or `not_found`.
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
@@ -1390,6 +1391,7 @@ exec = "touch '{exec_path}'"
         Some(&rules_toml),
     )?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     // rules.toml parsed and registered cleanly: no load_error.
     let health = harness.send_request("health", json!({})).await?;
@@ -1472,6 +1474,7 @@ on = "power.ac.disconnected"
         Some(rules_toml),
     )?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
@@ -1944,6 +1947,11 @@ enabled = false
         }
 
         Err(anyhow!("daemon did not become ready in time"))
+    }
+
+    async fn wait_for_initial_modules(&self) -> Result<()> {
+        self.send_request("startup.ready", json!({})).await?;
+        Ok(())
     }
 
     /// Where the daemon keeps breadbug's on-disk store inside the synthetic

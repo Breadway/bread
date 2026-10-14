@@ -1756,6 +1756,7 @@ Available methods:
 | Method | Params | Description |
 |--------|--------|-------------|
 | `ping` | none | Connectivity check |
+| `startup.ready` | none | Wait until initial Lua module loading and its queued state updates are complete |
 | `health` | none | Version, uptime, PID, adapter status, `api_version`, and the breadbug store status under `bugstore` |
 | `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
 | `state.dump` | none | Return the full `RuntimeState` as JSON |
