@@ -38,6 +38,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::core::types::ModuleLoadState;
+use crate::lua::hyprland_compat;
 use crate::module_host::ModuleHostOutcome;
 
 use super::{IpcRequest, IpcResponse, Server, API_VERSION};
@@ -455,6 +456,9 @@ impl Server {
                     _ => Ok(json!({ "ok": false, "stdout": "" })),
                 }
             }
+            method if method.starts_with(HYPRLAND_METHOD_PREFIX) => {
+                hyprland_bridge(method, &req.params, permissions).await
+            }
             "module_host.status" => {
                 let state = req
                     .params
@@ -496,6 +500,94 @@ impl Server {
             }
             other => Err(format!("unknown module_host method: {other}")),
         }
+    }
+}
+
+const HYPRLAND_METHOD_PREFIX: &str = "module_host.hyprland_";
+
+/// Below the host's own 10s RPC timeout, so a wedged compositor surfaces as
+/// this error rather than as an anonymous "timed out" in the module.
+const HYPRLAND_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Every `module_host.hyprland_*` method. The `hyprland` grant is checked
+/// first and unconditionally, so a host that was not granted it gets the same
+/// refusal for any method name under the prefix, real or invented. The
+/// requests are made here, by the daemon, through the same checked helpers as
+/// the in-process `bread.hyprland`: the child never gets a compositor socket.
+async fn hyprland_bridge(
+    method: &str,
+    params: &Value,
+    permissions: &[ModulePermission],
+) -> std::result::Result<Value, String> {
+    if !permissions
+        .iter()
+        .any(|p| p.kind == PermissionKind::Hyprland)
+    {
+        return Err("hyprland not granted to this module".to_string());
+    }
+
+    let text = |key: &str| -> std::result::Result<String, String> {
+        params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("missing {key}"))
+    };
+
+    let work: Box<dyn FnOnce() -> std::result::Result<Value, String> + Send> =
+        match &method[HYPRLAND_METHOD_PREFIX.len()..] {
+            "dispatch" => {
+                let cmd = text("cmd")?;
+                let args = params
+                    .get("args")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                Box::new(move || {
+                    hyprland_compat::dispatch(hyprland_compat::request, &cmd, &args)
+                        .map(|()| json!({ "ok": true }))
+                        .map_err(|e| e.to_string())
+                })
+            }
+            "keyword" => {
+                let key = text("key")?;
+                let value = text("value")?;
+                Box::new(move || {
+                    hyprland_compat::keyword(hyprland_compat::request, &key, &value)
+                        .map(|()| json!({ "ok": true }))
+                        .map_err(|e| e.to_string())
+                })
+            }
+            "eval" => {
+                let expr = text("expr")?;
+                Box::new(move || {
+                    hyprland_compat::request(&format!("eval {expr}"))
+                        .map(|reply| json!({ "reply": reply }))
+                        .map_err(|e| e.to_string())
+                })
+            }
+            "query" => {
+                let request = match text("kind")?.as_str() {
+                    "active_window" => "j/activewindow",
+                    "monitors" => "j/monitors",
+                    "workspaces" => "j/workspaces",
+                    "clients" => "j/clients",
+                    other => return Err(format!("unknown hyprland query: {other}")),
+                };
+                Box::new(move || {
+                    let reply = hyprland_compat::request(request).map_err(|e| e.to_string())?;
+                    serde_json::from_str::<Value>(&reply)
+                        .map(|value| json!({ "value": value }))
+                        .map_err(|e| e.to_string())
+                })
+            }
+            _ => return Err(format!("unknown module_host method: {method}")),
+        };
+
+    match tokio::time::timeout(HYPRLAND_TIMEOUT, tokio::task::spawn_blocking(work)).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => Err(format!("hyprland request failed: {e}")),
+        Err(_) => Err("hyprland request timed out".to_string()),
     }
 }
 
@@ -644,6 +736,60 @@ mod tests {
             path: None,
             bin: Some(bin.to_string()),
         }]
+    }
+
+    #[tokio::test]
+    async fn hyprland_methods_are_refused_without_the_grant_whatever_the_name() {
+        let perms = vec![
+            ModulePermission {
+                kind: PermissionKind::StateRead,
+                path: None,
+                bin: None,
+            },
+            ModulePermission {
+                kind: PermissionKind::Exec,
+                path: None,
+                bin: None,
+            },
+        ];
+        for method in [
+            "module_host.hyprland_dispatch",
+            "module_host.hyprland_keyword",
+            "module_host.hyprland_eval",
+            "module_host.hyprland_query",
+            "module_host.hyprland_made_up",
+            "module_host.hyprland_",
+        ] {
+            let err = hyprland_bridge(method, &json!({}), &perms)
+                .await
+                .unwrap_err();
+            assert_eq!(err, "hyprland not granted to this module", "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hyprland_granted_still_rejects_unknown_methods_and_missing_params() {
+        let perms = vec![ModulePermission {
+            kind: PermissionKind::Hyprland,
+            path: None,
+            bin: None,
+        }];
+        let err = hyprland_bridge("module_host.hyprland_made_up", &json!({}), &perms)
+            .await
+            .unwrap_err();
+        assert!(err.contains("unknown module_host method"), "{err}");
+        let err = hyprland_bridge("module_host.hyprland_dispatch", &json!({}), &perms)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "missing cmd");
+        let err = hyprland_bridge(
+            "module_host.hyprland_query",
+            &json!({ "kind": "keybinds" }),
+            &perms,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("unknown hyprland query"), "{err}");
     }
 
     #[test]

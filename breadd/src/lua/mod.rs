@@ -28,7 +28,7 @@ use crate::core::types::{
 use crate::module_host::{self, ModuleHostOutcome, ModuleHostRegistry};
 use bread_shared::now_unix_ms;
 
-mod hyprland_compat;
+pub(crate) mod hyprland_compat;
 
 pub enum LuaMessage {
     Event {
@@ -842,7 +842,7 @@ impl LuaEngine {
             self.lua
                 .create_function(move |_lua, (cmd, args): (String, Option<String>)| {
                     hyprland_compat::dispatch(
-                        hyprland_request,
+                        hyprland_compat::request,
                         &cmd,
                         args.as_deref().unwrap_or(""),
                     )
@@ -854,21 +854,21 @@ impl LuaEngine {
         let keyword_fn =
             self.lua
                 .create_function(move |_lua, (key, value): (String, String)| {
-                    hyprland_compat::keyword(hyprland_request, &key, &value)
+                    hyprland_compat::keyword(hyprland_compat::request, &key, &value)
                         .map_err(|e| LuaError::external(e.to_string()))?;
                     Ok("ok".to_string())
                 })?;
         hyprland_tbl.set("keyword", keyword_fn)?;
 
         let eval_fn = self.lua.create_function(move |_lua, expr: String| {
-            let resp = hyprland_request(&format!("eval {expr}"))
+            let resp = hyprland_compat::request(&format!("eval {expr}"))
                 .map_err(|e| LuaError::external(e.to_string()))?;
             Ok(resp)
         })?;
         hyprland_tbl.set("eval", eval_fn)?;
 
         let active_window_fn = self.lua.create_function(move |lua, ()| {
-            let resp = hyprland_request("j/activewindow")
+            let resp = hyprland_compat::request("j/activewindow")
                 .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
@@ -877,8 +877,8 @@ impl LuaEngine {
         hyprland_tbl.set("active_window", active_window_fn)?;
 
         let monitors_fn = self.lua.create_function(move |lua, ()| {
-            let resp =
-                hyprland_request("j/monitors").map_err(|e| LuaError::external(e.to_string()))?;
+            let resp = hyprland_compat::request("j/monitors")
+                .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
@@ -886,8 +886,8 @@ impl LuaEngine {
         hyprland_tbl.set("monitors", monitors_fn)?;
 
         let workspaces_fn = self.lua.create_function(move |lua, ()| {
-            let resp =
-                hyprland_request("j/workspaces").map_err(|e| LuaError::external(e.to_string()))?;
+            let resp = hyprland_compat::request("j/workspaces")
+                .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
@@ -895,8 +895,8 @@ impl LuaEngine {
         hyprland_tbl.set("workspaces", workspaces_fn)?;
 
         let clients_fn = self.lua.create_function(move |lua, ()| {
-            let resp =
-                hyprland_request("j/clients").map_err(|e| LuaError::external(e.to_string()))?;
+            let resp = hyprland_compat::request("j/clients")
+                .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
             json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
@@ -3509,52 +3509,6 @@ fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
     }
 
     out
-}
-
-fn hyprland_request_socket() -> Result<PathBuf> {
-    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-
-    if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-        return Ok(PathBuf::from(runtime)
-            .join("hypr")
-            .join(instance)
-            .join(".socket.sock"));
-    }
-
-    let hypr_dir = PathBuf::from(&runtime).join("hypr");
-    let mut sockets: Vec<PathBuf> = std::fs::read_dir(&hypr_dir)
-        .map_err(|_| anyhow!("no Hyprland instance found ({})", hypr_dir.display()))?
-        .flatten()
-        .map(|e| e.path().join(".socket.sock"))
-        .filter(|p| p.exists())
-        .collect();
-
-    match sockets.len() {
-        0 => Err(anyhow!(
-            "no Hyprland instance found in {}",
-            hypr_dir.display()
-        )),
-        1 => Ok(sockets.remove(0)),
-        _ => {
-            warn!(
-                "multiple Hyprland instances found in {}; using the first one",
-                hypr_dir.display()
-            );
-            Ok(sockets.remove(0))
-        }
-    }
-}
-
-fn hyprland_request(request: &str) -> Result<String> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
-    let socket = hyprland_request_socket()?;
-    let mut stream = UnixStream::connect(&socket)?;
-    stream.write_all(request.as_bytes())?;
-    let mut buffer = String::new();
-    stream.read_to_string(&mut buffer)?;
-    Ok(buffer)
 }
 
 fn parse_match_condition(tbl: &mlua::Table) -> MatchCondition {

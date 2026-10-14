@@ -21,10 +21,59 @@
 //! Hyprland, `/usr/share/hypr/stubs/hl.meta.lua`. The one exception is noted
 //! on the address-targeted window move below.
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, bail, Result};
+use tracing::warn;
+
+fn request_socket() -> Result<PathBuf> {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+
+    if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        return Ok(PathBuf::from(runtime)
+            .join("hypr")
+            .join(instance)
+            .join(".socket.sock"));
+    }
+
+    let hypr_dir = PathBuf::from(&runtime).join("hypr");
+    let mut sockets: Vec<PathBuf> = std::fs::read_dir(&hypr_dir)
+        .map_err(|_| anyhow!("no Hyprland instance found ({})", hypr_dir.display()))?
+        .flatten()
+        .map(|e| e.path().join(".socket.sock"))
+        .filter(|p| p.exists())
+        .collect();
+
+    match sockets.len() {
+        0 => Err(anyhow!(
+            "no Hyprland instance found in {}",
+            hypr_dir.display()
+        )),
+        1 => Ok(sockets.remove(0)),
+        _ => {
+            warn!(
+                "multiple Hyprland instances found in {}; using the first one",
+                hypr_dir.display()
+            );
+            Ok(sockets.remove(0))
+        }
+    }
+}
+
+pub(crate) fn request(request: &str) -> Result<String> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket = request_socket()?;
+    let mut stream = UnixStream::connect(&socket)?;
+    stream.write_all(request.as_bytes())?;
+    let mut buffer = String::new();
+    stream.read_to_string(&mut buffer)?;
+    Ok(buffer)
+}
 
 /// True when a Hyprland socket reply means success.
-pub(super) fn is_ok(reply: &str) -> bool {
+pub(crate) fn is_ok(reply: &str) -> bool {
     reply.trim() == "ok"
 }
 
@@ -35,7 +84,7 @@ pub(super) fn is_ok(reply: &str) -> bool {
 /// `cmd` may also be a Lua dispatcher expression such as
 /// `hl.dsp.focus({ workspace = '5' })` (with no args); Hyprland running from
 /// `hyprland.lua` accepts that directly.
-pub(super) fn dispatch<F>(mut send: F, cmd: &str, args: &str) -> Result<()>
+pub(crate) fn dispatch<F>(mut send: F, cmd: &str, args: &str) -> Result<()>
 where
     F: FnMut(&str) -> Result<String>,
 {
@@ -69,7 +118,7 @@ where
 /// An `ok` reply is not trusted on its own for binds, unbinds and monitors:
 /// the result is read back over the same socket (`binds -j`, `monitors all -j`)
 /// and an error is returned when the state does not match.
-pub(super) fn keyword<F>(mut send: F, key: &str, value: &str) -> Result<()>
+pub(crate) fn keyword<F>(mut send: F, key: &str, value: &str) -> Result<()>
 where
     F: FnMut(&str) -> Result<String>,
 {
@@ -224,7 +273,7 @@ fn lua_str(s: &str) -> String {
 /// evaluates to a dispatcher (or a function `hl.dispatch` / `hl.bind` accept).
 ///
 /// A `cmd` that already is Lua (starts with `hl.`) is passed through.
-pub(super) fn legacy_dispatch_to_lua(cmd: &str, args: &str) -> Result<String> {
+pub(crate) fn legacy_dispatch_to_lua(cmd: &str, args: &str) -> Result<String> {
     let cmd = cmd.trim();
     let args = args.trim();
     if cmd.starts_with("hl.") {
@@ -369,7 +418,7 @@ fn move_to_workspace(args: &str, follow: bool) -> Result<String> {
 }
 
 /// Translate a legacy `keyword <key> <value>` into a Lua statement.
-pub(super) fn legacy_keyword_to_lua(key: &str, value: &str) -> Result<String> {
+pub(crate) fn legacy_keyword_to_lua(key: &str, value: &str) -> Result<String> {
     let key = key.trim();
     let value = value.trim();
     match key {
