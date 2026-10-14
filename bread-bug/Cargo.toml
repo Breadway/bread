@@ -1,0 +1,16 @@
+[package]
+name = "bread-bug"
+version = "0.9.0"
+edition = "2021"
+description = "breadbug core: on-disk log/event store, report schema and builder, upload client"
+
+[dependencies]
+anyhow.workspace = true
+bread-scrub = { path = "../bread-scrub" }
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true

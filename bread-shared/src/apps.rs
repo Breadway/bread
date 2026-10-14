@@ -59,6 +59,7 @@ const RESERVED_DOMAINS: &[&str] = &[
     "state",
     "widget",
     "reload",
+    "bug",
 ];
 
 /// Whether `id` is a registered sibling-app id.
@@ -186,6 +187,7 @@ mod tests {
             "state",
             "widget",
             "reload",
+            "bug",
         ] {
             assert!(
                 is_reserved_domain(domain),
