@@ -3,6 +3,7 @@ members = [
     "bread-shared",
     "bread-scrub",
     "bread-bug",
+    "breadbug",
     "breadd",
     "bread-cli",
     "bread-emit",

@@ -7,10 +7,13 @@ description = "breadbug core: on-disk log/event store, report schema and builder
 [dependencies]
 anyhow.workspace = true
 bread-scrub = { path = "../bread-scrub" }
+bread-shared = { path = "../bread-shared" }
 dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true
