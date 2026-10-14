@@ -842,7 +842,7 @@ impl LuaEngine {
             self.lua
                 .create_function(move |_lua, (cmd, args): (String, Option<String>)| {
                     hyprland_compat::dispatch(
-                        hyprland_compat::request,
+                        hyprland_compat::operation_sender(),
                         &cmd,
                         args.as_deref().unwrap_or(""),
                     )
@@ -854,7 +854,7 @@ impl LuaEngine {
         let keyword_fn =
             self.lua
                 .create_function(move |_lua, (key, value): (String, String)| {
-                    hyprland_compat::keyword(hyprland_compat::request, &key, &value)
+                    hyprland_compat::keyword(hyprland_compat::operation_sender(), &key, &value)
                         .map_err(|e| LuaError::external(e.to_string()))?;
                     Ok("ok".to_string())
                 })?;
