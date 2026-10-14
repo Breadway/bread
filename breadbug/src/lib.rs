@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use bread_bug::config::{self, BugConfig};
-use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
 use bread_bug::livestack;
+use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
 use bread_bug::store::{Frame, MarkerKind, Reader};
 use bread_bug::system::{installed_apps, InstalledApp};
 use bread_scrub::ScrubContext;
@@ -217,13 +217,21 @@ fn maybe_live_stack(
     let pid = Reader::open(&env.store_root)
         .snapshot(app, 0, 0)
         .ok()
-        .and_then(|s| s.markers.into_iter().rev().find(|m| m.kind != MarkerKind::Recovered))
+        .and_then(|s| {
+            s.markers
+                .into_iter()
+                .rev()
+                .find(|m| m.kind != MarkerKind::Recovered)
+        })
         .filter(|m| m.kind == MarkerKind::Freeze)
         .and_then(|m| m.pid)
         .filter(|p| (env.pid_ok)(*p));
     let Some(pid) = pid else {
         if cli.live_stack {
-            writeln!(out, "No running frozen {app} process found; skipping the live stack.")?;
+            writeln!(
+                out,
+                "No running frozen {app} process found; skipping the live stack."
+            )?;
         }
         return Ok(Vec::new());
     };

@@ -9,7 +9,7 @@
 //!
 //! * **Structured data is allowlisted.** Event payloads are dropped unless
 //!   an [`EventAllowlist`] rule names the fields to keep. Dropped payloads
-//!   leave only the event name and a list of safe-looking key names.
+//!   leave only the event name. Unlisted key names can contain personal data.
 //! * **Free text is pattern-redacted.** Log lines, panic messages and notes
 //!   go through [`Scrubber::scrub_text`], which replaces emails, IPs, MACs,
 //!   UUIDs, tokens, credentials, home paths, the user and host names and
@@ -223,7 +223,7 @@ fn rules() -> &'static Rules {
     RULES.get_or_init(|| {
         let re = |p: &str| Regex::new(p).expect("static scrub regex is valid");
         Rules {
-            marker: re(r"<[A-Z][A-Z0-9_]*(?::(?:[0-9]+|\+))?>"),
+            marker: re(r"<(?:HOME|USER|HOST|REDACTED|SECRET|CRED|QUERY|SSID|TITLE|SERIAL|EMAIL|MAC|UUID|IP|HEX|TOKEN|TRUNCATED)(?::(?:[0-9]+|\+))?>"),
             secret_tokens: re(concat!(
                 r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)",
                 r"|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}",
@@ -236,7 +236,10 @@ fn rules() -> &'static Rules {
                 r"|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
                 r"|(?i:\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{12,})",
             )),
-            url: re(r#"(?i)\b[a-z][a-z0-9+.-]{1,15}://[^\s"'<>`]+"#),
+            url: re(concat!(
+                r#"(?i)\b[a-z][a-z0-9+.-]{1,15}://(?:[^\s"'<>`]|"#,
+                r"<(?:HOME|USER|HOST|REDACTED|SECRET|CRED|QUERY|SSID|TITLE|SERIAL|EMAIL|MAC|UUID|IP|HEX|TOKEN|TRUNCATED)(?::(?:[0-9]+|\+))?>)+",
+            )),
             kv_secret: re(concat!(
                 r"(?i)\b(?P<key>[A-Za-z0-9_.-]*",
                 r"(?:pass(?:word|wd|phrase)?|secret|token|api[_-]?key|apikey|auth(?:orization)?",
@@ -341,10 +344,10 @@ impl Scrubber {
             });
         };
         if let Some(u) = &ctx.username {
-            add(u, "USER", 3, true);
+            add(u, "USER", 1, true);
         }
         if let Some(h) = &ctx.hostname {
-            add(h, "HOST", 3, true);
+            add(h, "HOST", 1, true);
         }
         for extra in &ctx.extra_literals {
             add(extra, "REDACTED", 3, false);
@@ -392,6 +395,7 @@ impl Scrubber {
 
     /// Scrub free-form text. Idempotent.
     pub fn scrub_text(&mut self, input: &str) -> String {
+        self.reserve_markers(input);
         let mut cur = self.pass(input);
         for _ in 0..MAX_EXTRA_PASSES {
             let next = self.pass(&cur);
@@ -411,12 +415,61 @@ impl Scrubber {
 
     /// Scrub every string (and object key) in a JSON value.
     pub fn scrub_value(&mut self, v: &Value) -> Value {
+        self.reserve_value_markers(v);
         self.scrub_value_at(v, 0)
+    }
+
+    /// Reserve existing ingest marker numbers before scrubbing new report
+    /// fields (including notes). Call on the complete input before separate
+    /// field-wise scrubbing, or use `scrub_value` for the complete report.
+    pub fn reserve_value_markers(&mut self, v: &Value) {
+        self.reserve_value_markers_at(v, 0);
+    }
+
+    fn reserve_value_markers_at(&mut self, v: &Value, depth: usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        match v {
+            Value::String(s) => self.reserve_markers(s),
+            Value::Array(items) => items
+                .iter()
+                .for_each(|v| self.reserve_value_markers_at(v, depth + 1)),
+            Value::Object(map) => {
+                for (key, value) in map {
+                    self.reserve_markers(key);
+                    self.reserve_value_markers_at(value, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn reserve_markers(&mut self, input: &str) {
+        for marker in rules().marker.find_iter(input) {
+            let inner = &marker.as_str()[1..marker.as_str().len() - 1];
+            let Some((cat, number)) = inner.split_once(':') else {
+                continue;
+            };
+            let Some(cat) = [
+                "USER", "HOST", "REDACTED", "EMAIL", "MAC", "UUID", "IP", "HEX",
+            ]
+            .into_iter()
+            .find(|known| *known == cat) else {
+                continue;
+            };
+            let number = number
+                .parse::<u32>()
+                .unwrap_or(MAX_NUMBERED)
+                .min(MAX_NUMBERED);
+            let count = self.counters.entry(cat).or_default();
+            *count = (*count).max(number);
+        }
     }
 
     /// Reduce an event payload to its allowlisted fields, scrubbed. With no
     /// matching allowlist rule the payload is dropped and only `_dropped`
-    /// plus the safe-looking top-level key names remain.
+    /// plus an empty `_keys` compatibility field remain.
     pub fn scrub_event_payload(
         &mut self,
         event: &str,
@@ -435,20 +488,9 @@ impl Scrubber {
                 Value::Object(kept)
             }
             None => {
-                let mut keys = BTreeSet::new();
-                if let Value::Object(map) = payload {
-                    for k in map.keys() {
-                        if is_safe_key(k) {
-                            keys.insert(k.clone());
-                        }
-                    }
-                }
                 let mut out = Map::new();
                 out.insert("_dropped".into(), Value::Bool(true));
-                out.insert(
-                    "_keys".into(),
-                    Value::Array(keys.into_iter().map(Value::String).collect()),
-                );
+                out.insert("_keys".into(), Value::Array(Vec::new()));
                 Value::Object(out)
             }
         }
@@ -480,9 +522,17 @@ impl Scrubber {
     }
 
     fn pass(&mut self, input: &str) -> String {
-        let mut pieces = split_markers(input);
+        // URLs are structural spans: existing markers inside credentials or
+        // queries must not shield adjacent personal data from this rule.
+        let urls: String = self
+            .rule_urls(input)
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Text(s) | Piece::Marker(s) => s,
+            })
+            .collect();
+        let mut pieces = split_markers(&urls);
         pieces = self.apply(pieces, Self::rule_secret_tokens);
-        pieces = self.apply(pieces, Self::rule_urls);
         pieces = self.apply(pieces, Self::rule_kv_secret);
         pieces = self.apply(pieces, Self::rule_kv_free);
         pieces = self.apply(pieces, Self::rule_kv_serial);
@@ -738,11 +788,16 @@ impl Scrubber {
         let mut out = Out::new();
         let mut last = 0;
         for m in rules().ipv6_candidate.find_iter(t) {
-            let s = m.as_str();
+            let mut s = m.as_str();
+            // A sentence colon may follow an address. Prefer the complete
+            // valid address, then peel punctuation only if parsing fails.
+            while Ipv6Addr::from_str(s).is_err() && s.ends_with(':') {
+                s = &s[..s.len() - 1];
+            }
             let colons = s.matches(':').count();
             let boundary_ok = prev_char(t, m.start()).is_none_or(|c| !is_word(c))
                 && next_char(t, m.end()).is_none_or(|c| !is_word(c));
-            if colons < 2 || !boundary_ok || !s.chars().any(|c| c.is_ascii_digit()) {
+            if colons < 2 || !boundary_ok {
                 continue;
             }
             let Ok(addr) = Ipv6Addr::from_str(s) else {
@@ -753,7 +808,7 @@ impl Scrubber {
             }
             out.text(&t[last..m.start()]);
             out.marker(self.numbered("IP", s));
-            last = m.end();
+            last = m.start() + s.len();
         }
         out.text(&t[last..]);
         out.finish()
@@ -947,13 +1002,6 @@ fn split_markers(s: &str) -> Vec<Piece> {
         out.push(Piece::Text(s[last..].to_string()));
     }
     out
-}
-
-fn is_safe_key(k: &str) -> bool {
-    let mut chars = k.chars();
-    k.len() <= 32
-        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn pick<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {

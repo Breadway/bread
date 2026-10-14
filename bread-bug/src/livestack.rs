@@ -70,7 +70,11 @@ pub fn capture(pid: u32) -> Option<Vec<Frame>> {
     if !is_bread_process(pid) {
         return None;
     }
-    let out = runcmd::run("eu-stack", &["-p", &pid.to_string()], Duration::from_secs(10))?;
+    let out = runcmd::run(
+        "eu-stack",
+        &["-p", &pid.to_string()],
+        Duration::from_secs(10),
+    )?;
     let frames = parse_eu_stack(&out);
     (!frames.is_empty()).then_some(frames)
 }
@@ -90,7 +94,10 @@ mod tests {
         assert_eq!(f.len(), 3);
         assert_eq!(f[0].symbol.as_deref(), Some("__poll"));
         assert_eq!(f[0].offset, Some(0x1d));
-        assert_eq!(f[1].symbol.as_deref(), Some("g_main_context_iterate.constprop.0"));
+        assert_eq!(
+            f[1].symbol.as_deref(),
+            Some("g_main_context_iterate.constprop.0")
+        );
         assert_eq!(f[1].offset, Some(0x7f3a1c1b2d8e));
         assert_eq!(f[2].symbol, None);
     }

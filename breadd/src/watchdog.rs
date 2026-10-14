@@ -46,7 +46,11 @@ struct Inner {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// The app went silent while its process is alive.
-    Freeze { app: String, pid: u32, silent_for: Duration },
+    Freeze {
+        app: String,
+        pid: u32,
+        silent_for: Duration,
+    },
     /// The process is gone; it is no longer tracked.
     Gone { app: String },
 }

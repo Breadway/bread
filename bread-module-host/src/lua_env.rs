@@ -136,7 +136,8 @@ impl ModuleHostLua {
     ) -> Result<Self> {
         let lua = Lua::new();
         let bread = lua.create_table()?;
-        let handlers: Rc<RefCell<HashMap<String, RegistryKey>>> = Rc::new(RefCell::new(HashMap::new()));
+        let handlers: Rc<RefCell<HashMap<String, RegistryKey>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         let registered = Rc::new(RefCell::new(false));
         let module_table_key: Rc<RefCell<Option<RegistryKey>>> = Rc::new(RefCell::new(None));
 
@@ -159,7 +160,9 @@ impl ModuleHostLua {
         Self::install_state(&lua, &bread, cmd_tx, &granted)?;
 
         lua.globals().set("bread", bread)?;
-        lua.load(WAIT_HELPER).set_name("<bread-module-host wait helper>").exec()?;
+        lua.load(WAIT_HELPER)
+            .set_name("<bread-module-host wait helper>")
+            .exec()?;
 
         Ok(Self {
             lua,
@@ -240,12 +243,16 @@ impl ModuleHostLua {
 
     fn install_json(lua: &Lua, bread: &Table) -> Result<()> {
         let json_tbl = lua.create_table()?;
-        let decode_fn = lua.create_function(|lua, s: String| {
-            match serde_json::from_str::<JsonValue>(&s) {
-                Ok(v) => Ok((json_to_lua(lua, &v)?, LuaValue::Nil)),
-                Err(e) => Ok((LuaValue::Nil, LuaValue::String(lua.create_string(e.to_string())?))),
-            }
-        })?;
+        let decode_fn =
+            lua.create_function(
+                |lua, s: String| match serde_json::from_str::<JsonValue>(&s) {
+                    Ok(v) => Ok((json_to_lua(lua, &v)?, LuaValue::Nil)),
+                    Err(e) => Ok((
+                        LuaValue::Nil,
+                        LuaValue::String(lua.create_string(e.to_string())?),
+                    )),
+                },
+            )?;
         json_tbl.set("decode", decode_fn)?;
         bread.set("json", json_tbl)?;
         Ok(())
@@ -260,7 +267,11 @@ impl ModuleHostLua {
         for (name, once) in [("on", false), ("once", true)] {
             let cmd_tx = cmd_tx.clone();
             let handlers = handlers.clone();
-            let method = if once { "module_host.once" } else { "module_host.on" };
+            let method = if once {
+                "module_host.once"
+            } else {
+                "module_host.on"
+            };
             let f = lua.create_function(move |lua, (pattern, callback): (String, Function)| {
                 let result = call(&cmd_tx, method, json!({ "pattern": pattern }), RPC_TIMEOUT)
                     .map_err(LuaError::external)?;
@@ -279,7 +290,12 @@ impl ModuleHostLua {
         let cmd_tx_off = cmd_tx.clone();
         let handlers_off = handlers.clone();
         let off_fn = lua.create_function(move |_, id: String| {
-            let _ = call(&cmd_tx_off, "module_host.off", json!({ "id": id }), RPC_TIMEOUT);
+            let _ = call(
+                &cmd_tx_off,
+                "module_host.off",
+                json!({ "id": id }),
+                RPC_TIMEOUT,
+            );
             handlers_off.borrow_mut().remove(&id);
             Ok(())
         })?;
@@ -317,7 +333,12 @@ impl ModuleHostLua {
         let cmd_tx_cancel = cmd_tx.clone();
         let handlers_cancel = handlers.clone();
         let cancel_fn = lua.create_function(move |_, id: String| {
-            let _ = call(&cmd_tx_cancel, "module_host.cancel", json!({ "id": id }), RPC_TIMEOUT);
+            let _ = call(
+                &cmd_tx_cancel,
+                "module_host.cancel",
+                json!({ "id": id }),
+                RPC_TIMEOUT,
+            );
             handlers_cancel.borrow_mut().remove(&id);
             Ok(())
         })?;
@@ -326,20 +347,21 @@ impl ModuleHostLua {
     }
 
     fn install_emit(lua: &Lua, bread: &Table, cmd_tx: mpsc::Sender<IoCommand>) -> Result<()> {
-        let emit_fn = lua.create_function(move |lua, (event, data): (String, Option<LuaValue>)| {
-            let data_json: JsonValue = match data {
-                Some(v) => lua.from_value(v).unwrap_or(JsonValue::Null),
-                None => json!({}),
-            };
-            call(
-                &cmd_tx,
-                "module_host.emit",
-                json!({ "event": event, "data": data_json }),
-                RPC_TIMEOUT,
-            )
-            .map(|_| ())
-            .map_err(LuaError::external)
-        })?;
+        let emit_fn =
+            lua.create_function(move |lua, (event, data): (String, Option<LuaValue>)| {
+                let data_json: JsonValue = match data {
+                    Some(v) => lua.from_value(v).unwrap_or(JsonValue::Null),
+                    None => json!({}),
+                };
+                call(
+                    &cmd_tx,
+                    "module_host.emit",
+                    json!({ "event": event, "data": data_json }),
+                    RPC_TIMEOUT,
+                )
+                .map(|_| ())
+                .map_err(LuaError::external)
+            })?;
         bread.set("emit", emit_fn)?;
         Ok(())
     }
@@ -361,8 +383,13 @@ impl ModuleHostLua {
         }
         let state_tbl = lua.create_table()?;
         let get_fn = lua.create_function(move |lua, key: String| {
-            let result = call(&cmd_tx, "module_host.state_get", json!({ "key": key }), RPC_TIMEOUT)
-                .map_err(LuaError::external)?;
+            let result = call(
+                &cmd_tx,
+                "module_host.state_get",
+                json!({ "key": key }),
+                RPC_TIMEOUT,
+            )
+            .map_err(LuaError::external)?;
             match result.get("value") {
                 Some(v) => json_to_lua(lua, v),
                 None => Ok(LuaValue::Nil),
@@ -379,15 +406,21 @@ impl ModuleHostLua {
         cmd_tx: mpsc::Sender<IoCommand>,
         granted: &HashSet<PermissionKind>,
     ) -> Result<()> {
-        if !granted.contains(&PermissionKind::FsRead) && !granted.contains(&PermissionKind::FsWrite) {
+        if !granted.contains(&PermissionKind::FsRead) && !granted.contains(&PermissionKind::FsWrite)
+        {
             return Ok(());
         }
         let fs_tbl = lua.create_table()?;
         if granted.contains(&PermissionKind::FsRead) {
             let cmd_tx = cmd_tx.clone();
             let read_fn = lua.create_function(move |_, path: String| {
-                let result = call(&cmd_tx, "module_host.fs_read", json!({ "path": path }), RPC_TIMEOUT)
-                    .map_err(LuaError::external)?;
+                let result = call(
+                    &cmd_tx,
+                    "module_host.fs_read",
+                    json!({ "path": path }),
+                    RPC_TIMEOUT,
+                )
+                .map_err(LuaError::external)?;
                 Ok(result
                     .get("content")
                     .and_then(|v| v.as_str())
@@ -424,33 +457,39 @@ impl ModuleHostLua {
         }
         let cmd_tx_exec = cmd_tx.clone();
         let exec_fn = lua.create_function(move |_, cmd: String| {
-            call(&cmd_tx_exec, "module_host.exec", json!({ "cmd": cmd }), RPC_TIMEOUT)
-                .map(|_| ())
-                .map_err(LuaError::external)
+            call(
+                &cmd_tx_exec,
+                "module_host.exec",
+                json!({ "cmd": cmd }),
+                RPC_TIMEOUT,
+            )
+            .map(|_| ())
+            .map_err(LuaError::external)
         })?;
         bread.set("exec", exec_fn)?;
 
-        let exec_capture_fn = lua.create_function(move |_, (cmd, opts): (String, Option<Table>)| {
-            let timeout_ms: u64 = opts
-                .as_ref()
-                .and_then(|o| o.get("timeout_ms").ok())
-                .unwrap_or(2000);
-            let call_timeout = RPC_TIMEOUT + Duration::from_millis(timeout_ms);
-            let result = call(
-                &cmd_tx,
-                "module_host.exec_capture",
-                json!({ "cmd": cmd, "timeout_ms": timeout_ms }),
-                call_timeout,
-            )
-            .map_err(LuaError::external)?;
-            let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-            let stdout = result
-                .get("stdout")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok((ok, stdout))
-        })?;
+        let exec_capture_fn =
+            lua.create_function(move |_, (cmd, opts): (String, Option<Table>)| {
+                let timeout_ms: u64 = opts
+                    .as_ref()
+                    .and_then(|o| o.get("timeout_ms").ok())
+                    .unwrap_or(2000);
+                let call_timeout = RPC_TIMEOUT + Duration::from_millis(timeout_ms);
+                let result = call(
+                    &cmd_tx,
+                    "module_host.exec_capture",
+                    json!({ "cmd": cmd, "timeout_ms": timeout_ms }),
+                    call_timeout,
+                )
+                .map_err(LuaError::external)?;
+                let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                let stdout = result
+                    .get("stdout")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Ok((ok, stdout))
+            })?;
         bread.set("exec_capture", exec_capture_fn)?;
         Ok(())
     }

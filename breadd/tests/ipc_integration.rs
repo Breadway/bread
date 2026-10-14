@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -828,7 +830,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // on the emit bus"). The name here is incidental: this test only cares
     // that events flow through the pipeline before and after a reload storm.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.before", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.before", "data": {}}),
+        )
         .await?;
 
     // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
@@ -849,7 +854,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // The pipeline must have resumed: an event emitted *after* the reloads
     // still flows through normalization into the replay buffer.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.after", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.after", "data": {}}),
+        )
         .await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -1545,6 +1553,75 @@ async fn poll_workflow_status(
 }
 
 #[tokio::test]
+async fn bug_store_survives_daemon_restart_without_marker_collisions() -> Result<()> {
+    let mut harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request(
+            "bug.log",
+            json!({"app": "clip", "msg": "remote 203.0.113.42"}),
+        )
+        .await?;
+    harness.child.kill()?;
+    harness.child.wait()?;
+    let _ = fs::remove_file(harness.socket_path());
+    harness.child = Command::new(env!("CARGO_BIN_EXE_breadd"))
+        .env("XDG_RUNTIME_DIR", harness._temp.path().join("runtime"))
+        .env("XDG_CONFIG_HOME", harness._temp.path().join("config"))
+        .env("HOME", harness._temp.path().join("home"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request(
+            "bug.log",
+            json!({"app": "clip", "msg": "remote 198.51.100.8"}),
+        )
+        .await?;
+    let snapshot =
+        bread_bug::store::Reader::open(harness.bugstore_root()).snapshot("clip", 10, 0)?;
+    assert_eq!(
+        snapshot
+            .logs
+            .iter()
+            .map(|log| log.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["remote <IP:1>", "remote <IP:2>"]
+    );
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_store_survives_module_reload_and_reports_health() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request("bug.log", json!({"app": "clip", "msg": "before reload"}))
+        .await?;
+    harness.send_request("modules.reload", json!({})).await?;
+    harness
+        .send_request("bug.log", json!({"app": "clip", "msg": "after reload"}))
+        .await?;
+    let health = harness.send_request("health", json!({})).await?;
+    assert_eq!(health["bugstore"]["available"], json!(true));
+    let snapshot =
+        bread_bug::store::Reader::open(harness.bugstore_root()).snapshot("clip", 10, 0)?;
+    assert_eq!(
+        snapshot
+            .logs
+            .iter()
+            .map(|log| log.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["before reload", "after reload"]
+    );
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn bug_log_is_scrubbed_before_it_reaches_disk() -> Result<()> {
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
@@ -1675,7 +1752,9 @@ async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
     let reader = bread_bug::store::Reader::open(harness.bugstore_root());
     assert!(reader.apps().contains(&"clip".to_string()));
 
-    harness.send_request("bug.wipe", json!({ "app": "clip" })).await?;
+    harness
+        .send_request("bug.wipe", json!({ "app": "clip" }))
+        .await?;
     assert!(!reader.apps().contains(&"clip".to_string()));
     assert!(reader.apps().contains(&"pad".to_string()));
 
@@ -1688,10 +1767,7 @@ async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
 
 #[tokio::test]
 async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Result<()> {
-    let harness = TestHarness::spawn_with_config_file(
-        "breadbug.toml",
-        "freeze_after_ms = 1000\n",
-    )?;
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 1000\n")?;
     harness.wait_until_ready().await?;
 
     let stream = UnixStream::connect(harness.socket_path()).await?;
@@ -1739,10 +1815,7 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
 
 #[tokio::test]
 async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
-    let harness = TestHarness::spawn_with_config_file(
-        "breadbug.toml",
-        "freeze_after_ms = 1000\n",
-    )?;
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 1000\n")?;
     harness.wait_until_ready().await?;
 
     // A process that has already exited and been reaped.
@@ -1896,6 +1969,7 @@ enabled = false
         manifest_toml: Option<&str>,
         module_init_lua: &str,
     ) -> Result<Self> {
+        let module_host_bin = common::ensure_module_host_built();
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -1952,6 +2026,7 @@ enabled = false
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env("XDG_CONFIG_HOME", &config_home)
             .env("HOME", &home)
+            .env(common::BREAD_MODULE_HOST_BIN_ENV, &module_host_bin)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

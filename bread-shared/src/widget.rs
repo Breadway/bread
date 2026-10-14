@@ -255,8 +255,7 @@ fn is_valid_class(class: &str) -> bool {
     if !first.is_ascii_alphabetic() {
         return false;
     }
-    class.len() <= 64
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    class.len() <= 64 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 impl WidgetNode {
@@ -309,17 +308,17 @@ impl WidgetNode {
         self.validate_inner(1, &mut total)
     }
 
-    fn validate_inner(
-        &self,
-        depth: usize,
-        total: &mut usize,
-    ) -> Result<(), WidgetValidationError> {
+    fn validate_inner(&self, depth: usize, total: &mut usize) -> Result<(), WidgetValidationError> {
         if depth > MAX_NODE_DEPTH {
-            return Err(WidgetValidationError::TooDeep { max: MAX_NODE_DEPTH });
+            return Err(WidgetValidationError::TooDeep {
+                max: MAX_NODE_DEPTH,
+            });
         }
         *total += 1;
         if *total > MAX_NODE_COUNT {
-            return Err(WidgetValidationError::TooManyNodes { max: MAX_NODE_COUNT });
+            return Err(WidgetValidationError::TooManyNodes {
+                max: MAX_NODE_COUNT,
+            });
         }
         if let Some(class) = self.class() {
             if !is_valid_class(class) {
@@ -396,7 +395,9 @@ mod tests {
         let tree = box_of(vec![box_of(vec![box_of(vec![box_of(vec![label(None)])])])]);
         assert_eq!(
             tree.validate(),
-            Err(WidgetValidationError::TooDeep { max: MAX_NODE_DEPTH })
+            Err(WidgetValidationError::TooDeep {
+                max: MAX_NODE_DEPTH
+            })
         );
     }
 
@@ -413,7 +414,9 @@ mod tests {
         let tree = box_of(children);
         assert_eq!(
             tree.validate(),
-            Err(WidgetValidationError::TooManyNodes { max: MAX_NODE_COUNT })
+            Err(WidgetValidationError::TooManyNodes {
+                max: MAX_NODE_COUNT
+            })
         );
     }
 
@@ -539,12 +542,21 @@ mod tests {
 
     #[test]
     fn style_enums_serialize_as_snake_case() {
-        assert_eq!(serde_json::to_string(&SemanticColor::Dim).unwrap(), "\"dim\"");
-        assert_eq!(serde_json::to_string(&Background::None).unwrap(), "\"none\"");
+        assert_eq!(
+            serde_json::to_string(&SemanticColor::Dim).unwrap(),
+            "\"dim\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Background::None).unwrap(),
+            "\"none\""
+        );
         assert_eq!(serde_json::to_string(&Radius::Full).unwrap(), "\"full\"");
         assert_eq!(serde_json::to_string(&Padding::Xs).unwrap(), "\"xs\"");
         assert_eq!(serde_json::to_string(&Align::End).unwrap(), "\"end\"");
-        assert_eq!(serde_json::to_string(&FontWeight::Bold).unwrap(), "\"bold\"");
+        assert_eq!(
+            serde_json::to_string(&FontWeight::Bold).unwrap(),
+            "\"bold\""
+        );
     }
 
     #[test]

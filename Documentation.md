@@ -838,7 +838,7 @@ bread.widget.register({
 | `radius` | string | `none`, `sm`, `md`, `full` (pill) |
 | `padding` | string | `none`, `xs`, `sm`, `md` |
 
-Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when pywal's palette changes instead of drifting out of sync.
+Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when bread-theme's palette changes instead of drifting out of sync.
 
 ```lua
 { type = "label", text = "LOW BATTERY", style = { color = "yellow", weight = "bold" } }
@@ -1738,6 +1738,23 @@ Available methods:
 | `bug.heartbeat` | `app`, `pid`, optional `interval_ms`, `stopping` | Liveness signal from an app's main loop for freeze detection. If heartbeats stop while the process is alive (for longer than `freeze_after_ms`, default 15s, and four of the app's own intervals), breadd records a `freeze` marker and publishes `bread.bug.freeze`; a heartbeat afterwards publishes `bread.bug.recovered`. `stopping: true` announces a clean exit. Detection pauses for ten seconds after power or monitor events and after a stalled daemon tick (suspend/resume). *(Since: v1.8)* |
 | `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
 | `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
+
+The breadbug store lives at `$XDG_STATE_HOME/bread/bugstore` (or
+`~/.local/state/bread/bugstore` when unset). Records are scrubbed before
+writing; files are private JSONL and remain readable with breadd stopped.
+Storage caps count serialized bytes including JSON escaping and newlines.
+Oversized records are dropped intact, and the oldest retained files are
+evicted before every append to reserve space. Lowered limits apply on reopen.
+
+breadd also follows journal entries from registered app user units using
+`journalctl --user --follow --lines=0 --output=json`. The explicit unit map
+includes `breadclipd.service`, `breadclip.service`, `breadcastd.service`,
+`breadcrumbs.service`, `bakery.service`, and `bread<app>.service` for the
+remaining registered apps. Only new entries are followed: existing journal
+history is not imported again after restart. Messages pass through the same
+scrub-on-ingest and exclusion rules as IPC logs. Journal JSON lines larger
+than 64 KiB are discarded in memory. If journalctl is missing or exits, the
+feeder retries after five seconds without preventing daemon startup.
 
 *Since: v1.6*: `module_host.*`, the RPC bridge an out-of-process
 `bread-module-host` child uses in place of direct in-process `bread.*`
