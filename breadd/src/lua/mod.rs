@@ -28,6 +28,8 @@ use crate::core::types::{
 use crate::module_host::{self, ModuleHostOutcome, ModuleHostRegistry};
 use bread_shared::now_unix_ms;
 
+mod hyprland_compat;
+
 pub enum LuaMessage {
     Event {
         subscription_id: SubscriptionId,
@@ -831,21 +833,30 @@ impl LuaEngine {
         bread.set("cancel", cancel_fn)?;
 
         let hyprland_tbl = self.lua.create_table()?;
+        // Both work whether Hyprland is configured with hyprland.conf or
+        // hyprland.lua, and raise a Lua error (rather than returning the
+        // reply text) when Hyprland does not answer `ok`; see
+        // `hyprland_compat`. `args` is optional so a Lua dispatcher
+        // expression can be passed as the only argument.
         let dispatch_fn =
             self.lua
-                .create_function(move |_lua, (cmd, args): (String, String)| {
-                    let resp = hyprland_request(&format!("dispatch {cmd} {args}"))
-                        .map_err(|e| LuaError::external(e.to_string()))?;
-                    Ok(resp)
+                .create_function(move |_lua, (cmd, args): (String, Option<String>)| {
+                    hyprland_compat::dispatch(
+                        hyprland_request,
+                        &cmd,
+                        args.as_deref().unwrap_or(""),
+                    )
+                    .map_err(|e| LuaError::external(e.to_string()))?;
+                    Ok("ok".to_string())
                 })?;
         hyprland_tbl.set("dispatch", dispatch_fn)?;
 
         let keyword_fn =
             self.lua
                 .create_function(move |_lua, (key, value): (String, String)| {
-                    let resp = hyprland_request(&format!("keyword {key} {value}"))
+                    hyprland_compat::keyword(hyprland_request, &key, &value)
                         .map_err(|e| LuaError::external(e.to_string()))?;
-                    Ok(resp)
+                    Ok("ok".to_string())
                 })?;
         hyprland_tbl.set("keyword", keyword_fn)?;
 
@@ -3315,7 +3326,10 @@ function M.apply_assignments()
 
     for _, a in ipairs(assignments) do
         if active[a.monitor] then
-            bread.hyprland.dispatch("moveworkspacetomonitor", a.workspace .. " " .. a.monitor)
+            local ok, err = pcall(bread.hyprland.dispatch, "moveworkspacetomonitor", a.workspace .. " " .. a.monitor)
+            if not ok then
+                bread.warn("bread.workspaces: moving workspace " .. tostring(a.workspace) .. " to " .. tostring(a.monitor) .. " failed: " .. tostring(err))
+            end
         end
     end
 end
@@ -3329,7 +3343,10 @@ function M.on_load()
         for _, rule in ipairs(rules) do
             if event.data and event.data.class and event.data.class:match(rule.app) then
                 local address = event.data.address or ""
-                bread.hyprland.dispatch("movetoworkspacesilent", rule.workspace .. ",address:" .. address)
+                local ok, err = pcall(bread.hyprland.dispatch, "movetoworkspacesilent", rule.workspace .. ",address:" .. address)
+                if not ok then
+                    bread.warn("bread.workspaces: pinning " .. address .. " to workspace " .. tostring(rule.workspace) .. " failed: " .. tostring(err))
+                end
             end
         end
     end)
@@ -3350,10 +3367,16 @@ local active = {}
 local function bind_string(opts)
     local mods = table.concat(opts.mods or {}, " ")
     local args = opts.args or ""
-    if mods ~= "" then
-        return mods .. ", " .. opts.key .. ", " .. opts.dispatch .. ", " .. args
-    end
-    return opts.key .. ", " .. opts.dispatch .. ", " .. args
+    -- Hyprland's bind syntax is "<mods>, <key>, <dispatcher>, <args>" with the
+    -- mods field left empty (a leading comma) when there are none.
+    return mods .. ", " .. opts.key .. ", " .. opts.dispatch .. ", " .. args
+end
+
+-- `unbind` takes only "<mods>, <key>"; the dispatcher and args are not part of
+-- what identifies a bind.
+local function unbind_string(opts)
+    local mods = table.concat(opts.mods or {}, " ")
+    return mods .. ", " .. opts.key
 end
 
 function M.add(opts)
@@ -3368,7 +3391,7 @@ function M.remove(key)
     if not bind then
         return
     end
-    bread.hyprland.keyword("unbind", bind_string(bind))
+    bread.hyprland.keyword("unbind", unbind_string(bind))
     active[key] = nil
 end
 
@@ -3379,7 +3402,10 @@ end
 
 function M.on_unload()
     for key, _ in pairs(active) do
-        M.remove(key)
+        local ok, err = pcall(M.remove, key)
+        if not ok then
+            bread.warn("bread.binds: unbinding " .. tostring(key) .. " failed: " .. tostring(err))
+        end
     end
 end
 
