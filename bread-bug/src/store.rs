@@ -470,18 +470,18 @@ impl Store {
     /// Drop the least recently written app directory when at the app cap.
     fn make_room_for_new_app(&self, inner: &mut Inner) -> Result<()> {
         let apps_dir = self.root.join("apps");
-        let mut dirs: Vec<(SystemTime, PathBuf)> = fs::read_dir(&apps_dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .map(|e| {
-                let mtime = newest_mtime(&e.path());
-                (mtime, e.path())
-            })
-            .collect();
+        let mut dirs = Vec::new();
+        for entry in fs::read_dir(&apps_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                dirs.push((newest_mtime(&entry.path())?, entry.path()));
+            }
+        }
         dirs.sort();
         while dirs.len() >= inner.limits.max_apps && !dirs.is_empty() {
             let (_, oldest) = dirs.remove(0);
-            let _ = fs::remove_dir_all(&oldest);
+            fs::remove_dir_all(&oldest)
+                .with_context(|| format!("evict app {}", oldest.display()))?;
             inner.sizes.retain(|p, _| !p.starts_with(&oldest));
         }
         Ok(())
@@ -491,9 +491,13 @@ impl Store {
     fn enforce_total(&self, inner: &mut Inner, reserve: u64) -> Result<()> {
         let mut files = Vec::new();
         let mut total = 0u64;
-        for app in fs::read_dir(self.root.join("apps"))?.filter_map(|e| e.ok()) {
-            for f in fs::read_dir(app.path()).into_iter().flatten().flatten() {
-                let Ok(meta) = f.metadata() else { continue };
+        for app in fs::read_dir(self.root.join("apps"))? {
+            let app = app?;
+            for f in fs::read_dir(app.path())
+                .with_context(|| format!("account {}", app.path().display()))?
+            {
+                let f = f?;
+                let meta = f.metadata()?;
                 let rotated = f.file_name().to_string_lossy().ends_with(".1");
                 let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 // A lowered per-file cap also applies to retained files.
@@ -535,30 +539,26 @@ fn make_private_dir(dir: &Path) -> Result<()> {
         .with_context(|| format!("create {}", dir.display()))
 }
 
-fn newest_mtime(dir: &Path) -> SystemTime {
-    fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| e.metadata().ok()?.modified().ok())
-        .max()
-        .unwrap_or(SystemTime::UNIX_EPOCH)
+fn newest_mtime(dir: &Path) -> Result<SystemTime> {
+    let mut newest = SystemTime::UNIX_EPOCH;
+    for entry in fs::read_dir(dir)? {
+        newest = newest.max(entry?.metadata()?.modified()?);
+    }
+    Ok(newest)
 }
 
 fn usage_of(root: &Path) -> Result<Usage> {
     let mut usage = Usage::default();
     let apps_dir = root.join("apps");
-    let Ok(rd) = fs::read_dir(&apps_dir) else {
-        return Ok(usage);
-    };
-    for app in rd.flatten() {
-        let bytes: u64 = fs::read_dir(app.path())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|f| f.metadata().ok())
-            .map(|m| m.len())
-            .sum();
+    let rd = fs::read_dir(&apps_dir).with_context(|| format!("account {}", apps_dir.display()))?;
+    for app in rd {
+        let app = app?;
+        let mut bytes = 0;
+        for file in
+            fs::read_dir(app.path()).with_context(|| format!("account {}", app.path().display()))?
+        {
+            bytes += file?.metadata()?.len();
+        }
         usage.total_bytes += bytes;
         usage
             .per_app
