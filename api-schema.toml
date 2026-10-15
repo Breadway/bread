@@ -469,6 +469,11 @@ kind = "ipc_method"
 since = "1.0"
 
 [[entry]]
+name = "startup.ready"
+kind = "ipc_method"
+since = "1.8"
+
+[[entry]]
 name = "state.get"
 kind = "ipc_method"
 since = "1.0"

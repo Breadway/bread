@@ -737,6 +737,54 @@ return M
     Ok(())
 }
 
+#[tokio::test]
+async fn in_process_module_store_supports_read_your_writes_on_startup_and_reload() -> Result<()> {
+    let module_lua = r#"
+local M = bread.module({ name = "store-rw-test", version = "1.0.0" })
+function M.on_load()
+    M.store.set("value", 41)
+    assert(M.store.get("value") == 41, "read your write lost during on_load")
+    M.store.set("value", 42)
+    assert(M.store.get("value") == 42, "repeated write did not replace staged value")
+    M.store.set("other", "isolated")
+    assert(M.store.get("other") == "isolated")
+end
+return M
+"#;
+    let harness = TestHarness::spawn_with_module("store-rw-test", None, module_lua)?;
+    harness.wait_until_ready().await?;
+    harness.wait_for_module_loaded("store-rw-test").await?;
+
+    let modules = harness.send_request("modules.list", json!({})).await?;
+    let entry = modules
+        .as_array()
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("store-rw-test"))
+        })
+        .ok_or_else(|| anyhow!("module missing after startup: {modules}"))?;
+    assert_eq!(entry["status"], "loaded");
+    assert_eq!(entry["store"]["value"], 42);
+    assert_eq!(entry["store"]["other"], "isolated");
+
+    let reload = harness.send_request("modules.reload", json!({})).await?;
+    assert_eq!(reload["ok"], true);
+    let entry = reload["modules"]
+        .as_array()
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("store-rw-test"))
+        })
+        .ok_or_else(|| anyhow!("module missing after reload: {reload}"))?;
+    assert_eq!(entry["status"], "loaded");
+    assert_eq!(entry["store"]["value"], 42);
+    assert_eq!(entry["store"]["other"], "isolated");
+    harness.shutdown();
+    Ok(())
+}
+
 /// An explicit `permissions = []` (present but empty) is a deliberate
 /// "baseline only" declaration, distinct from no manifest at all: it must
 /// scope the module down for real (no fs/exec/etc.) but must *not* trip the
@@ -1314,6 +1362,7 @@ async fn rules_toml_absent_is_a_no_op() -> Result<()> {
     // `loaded` with nothing registered, not `load_error` or `not_found`.
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
@@ -1390,6 +1439,7 @@ exec = "touch '{exec_path}'"
         Some(&rules_toml),
     )?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     // rules.toml parsed and registered cleanly: no load_error.
     let health = harness.send_request("health", json!({})).await?;
@@ -1472,6 +1522,7 @@ on = "power.ac.disconnected"
         Some(rules_toml),
     )?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
@@ -1944,6 +1995,11 @@ enabled = false
         }
 
         Err(anyhow!("daemon did not become ready in time"))
+    }
+
+    async fn wait_for_initial_modules(&self) -> Result<()> {
+        self.send_request("startup.ready", json!({})).await?;
+        Ok(())
     }
 
     /// Where the daemon keeps breadbug's on-disk store inside the synthetic
