@@ -260,6 +260,13 @@ impl Server {
         let id = req.id.clone();
         let result = match req.method.as_str() {
             "ping" => Ok(json!({ "ok": true })),
+            "startup.ready" => {
+                self.lua_runtime
+                    .wait_for_startup()
+                    .await
+                    .map_err(|err| (id.clone(), err.to_string()))?;
+                Ok(json!({ "ok": true }))
+            }
             "state.get" => {
                 let key = req.params.get("key").and_then(Value::as_str).unwrap_or("");
                 let value = self
