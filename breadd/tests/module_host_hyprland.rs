@@ -202,7 +202,11 @@ enabled = false
     async fn wait_until_ready(&self) -> Result<()> {
         let deadline = Instant::now() + Duration::from_secs(8);
         while Instant::now() < deadline {
-            if self.socket_path.exists() && self.request("ping", json!({})).await.is_ok() {
+            // Connectivity is not startup readiness. The daemon binds IPC
+            // before the Lua thread has necessarily loaded modules; wait for
+            // its explicit startup/state-engine barrier before querying
+            // module status or triggering handlers.
+            if self.socket_path.exists() && self.request("startup.ready", json!({})).await.is_ok() {
                 return Ok(());
             }
             sleep(Duration::from_millis(100)).await;
