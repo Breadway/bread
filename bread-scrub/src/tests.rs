@@ -151,13 +151,13 @@ fn identity_literals_respect_word_boundaries() {
 }
 
 #[test]
-fn common_names_are_not_redacted_as_identity() {
+fn configured_common_username_is_still_redacted() {
     let mut s = Scrubber::new(ScrubContext {
         username: Some("root".into()),
         hostname: Some("localhost".into()),
         ..Default::default()
     });
-    assert_eq!(s.scrub_text("root@localhost"), "root@localhost");
+    assert_eq!(s.scrub_text("root@localhost"), "<USER>@<HOST>");
 }
 
 #[test]
@@ -265,13 +265,22 @@ fn overflow_marker_after_cap() {
 }
 
 #[test]
-fn default_distro_names_are_not_treated_as_identity() {
-    let mut s = Scrubber::new(ScrubContext {
-        hostname: Some("bos".into()),
-        username: Some("arch".into()),
-        ..Default::default()
-    });
-    assert_eq!(s.scrub_text("bos-settings on arch"), "bos-settings on arch");
+fn common_distro_words_are_redacted_when_they_are_configured_identities() {
+    for (username, hostname, input) in [
+        (Some("arch"), Some("bos"), "arch kernel on bos"),
+        (Some("bos"), Some("arch"), "bos kernel on arch"),
+    ] {
+        let mut s = Scrubber::new(ScrubContext {
+            username: username.map(str::to_string),
+            hostname: hostname.map(str::to_string),
+            ..Default::default()
+        });
+        let output = s.scrub_text(input);
+        assert!(!output.contains(username.unwrap()));
+        assert!(!output.contains(hostname.unwrap()));
+        assert!(output.contains("<USER>"), "{output}");
+        assert!(output.contains("<HOST>"), "{output}");
+    }
 }
 
 #[test]

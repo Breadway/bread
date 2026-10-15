@@ -104,8 +104,12 @@ Other v1 fields are explicitly limited to these shapes:
   arbitrary process state. Map counts and string sizes have no separate cap
   today.
 * `markers`: at most the newest 5 markers per report. Each includes timestamp,
-  kind (`panic`, `crash`, `freeze`, `recovered`), optional app version, build-id,
-  message, location, signal and at most 128 frames per stored marker. A frame
+  kind (`panic`, `crash`, `freeze`, `recovered`; local-only `stopped` markers
+  close a retired freeze and are not problems), optional app version, build-id,
+  message, location, signal and at most 128 frames per stored marker. The
+  freeze marker's pid and process identity (executable, boot id and kernel
+  start ticks) are local bookkeeping used only to verify a consented live
+  capture; they are removed before report serialization. A frame
   contains optional module and symbol strings, unsigned module-relative offset,
   and build-id. Message/location/module/symbol are scrubbed strings; the 4096
   byte store-line limit applies on ingest. Report-level trimming can still fail

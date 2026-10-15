@@ -44,32 +44,6 @@ const MAX_DEPTH: usize = 64;
 /// Extra passes allowed when chasing the idempotence fixpoint.
 const MAX_EXTRA_PASSES: usize = 3;
 
-/// Names that are never treated as personal even if they are the user name
-/// or hostname, because replacing them would only damage the log.
-const COMMON_NAMES: &[&str] = &[
-    "root",
-    "user",
-    "users",
-    "admin",
-    "test",
-    "guest",
-    "bread",
-    "localhost",
-    "nobody",
-    "daemon",
-    "home",
-    "tmp",
-    "bin",
-    "usr",
-    "var",
-    "etc",
-    "run",
-    "bos",
-    "archlinux",
-    "arch",
-    "linux",
-];
-
 /// Local identity values the scrubber must remove from free text.
 #[derive(Clone, Debug, Default)]
 pub struct ScrubContext {
@@ -330,12 +304,9 @@ pub struct Scrubber {
 impl Scrubber {
     pub fn new(ctx: ScrubContext) -> Self {
         let mut literals = Vec::new();
-        let mut add = |value: &str, cat: &'static str, min_len: usize, skip_common: bool| {
+        let mut add = |value: &str, cat: &'static str, min_len: usize| {
             let v = value.trim();
             if v.len() < min_len {
-                return;
-            }
-            if skip_common && COMMON_NAMES.contains(&v.to_ascii_lowercase().as_str()) {
                 return;
             }
             literals.push(Literal {
@@ -344,13 +315,13 @@ impl Scrubber {
             });
         };
         if let Some(u) = &ctx.username {
-            add(u, "USER", 1, true);
+            add(u, "USER", 1);
         }
         if let Some(h) = &ctx.hostname {
-            add(h, "HOST", 1, true);
+            add(h, "HOST", 1);
         }
         for extra in &ctx.extra_literals {
-            add(extra, "REDACTED", 3, false);
+            add(extra, "REDACTED", 3);
         }
         // Longest first so a long literal wins over one it contains.
         literals.sort_by_key(|l| std::cmp::Reverse(l.needle.len()));
@@ -417,6 +388,38 @@ impl Scrubber {
     pub fn scrub_value(&mut self, v: &Value) -> Value {
         self.reserve_value_markers(v);
         self.scrub_value_at(v, 0)
+    }
+
+    /// Scrub string values while preserving JSON object keys. Use this for
+    /// fixed schemas whose keys are structural field names, not report data:
+    /// a username such as `arch` must redact a free-text value but must not
+    /// rename the required `system.arch` field and make the report invalid.
+    pub fn scrub_value_preserving_keys(&mut self, v: &Value) -> Value {
+        self.reserve_value_markers(v);
+        self.scrub_value_values_at(v, 0)
+    }
+
+    fn scrub_value_values_at(&mut self, v: &Value, depth: usize) -> Value {
+        if depth > MAX_DEPTH {
+            return Value::String("<TRUNCATED>".into());
+        }
+        match v {
+            Value::String(s) => Value::String(self.scrub_text(s)),
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .map(|item| self.scrub_value_values_at(item, depth + 1))
+                    .collect(),
+            ),
+            Value::Object(map) => {
+                let mut out = Map::new();
+                for (key, value) in map {
+                    out.insert(key.clone(), self.scrub_value_values_at(value, depth + 1));
+                }
+                Value::Object(out)
+            }
+            other => other.clone(),
+        }
     }
 
     /// Reserve existing ingest marker numbers before scrubbing new report
