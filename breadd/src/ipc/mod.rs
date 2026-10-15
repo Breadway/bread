@@ -453,7 +453,7 @@ impl Server {
             "bug.marker" => bugstore::ipc_marker(self.bug_store.as_deref(), &req.params).map(
                 |(app, marker, stored)| {
                     if stored {
-                        bugstore::publish_marker(&self.emit_tx, &app, &marker);
+                        bugstore::publish_marker(&self.emit_tx, &app, &marker, true);
                     }
                     json!({ "stored": stored })
                 },
