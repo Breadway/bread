@@ -33,6 +33,7 @@ mod hyprland_compat;
 #[cfg(test)]
 mod module_store_tests {
     use super::*;
+    use crate::core::state_engine::StateCommand;
 
     #[test]
     fn store_write_during_on_load_is_not_visible_as_loaded_until_status_arrives() {
@@ -93,6 +94,46 @@ mod module_store_tests {
         assert_eq!(module.store["fs_present"], JsonValue::Bool(true));
         assert!(after.pending_module_stores.is_empty());
     }
+
+    #[test]
+    fn flush_module_statuses_reports_closed_channel_and_dropped_ack() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        let closed = StateHandle::new(state.clone(), closed_tx);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let closed_err = rt
+            .block_on(closed.flush_module_statuses())
+            .expect_err("closed command channel must fail the barrier");
+        assert!(closed_err
+            .to_string()
+            .contains("state engine command channel closed"));
+
+        let (drop_tx, mut drop_rx) = mpsc::unbounded_channel();
+        let dropped = StateHandle::new(state, drop_tx);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(dropped.flush_module_statuses());
+            result_tx
+                .send(result.map_err(|err| err.to_string()))
+                .unwrap();
+        });
+        let StateCommand::Barrier { ack } = drop_rx.blocking_recv().unwrap() else {
+            panic!("expected state-engine barrier");
+        };
+        drop(ack);
+        let dropped_err = result_rx
+            .recv()
+            .unwrap()
+            .expect_err("dropped ack must fail");
+        assert!(dropped_err.contains("state engine dropped barrier response"));
+    }
 }
 
 pub enum LuaMessage {
@@ -110,7 +151,7 @@ pub enum LuaMessage {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     StartupComplete {
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     Shutdown,
 }
@@ -150,8 +191,11 @@ impl RuntimeHandle {
         self.tx
             .send(LuaMessage::StartupComplete { reply: tx })
             .map_err(|_| anyhow!("lua runtime channel closed"))?;
-        rx.await
-            .map_err(|_| anyhow!("lua runtime dropped startup response"))
+        match rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(anyhow!(err)),
+            Err(_) => Err(anyhow!("lua runtime dropped startup response")),
+        }
     }
 
     pub fn shutdown(&self) {
@@ -204,14 +248,22 @@ pub fn spawn_runtime(
                     }
                 };
 
-                if let Err(err) = engine.reload_internal() {
+                // The initial load has finished attempting. Individual
+                // module errors remain visible in module status; only a Lua
+                // runtime initialization or state-engine barrier failure is
+                // an error returned by startup.ready.
+                let startup_load_result = engine.reload_internal().map_err(|err| err.to_string());
+                if let Err(err) = &startup_load_result {
                     error!(error = %err, "initial lua load failed");
                 }
-
-                // The initial load has finished queuing module statuses.
-                // Wait for the state engine to apply them before processing
-                // any queued barrier request from an IPC client.
-                let _ = engine.state_handle.flush_module_statuses().await;
+                let initial_barrier = match startup_load_result {
+                    Ok(()) => engine
+                        .state_handle
+                        .flush_module_statuses()
+                        .await
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err),
+                };
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
@@ -232,15 +284,27 @@ pub fn spawn_runtime(
                             }
                         }
                         LuaMessage::Reload { reply } => {
-                            let result = engine.reload_internal().map_err(|e| e.to_string());
-                            if result.is_ok() {
-                                let _ = engine.state_handle.flush_module_statuses().await;
-                            }
+                            let result = engine.reload_internal().map_err(|err| err.to_string());
+                            let result = match result {
+                                Ok(()) => engine
+                                    .state_handle
+                                    .flush_module_statuses()
+                                    .await
+                                    .map_err(|err| err.to_string()),
+                                Err(err) => Err(err),
+                            };
                             let _ = reply.send(result);
                         }
                         LuaMessage::StartupComplete { reply } => {
-                            let _ = engine.state_handle.flush_module_statuses().await;
-                            let _ = reply.send(());
+                            let result = match initial_barrier.as_ref() {
+                                Ok(()) => engine
+                                    .state_handle
+                                    .flush_module_statuses()
+                                    .await
+                                    .map_err(|err| err.to_string()),
+                                Err(err) => Err(err.clone()),
+                            };
+                            let _ = reply.send(result);
                         }
                         LuaMessage::Shutdown => {
                             break;
@@ -3139,8 +3203,18 @@ fn module_store_get(
         std::hint::spin_loop();
         std::thread::yield_now();
     };
-    let entry = guard.modules.iter().find(|m| m.name == module)?;
-    entry.store.get(key).cloned()
+    guard
+        .pending_module_stores
+        .get(module)
+        .and_then(|store| store.get(key))
+        .or_else(|| {
+            guard
+                .modules
+                .iter()
+                .find(|entry| entry.name == module)
+                .and_then(|entry| entry.store.get(key))
+        })
+        .cloned()
 }
 
 fn module_store_set(

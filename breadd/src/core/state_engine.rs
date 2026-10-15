@@ -889,6 +889,46 @@ mod tests {
         caller.join().unwrap();
     }
 
+    #[test]
+    fn flush_module_statuses_acknowledges_only_after_prior_commands() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = StateHandle::new(state.clone(), tx);
+        handle.set_module_status_ex("ordered".into(), ModuleLoadState::Loaded, None, false, true);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(handle.flush_module_statuses());
+            done_tx.send(result.map_err(|err| err.to_string())).unwrap();
+        });
+
+        let status = rx.blocking_recv().expect("status command is queued first");
+        let barrier = rx.blocking_recv().expect("barrier command follows status");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut subscriptions = SubscriptionTable::default();
+            let mut watches = HashMap::new();
+            let count = Arc::new(AtomicU64::new(0));
+            handle_command(status, &state, &mut subscriptions, &mut watches, &count).await;
+            assert!(
+                done_rx.try_recv().is_err(),
+                "barrier returned before its ack"
+            );
+            handle_command(barrier, &state, &mut subscriptions, &mut watches, &count).await;
+        });
+        done_rx
+            .recv()
+            .unwrap()
+            .expect("acknowledged state-engine barrier succeeds");
+        assert_eq!(state.blocking_read().modules.len(), 1);
+    }
+
     // ─── value_at_path ────────────────────────────────────────────────────
 
     #[test]
