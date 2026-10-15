@@ -30,6 +30,112 @@ use bread_shared::now_unix_ms;
 
 pub(crate) mod hyprland_compat;
 
+#[cfg(test)]
+mod module_store_tests {
+    use super::*;
+    use crate::core::state_engine::StateCommand;
+
+    #[test]
+    fn store_write_during_on_load_is_not_visible_as_loaded_until_status_arrives() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        module_store_set(
+            &state,
+            "legacy-test",
+            "fs_present".into(),
+            JsonValue::Bool(true),
+        );
+
+        let before = state.try_read().expect("state is unlocked");
+        assert!(
+            before.modules.is_empty(),
+            "in-progress module must not be exposed as loaded"
+        );
+        assert_eq!(
+            before.pending_module_stores["legacy-test"]["fs_present"],
+            JsonValue::Bool(true)
+        );
+        drop(before);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = StateHandle::new(state.clone(), tx);
+        handle.set_module_status_ex(
+            "legacy-test".into(),
+            ModuleLoadState::Loaded,
+            None,
+            false,
+            true,
+        );
+        let cmd = rx.try_recv().expect("status command queued");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut subscriptions = crate::core::subscriptions::SubscriptionTable::default();
+            let mut watches = HashMap::new();
+            let count = Arc::new(AtomicU64::new(0));
+            crate::core::state_engine::handle_command(
+                cmd,
+                &state,
+                &mut subscriptions,
+                &mut watches,
+                &count,
+            )
+            .await;
+        });
+
+        let after = state.try_read().expect("state is unlocked");
+        let module = after
+            .modules
+            .iter()
+            .find(|m| m.name == "legacy-test")
+            .unwrap();
+        assert!(matches!(module.status, ModuleLoadState::Loaded));
+        assert!(module.ungated);
+        assert_eq!(module.store["fs_present"], JsonValue::Bool(true));
+        assert!(after.pending_module_stores.is_empty());
+    }
+
+    #[test]
+    fn flush_module_statuses_reports_closed_channel_and_dropped_ack() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        let closed = StateHandle::new(state.clone(), closed_tx);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let closed_err = rt
+            .block_on(closed.flush_module_statuses())
+            .expect_err("closed command channel must fail the barrier");
+        assert!(closed_err
+            .to_string()
+            .contains("state engine command channel closed"));
+
+        let (drop_tx, mut drop_rx) = mpsc::unbounded_channel();
+        let dropped = StateHandle::new(state, drop_tx);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(dropped.flush_module_statuses());
+            result_tx
+                .send(result.map_err(|err| err.to_string()))
+                .unwrap();
+        });
+        let StateCommand::Barrier { ack } = drop_rx.blocking_recv().unwrap() else {
+            panic!("expected state-engine barrier");
+        };
+        drop(ack);
+        let dropped_err = result_rx
+            .recv()
+            .unwrap()
+            .expect_err("dropped ack must fail");
+        assert!(dropped_err.contains("state engine dropped barrier response"));
+    }
+}
+
 pub enum LuaMessage {
     Event {
         subscription_id: SubscriptionId,
@@ -42,6 +148,9 @@ pub enum LuaMessage {
         id: TimerId,
     },
     Reload {
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
+    StartupComplete {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     Shutdown,
@@ -74,6 +183,18 @@ impl RuntimeHandle {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(anyhow!(err)),
             Err(_) => Err(anyhow!("lua runtime dropped reload response")),
+        }
+    }
+
+    pub async fn wait_for_startup(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(LuaMessage::StartupComplete { reply: tx })
+            .map_err(|_| anyhow!("lua runtime channel closed"))?;
+        match rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(anyhow!(err)),
+            Err(_) => Err(anyhow!("lua runtime dropped startup response")),
         }
     }
 
@@ -127,9 +248,22 @@ pub fn spawn_runtime(
                     }
                 };
 
-                if let Err(err) = engine.reload_internal() {
+                // The initial load has finished attempting. Individual
+                // module errors remain visible in module status; only a Lua
+                // runtime initialization or state-engine barrier failure is
+                // an error returned by startup.ready.
+                let startup_load_result = engine.reload_internal().map_err(|err| err.to_string());
+                if let Err(err) = &startup_load_result {
                     error!(error = %err, "initial lua load failed");
                 }
+                let initial_barrier = match startup_load_result {
+                    Ok(()) => engine
+                        .state_handle
+                        .flush_module_statuses()
+                        .await
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err),
+                };
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
@@ -150,7 +284,26 @@ pub fn spawn_runtime(
                             }
                         }
                         LuaMessage::Reload { reply } => {
-                            let result = engine.reload_internal().map_err(|e| e.to_string());
+                            let result = engine.reload_internal().map_err(|err| err.to_string());
+                            let result = match result {
+                                Ok(()) => engine
+                                    .state_handle
+                                    .flush_module_statuses()
+                                    .await
+                                    .map_err(|err| err.to_string()),
+                                Err(err) => Err(err),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        LuaMessage::StartupComplete { reply } => {
+                            let result = match initial_barrier.as_ref() {
+                                Ok(()) => engine
+                                    .state_handle
+                                    .flush_module_statuses()
+                                    .await
+                                    .map_err(|err| err.to_string()),
+                                Err(err) => Err(err.clone()),
+                            };
                             let _ = reply.send(result);
                         }
                         LuaMessage::Shutdown => {
@@ -3050,8 +3203,18 @@ fn module_store_get(
         std::hint::spin_loop();
         std::thread::yield_now();
     };
-    let entry = guard.modules.iter().find(|m| m.name == module)?;
-    entry.store.get(key).cloned()
+    guard
+        .pending_module_stores
+        .get(module)
+        .and_then(|store| store.get(key))
+        .or_else(|| {
+            guard
+                .modules
+                .iter()
+                .find(|entry| entry.name == module)
+                .and_then(|entry| entry.store.get(key))
+        })
+        .cloned()
 }
 
 fn module_store_set(
@@ -3072,19 +3235,14 @@ fn module_store_set(
         return;
     }
 
-    let mut store = HashMap::new();
-    store.insert(key, value);
-    guard.modules.push(crate::core::types::ModuleStatus {
-        name: module.to_string(),
-        status: ModuleLoadState::Loaded,
-        last_error: None,
-        builtin: false,
-        // Placeholder until the real load-time status (with the correct
-        // ungated value) lands via set_module_status_ex; this fallback only
-        // fires if a module's own store is written before that happens.
-        ungated: false,
-        store,
-    });
+    // `on_load` writes happen before `load_module` sends the final status.
+    // Stage them separately so clients cannot observe a placeholder Loaded
+    // entry; `SetModuleStatus` merges the store atomically with final status.
+    guard
+        .pending_module_stores
+        .entry(module.to_string())
+        .or_default()
+        .insert(key, value);
 }
 
 fn lua_expand_path(path: &str) -> std::path::PathBuf {

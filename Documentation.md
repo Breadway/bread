@@ -1764,6 +1764,7 @@ Available methods:
 | Method | Params | Description |
 |--------|--------|-------------|
 | `ping` | none | Connectivity check |
+| `startup.ready` | none | Wait until initial Lua loading has completed and its queued state updates have been acknowledged by the state engine. Module load errors are reported in module status and do not fail readiness; Lua initialization or state-engine acknowledgement failures return an IPC error. `ping` remains connectivity-only. |
 | `health` | none | Version, uptime, PID, adapter status, `api_version`, and the breadbug store status under `bugstore` |
 | `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
 | `state.dump` | none | Return the full `RuntimeState` as JSON |
