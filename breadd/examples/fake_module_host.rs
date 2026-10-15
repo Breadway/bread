@@ -9,6 +9,7 @@
 //! directly, including requests the real host would never send.
 //!
 //! Output, one line each on stdout (inherited from `breadd`):
+//!   `FAKEHOST_PID <module> <pid>`       once the host process is running
 //!   `FAKEHOST_READY <module> <token>`  after hello and the `loaded` status
 //!   `FAKEHOST_DONE <module> <json>`    after the script finished
 //!
@@ -66,6 +67,8 @@ fn main() {
         &json!({ "id": "status", "method": "module_host.status", "params": { "state": "loaded" } }),
     );
 
+    println!("FAKEHOST_PID {name} {}", std::process::id());
+    let _ = std::io::stdout().flush();
     println!("FAKEHOST_READY {name} {token}");
     let _ = std::io::stdout().flush();
 

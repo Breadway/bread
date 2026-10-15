@@ -121,20 +121,42 @@ impl Server {
         info!(module = %module_name, permissions = ?permissions, "module-host authenticated");
 
         let hyprland = HyprlandSession::new();
+        let (frame_tx, mut frame_rx) = mpsc::channel::<String>(MODULE_HOST_FRAME_QUEUE);
+        let reader_closed = hyprland.closed.clone();
+        let reader_task = tokio::spawn(async move {
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        match frame_tx.try_send(line) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                reader_closed.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        reader_closed.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
         let mut subs: HashMap<String, JoinHandle<()>> = HashMap::new();
         let mut timers: HashMap<String, JoinHandle<()>> = HashMap::new();
 
         loop {
-            let line = match lines.next_line().await {
-                Ok(Some(l)) => l,
-                Ok(None) => break,
-                Err(e) => {
-                    warn!(module = %module_name, error = %e, "module-host connection read error");
-                    break;
-                }
+            let Some(line) = frame_rx.recv().await else {
+                break;
             };
-            if line.trim().is_empty() {
-                continue;
+            // The reader observes EOF even while a previous request is in
+            // flight. Queued requests from a disconnected host are discarded.
+            if hyprland.closed.load(Ordering::Relaxed) {
+                break;
             }
             let req: IpcRequest = match serde_json::from_str(&line) {
                 Ok(r) => r,
@@ -176,6 +198,7 @@ impl Server {
         }
 
         drop(hyprland);
+        reader_task.abort();
         for (_, h) in subs.drain() {
             h.abort();
         }
@@ -525,6 +548,9 @@ const HYPRLAND_MAX_IN_FLIGHT: usize = 8;
 /// Largest single string parameter accepted from a module.
 const HYPRLAND_MAX_FIELD_BYTES: usize = 16 * 1024;
 
+/// Bound read-ahead while the handler awaits a slow compositor operation.
+const MODULE_HOST_FRAME_QUEUE: usize = 32;
+
 /// Daemon-wide limits and settings for `module_host.hyprland_*`.
 #[derive(Clone)]
 pub(super) struct HyprlandBridge {
@@ -657,11 +683,13 @@ where
 /// the in-process `bread.hyprland`: the child never gets a compositor socket.
 ///
 /// The compositor I/O runs on its own thread with explicit socket deadlines
-/// derived from one operation deadline. That thread owns its in-flight
-/// permits until it has finished, so a request this function has already
-/// answered as failed cannot be followed by any further compositor request,
-/// and stalled compositors cannot accumulate more than the permitted number
-/// of workers. The thread is detached, so it never holds up daemon shutdown.
+/// derived from one operation deadline. That thread owns the global permit
+/// until it has finished, so stalled compositors cannot accumulate more than
+/// the permitted number of workers. This function owns the host permit until
+/// it returns, so the next request from the same host cannot start before the
+/// current response is ready. The worker computes its result before reporting
+/// it, so it issues no further compositor request afterwards. The thread is
+/// detached, so it never holds up daemon shutdown.
 async fn hyprland_bridge(
     bridge: &HyprlandBridge,
     session: &HyprlandSession,
@@ -678,7 +706,7 @@ async fn hyprland_bridge(
 
     let op = parse_hyprland_op(method, params)?;
 
-    let host_permit = session
+    let _host_permit = session
         .host
         .clone()
         .try_acquire_owned()
@@ -696,7 +724,7 @@ async fn hyprland_bridge(
     std::thread::Builder::new()
         .name("hypr-bridge".to_string())
         .spawn(move || {
-            let _permits = (host_permit, global_permit);
+            let _global_permit = global_permit;
             let result = match socket
                 .map(Ok)
                 .unwrap_or_else(hyprland_compat::request_socket)

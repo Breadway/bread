@@ -1841,9 +1841,11 @@ Each `module_host.hyprland_*` call is one bounded operation:
 
 - **One deadline.** The first request, any `hyprland.lua` `eval` fallback and
   any bind/unbind/monitor read-back all share a single 8 second budget, and
-  socket connect, write and read each stop at it. Once it has expired (or the
-  module's connection has closed) nothing further is sent to the compositor, so
-  a call that returned `hyprland request timed out` can never execute later.
+  socket connect, write and read each stop at it. When the budget expires or
+  the host connection closes, the worker sends no further compositor request,
+  including fallbacks and read-backs. A request that was already transmitted
+  may still have reached the compositor, so its effects cannot be revoked;
+  the guarantee is no additional request after cancellation or expiry.
 - **Size caps.** A request line over 32 KiB, a string parameter over 16 KiB, or
   a compositor reply over 1 MiB is refused with an error mentioning the byte
   limit. Parameters must have the documented types: `args` must be a string

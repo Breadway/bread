@@ -104,6 +104,65 @@ fn late_reply_is_a_timeout_and_triggers_no_read_back() {
     assert_eq!(comp.requests(), vec!["keyword bind SUPER, Q, exec, kitty"]);
 }
 
+/// A host killed while its dispatch is stalled must not cause the daemon to
+/// send the eval fallback afterwards. The independent connection reader sees
+/// the disconnect while the first request is in flight and cancels the whole
+/// operation before the compositor rejects it.
+#[test]
+fn host_death_during_stalled_dispatch_sends_no_fallback() {
+    let (h, comp) = Harness::spawn(&[ModuleSpec::granted("hypr-a")], |runtime| {
+        Compositor::start(
+            runtime,
+            Arc::new(|request, conn| {
+                if request.starts_with("dispatch ") {
+                    std::thread::sleep(Duration::from_secs(2));
+                    let _ = conn.write_all(b"Invalid dispatcher");
+                } else {
+                    let _ = conn.write_all(b"ok");
+                }
+            }),
+        )
+    });
+    h.wait_ready(&["hypr-a"]);
+    let pids = h.wait_host_pids(&["hypr-a"]);
+    h.set_script(
+        "hypr-a",
+        vec![(
+            "op",
+            request(
+                "1",
+                "module_host.hyprland_dispatch",
+                json!({ "cmd": "workspace", "args": "9" }),
+            ),
+        )],
+    );
+    h.go(&["hypr-a"]);
+
+    let observed = Instant::now() + Duration::from_secs(10);
+    loop {
+        if comp
+            .requests()
+            .iter()
+            .any(|seen| seen == "dispatch workspace 9")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < observed,
+            "the stalled dispatch never reached the compositor"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    Harness::kill_host(pids["hypr-a"], Duration::from_secs(5));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        comp.requests(),
+        vec!["dispatch workspace 9"],
+        "no fallback after the owning host disconnects"
+    );
+}
+
 /// (c) Oversized reply: refused, not buffered, not forwarded to the module.
 /// And an oversized request is rejected before the compositor is contacted.
 #[test]
@@ -167,41 +226,47 @@ fn oversized_reply_and_request_are_refused() {
     );
 }
 
-/// (d) The compositor socket never accepts. The call fails at the deadline,
-/// and a daemon asked to stop while such a call is in flight still exits
-/// promptly instead of waiting on the blocked worker.
+/// (d) The compositor accepts a query and then stalls. The test stops the
+/// daemon only after that actual request is observed, so shutdown is tested
+/// with a genuinely in-flight call. A blocked compositor worker must not
+/// delay daemon shutdown, and no fallback or read-back may follow.
 #[test]
-fn compositor_that_never_accepts_times_out_and_does_not_hold_up_shutdown() {
-    let (mut h, _never) = Harness::spawn(&[ModuleSpec::granted("hypr-a")], |runtime| {
-        NeverAccepts::start(runtime)
+fn accepted_but_stalled_call_does_not_hold_up_shutdown() {
+    let (mut h, comp) = Harness::spawn(&[ModuleSpec::granted("hypr-a")], |runtime| {
+        Compositor::start(
+            runtime,
+            Arc::new(|_, conn| {
+                std::thread::sleep(Duration::from_secs(12));
+                let _ = conn.write_all(b"[]");
+            }),
+        )
     });
-    let (response, elapsed) = run_one(
-        &h,
-        "hypr-a",
-        "module_host.hyprland_query",
-        json!({ "kind": "monitors" }),
-        Duration::from_secs(30),
-    );
-    assert!(error_of(&response).contains("timed out"), "{response}");
-    assert!(
-        elapsed.as_secs_f64() < DEADLINE_SECS + 2.0,
-        "took {elapsed:?} to give up on a socket that never accepts"
-    );
-
-    // Same stall again, and stop the daemon one second in.
+    h.wait_ready(&["hypr-a"]);
     h.set_script(
         "hypr-a",
         vec![(
             "op",
             request(
-                "2",
+                "1",
                 "module_host.hyprland_query",
                 json!({ "kind": "monitors" }),
             ),
         )],
     );
     h.go(&["hypr-a"]);
-    std::thread::sleep(Duration::from_secs(1));
+
+    let observed = Instant::now() + Duration::from_secs(10);
+    loop {
+        if comp.requests().iter().any(|seen| seen == "j/monitors") {
+            break;
+        }
+        assert!(
+            Instant::now() < observed,
+            "the stalled query never reached the compositor"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     let started = Instant::now();
     let status = h.terminate(Duration::from_secs(5));
     assert!(
@@ -209,6 +274,11 @@ fn compositor_that_never_accepts_times_out_and_does_not_hold_up_shutdown() {
         "daemon did not exit within 5s of SIGTERM with a stalled compositor call in flight"
     );
     assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        comp.requests(),
+        vec!["j/monitors"],
+        "shutdown must leave the stalled call alone"
+    );
 }
 
 /// Stalled calls from many hosts at once cannot all pin workers: calls beyond

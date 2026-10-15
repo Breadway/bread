@@ -15,7 +15,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -122,46 +121,6 @@ impl Compositor {
 impl Drop for Compositor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-    }
-}
-
-/// A listening Hyprland socket that never accepts, with its backlog already
-/// full, so a blocking `connect(2)` to it does not complete.
-pub struct NeverAccepts {
-    _fds: Vec<OwnedFd>,
-}
-
-impl NeverAccepts {
-    pub fn start(runtime_dir: &Path) -> Self {
-        let dir = runtime_dir.join("hypr").join(SIGNATURE);
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(".socket.sock");
-        let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
-        // SAFETY: sockaddr_un is plain data; all-zero is valid.
-        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-        assert!(bytes.len() < addr.sun_path.len());
-        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-        for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
-            *dst = *src as libc::c_char;
-        }
-        let size = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-        let sa = (&addr as *const libc::sockaddr_un).cast();
-        let mut fds = Vec::new();
-        // SAFETY: plain socket calls on fds that are immediately owned.
-        unsafe {
-            let listener = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-            assert!(listener >= 0);
-            fds.push(OwnedFd::from_raw_fd(listener));
-            assert_eq!(libc::bind(listener, sa, size), 0);
-            assert_eq!(libc::listen(listener, 0), 0);
-            for _ in 0..16 {
-                let c = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0);
-                assert!(c >= 0);
-                fds.push(OwnedFd::from_raw_fd(c));
-                let _ = libc::connect(c, sa, size);
-            }
-        }
-        Self { _fds: fds }
     }
 }
 
@@ -355,6 +314,48 @@ enabled = false
             .into_iter()
             .map(|(name, token)| (name, token.trim().to_string()))
             .collect()
+    }
+
+    /// Wait for every named fake host to print its process id. The id is used
+    /// by tests that terminate a host while its request is still in flight.
+    pub fn wait_host_pids(&self, names: &[&str]) -> HashMap<String, u32> {
+        self.wait_lines("FAKEHOST_PID", names, Duration::from_secs(90))
+            .into_iter()
+            .map(|(name, pid)| {
+                (
+                    name,
+                    pid.trim()
+                        .parse::<u32>()
+                        .expect("fake host printed its pid"),
+                )
+            })
+            .collect()
+    }
+
+    /// Terminate one fake host process without daemon cooperation, then wait
+    /// until the operating system no longer reports it as alive.
+    pub fn kill_host(pid: u32, within: Duration) {
+        // SAFETY: plain kill(2) on a fake host this test spawned.
+        unsafe {
+            assert_eq!(
+                libc::kill(pid as libc::pid_t, libc::SIGKILL),
+                0,
+                "could not kill fake host {pid}"
+            );
+        }
+        let deadline = Instant::now() + within;
+        loop {
+            // SAFETY: signal 0 only checks that the process still exists.
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if !alive {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fake host {pid} did not exit after SIGKILL"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     /// Write the script for `name` (does not start it).
