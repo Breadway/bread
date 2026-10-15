@@ -1,5 +1,39 @@
 use super::*;
-use bread_bug::store::{Marker, Store};
+use bread_bug::store::{Marker, ProcessIdentity, Store};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// How many times the (fake) capture function ran.
+static CAPTURES: AtomicUsize = AtomicUsize::new(0);
+/// Serializes the tests that read `CAPTURES`.
+static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn identity(start_ticks: u64) -> ProcessIdentity {
+    ProcessIdentity {
+        start_ticks,
+        exe: "/usr/bin/breadpad".into(),
+        boot_id: None,
+    }
+}
+
+/// pid 4242 started at tick 500 is the live pad instance; anything else is a
+/// different process (pid 9999 is gone entirely).
+fn fake_check(_app: &str, pid: u32, id: &ProcessIdentity) -> Result<(), Refusal> {
+    match (pid, id.start_ticks) {
+        (4242, 500) => Ok(()),
+        (4242, _) => Err(Refusal::Replaced { pid }),
+        _ => Err(Refusal::Gone { pid }),
+    }
+}
+
+fn fake_capture(app: &str, pid: u32, id: &ProcessIdentity) -> Result<Vec<Frame>, Refusal> {
+    // Like the real one, verify again right before "attaching".
+    fake_check(app, pid, id)?;
+    CAPTURES.fetch_add(1, Ordering::SeqCst);
+    Ok(vec![Frame {
+        symbol: Some("__poll".into()),
+        ..Frame::default()
+    }])
+}
 
 fn env(dir: &std::path::Path) -> Env {
     let ctx = ScrubContext {
@@ -32,13 +66,8 @@ fn env(dir: &std::path::Path) -> Env {
             },
         ])),
         include_journal: false,
-        live_capture: |_| {
-            Some(vec![Frame {
-                symbol: Some("__poll".into()),
-                ..Frame::default()
-            }])
-        },
-        pid_ok: |pid| pid == 4242,
+        live_capture: fake_capture,
+        live_check: fake_check,
     }
 }
 
@@ -196,36 +225,47 @@ fn missing_app_without_tty_is_an_error() {
     assert!(go(&[], &e, "", false).0.is_err());
 }
 
+fn freeze_marker(pid: u32, start_ticks: u64, t: u64) -> Marker {
+    let mut m = Marker::new(MarkerKind::Freeze, t);
+    m.pid = Some(pid);
+    m.process = Some(identity(start_ticks));
+    m
+}
+
 fn freeze_env(dir: &std::path::Path, pid: u32) -> Env {
     let e = env(dir);
     let store = Store::open(&e.store_root, &BugConfig::default(), e.scrub.clone()).unwrap();
-    let mut m = Marker::new(MarkerKind::Freeze, 30);
-    m.pid = Some(pid);
-    store.record_marker("pad", m).unwrap();
+    store
+        .record_marker("pad", freeze_marker(pid, 500, 30))
+        .unwrap();
     e
 }
 
+fn seed(e: &Env, marker: Marker) {
+    let store = Store::open(&e.store_root, &BugConfig::default(), e.scrub.clone()).unwrap();
+    store.record_marker("pad", marker).unwrap();
+}
+
+const LIVE: &[&str] = &[
+    "--app",
+    "pad",
+    "--type",
+    "freeze",
+    "--live-stack",
+    "--dry-run",
+];
+
 #[test]
 fn live_stack_is_included_only_with_consent() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let e = freeze_env(dir.path(), 4242);
     // --live-stack is explicit consent
-    let (r, out) = go(
-        &[
-            "--app",
-            "pad",
-            "--type",
-            "freeze",
-            "--live-stack",
-            "--dry-run",
-        ],
-        &e,
-        "",
-        false,
-    );
+    let (r, out) = go(LIVE, &e, "", false);
     r.unwrap();
     assert!(out.contains("__poll"), "{out}");
     // no flag, non-interactive: no capture
+    let before = CAPTURES.load(Ordering::SeqCst);
     let (_, out) = go(
         &["--app", "pad", "--type", "freeze", "--dry-run"],
         &e,
@@ -237,29 +277,142 @@ fn live_stack_is_included_only_with_consent() {
     let (_, out) = go(&[], &e, "1\n\n\nn\nc\n", true);
     assert!(out.contains("Capture one now"), "{out}");
     assert!(out.contains("live stack frames      0"), "{out}");
+    assert_eq!(
+        CAPTURES.load(Ordering::SeqCst),
+        before,
+        "declined, yet captured"
+    );
     // interactive yes
     let (_, out) = go(&[], &e, "1\n\n\ny\nc\n", true);
     assert!(out.contains("live stack frames      1"), "{out}");
 }
 
 #[test]
-fn live_stack_skips_dead_or_reused_pids() {
+fn consent_prompt_says_what_a_capture_contains() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let e = freeze_env(dir.path(), 4242);
+    let (_, out) = go(&[], &e, "1\n\n\nn\nc\n", true);
+    assert!(out.contains("no memory, registers or environment"), "{out}");
+}
+
+#[test]
+fn live_stack_skips_dead_pids() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let e = freeze_env(dir.path(), 9999);
-    let (r, out) = go(
-        &[
-            "--app",
-            "pad",
-            "--type",
-            "freeze",
-            "--live-stack",
-            "--dry-run",
-        ],
-        &e,
-        "",
-        false,
-    );
+    let before = CAPTURES.load(Ordering::SeqCst);
+    let (r, out) = go(LIVE, &e, "", false);
     r.unwrap();
-    assert!(out.contains("No running frozen pad process"), "{out}");
+    assert!(out.contains("process 9999 has exited"), "{out}");
     assert!(!out.contains("__poll"));
+    assert_eq!(CAPTURES.load(Ordering::SeqCst), before);
+}
+
+#[test]
+fn live_stack_refuses_a_reused_pid_with_a_clear_message() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    // pid 4242 is alive, but it is not the instance that froze (tick 123).
+    seed(&e, freeze_marker(4242, 123, 30));
+    let before = CAPTURES.load(Ordering::SeqCst);
+    let (r, out) = go(LIVE, &e, "", false);
+    r.unwrap();
+    assert!(
+        out.contains("different process than the one that froze"),
+        "{out}"
+    );
+    assert!(!out.contains("__poll"));
+    assert_eq!(CAPTURES.load(Ordering::SeqCst), before);
+}
+
+#[test]
+fn live_stack_refuses_a_marker_without_process_identity() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    let mut m = Marker::new(MarkerKind::Freeze, 30);
+    m.pid = Some(4242);
+    seed(&e, m);
+    let before = CAPTURES.load(Ordering::SeqCst);
+    let (_, out) = go(LIVE, &e, "", false);
+    assert!(out.contains("does not record which process froze"), "{out}");
+    assert_eq!(CAPTURES.load(Ordering::SeqCst), before);
+}
+
+#[test]
+fn a_recovered_stopped_or_later_marker_invalidates_the_freeze() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
+    for later in [
+        MarkerKind::Recovered,
+        MarkerKind::Stopped,
+        MarkerKind::Panic,
+        MarkerKind::Crash,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let e = freeze_env(dir.path(), 4242);
+        let mut m = Marker::new(later, 40);
+        m.pid = Some(4242);
+        m.process = Some(identity(500));
+        seed(&e, m);
+        let before = CAPTURES.load(Ordering::SeqCst);
+        let (r, out) = go(LIVE, &e, "", false);
+        r.unwrap();
+        assert!(out.contains("not a freeze"), "{later:?}: {out}");
+        assert!(!out.contains("__poll"), "{later:?}: {out}");
+        assert_eq!(
+            CAPTURES.load(Ordering::SeqCst),
+            before,
+            "{later:?}: capture was invoked"
+        );
+    }
+}
+
+#[test]
+fn a_new_freeze_after_recovery_is_capturable_again() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let e = freeze_env(dir.path(), 4242);
+    seed(&e, Marker::new(MarkerKind::Recovered, 40));
+    seed(&e, freeze_marker(4242, 500, 50));
+    let (_, out) = go(LIVE, &e, "", false);
+    assert!(out.contains("__poll"), "{out}");
+}
+
+#[test]
+fn interactive_prompt_is_not_offered_after_recovery() {
+    let _g = CAPTURE_LOCK.lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let e = freeze_env(dir.path(), 4242);
+    seed(&e, Marker::new(MarkerKind::Recovered, 40));
+    let (_, out) = go(&[], &e, "1\n\n\ny\nc\n", true);
+    assert!(!out.contains("Capture one now"), "{out}");
+}
+
+#[test]
+fn identity_is_checked_again_after_consent() {
+    use std::sync::atomic::AtomicBool;
+    static SWAP: AtomicBool = AtomicBool::new(false);
+    // The pre-prompt check passes; by the time the capture function runs
+    // (after the user said yes) the process was replaced.
+    fn check(_: &str, _: u32, _: &ProcessIdentity) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn capture(_: &str, pid: u32, _: &ProcessIdentity) -> Result<Vec<Frame>, Refusal> {
+        SWAP.store(true, Ordering::SeqCst);
+        Err(Refusal::Replaced { pid })
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = freeze_env(dir.path(), 4242);
+    e.live_check = check;
+    e.live_capture = capture;
+    let (r, out) = go(&[], &e, "1\n\n\ny\nc\n", true);
+    r.unwrap();
+    assert!(SWAP.load(Ordering::SeqCst), "capture never ran");
+    assert!(
+        out.contains("different process than the one that froze"),
+        "{out}"
+    );
+    assert!(out.contains("live stack frames      0"), "{out}");
 }

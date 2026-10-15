@@ -1,0 +1,14 @@
+PID 4242 - process
+TID 4242:
+#0  0x00007f43676e4a6b clock_nanosleep@GLIBC_2.2.5 - /usr/lib/libc.so.6
+    [d320029ad1a23be2f4bce117fd321cbd23a2014b]@0x7f4367600000+0xe4a6b
+#1  0x00007f43676f0ee7 __nanosleep - /usr/lib/libc.so.6
+    [d320029ad1a23be2f4bce117fd321cbd23a2014b]@0x7f4367600000+0xf0ee6
+#2  0x000055a7bc1421c1 park - /opt/breadpad/hang_nobid
+#3  0x000055a7bc1421cc outer - /opt/breadpad/hang_nobid
+#4  0x000055a7bc14229d main - /opt/breadpad/hang_nobid
+#5  0x00007f4367627781 __libc_start_call_main - /usr/lib/libc.so.6
+    [d320029ad1a23be2f4bce117fd321cbd23a2014b]@0x7f4367600000+0x27780
+#6  0x00007f43676278b9 __libc_start_main@@GLIBC_2.34 - /usr/lib/libc.so.6
+    [d320029ad1a23be2f4bce117fd321cbd23a2014b]@0x7f4367600000+0x278b8
+#7  0x000055a7bc1420b5 _start - /opt/breadpad/hang_nobid

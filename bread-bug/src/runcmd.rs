@@ -11,6 +11,18 @@ const MAX_OUTPUT: u64 = 512 * 1024;
 /// `timeout`. A missing program, a failure, or a timeout all yield `None`;
 /// breadbug treats every helper as optional.
 pub fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
+    run_accepting(program, args, timeout, &[0])
+}
+
+/// Like [`run`] but also accepts the listed exit codes. `eu-stack` exits 1
+/// when it printed some frames but hit a non-fatal unwinding error, which is
+/// common for real processes.
+pub fn run_accepting(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+    ok_codes: &[i32],
+) -> Option<String> {
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -38,7 +50,7 @@ pub fn run(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
     };
     let out = reader.join().ok()?;
     status
-        .filter(|s| s.success())
+        .filter(|s| s.code().is_some_and(|c| ok_codes.contains(&c)))
         .map(|_| String::from_utf8_lossy(&out).into_owned())
 }
 

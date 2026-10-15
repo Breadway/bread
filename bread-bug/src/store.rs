@@ -73,10 +73,23 @@ pub enum MarkerKind {
     Freeze,
     /// A frozen app started responding again.
     Recovered,
+    /// A frozen app's process ended (clean stop, death, or replacement by a
+    /// new instance). Store-only: it closes the freeze so a live stack is no
+    /// longer offered, and it is never published on the bus.
+    Stopped,
 }
 
-/// A stack frame. Never carries memory contents: module, offset in the
-/// module, the module's build-id and (optionally) a symbol name.
+impl MarkerKind {
+    /// Whether this marker is something a user might want to report.
+    pub fn is_problem(self) -> bool {
+        matches!(self, Self::Panic | Self::Crash | Self::Freeze)
+    }
+}
+
+/// A stack frame. Never carries memory contents: module path, offset in the
+/// module (relative to the module's load address, never a virtual address
+/// and never a displacement from the start of a function), the module's GNU
+/// build-id and (optionally) a symbol name.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Frame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,6 +100,21 @@ pub struct Frame {
     pub build_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+}
+
+/// Which process instance a marker is about. A pid alone is not an identity
+/// (pids are reused), so the kernel start time and the executable are kept
+/// too. Local to the store: it is never copied into a report.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    /// `/proc/<pid>/stat` field 22: start time in clock ticks since boot.
+    pub start_ticks: u64,
+    /// `/proc/<pid>/exe` target at the time of the heartbeat.
+    pub exe: String,
+    /// `/proc/sys/kernel/random/boot_id`, so ticks from another boot never
+    /// match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
 }
 
 /// A crash or freeze marker.
@@ -108,6 +136,9 @@ pub struct Marker {
     /// (with the user's consent) while it is alive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// The instance `pid` referred to; live capture is bound to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessIdentity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub frames: Vec<Frame>,
 }
@@ -123,6 +154,7 @@ impl Marker {
             location: None,
             signal: None,
             pid: None,
+            process: None,
             frames: Vec::new(),
         }
     }
@@ -372,6 +404,14 @@ impl Store {
         scrub(&mut marker.app_version, &mut inner);
         scrub(&mut marker.signal, &mut inner);
         marker.build_id = marker.build_id.filter(|b| is_build_id(b));
+        // This trusted, local-only field is produced from /proc by breadd,
+        // not supplied by the app. It is kept verbatim because the watchdog
+        // later compares it with `/proc/<pid>/exe`; it is bounded and removed
+        // before the report is serialized.
+        if let Some(p) = marker.process.as_mut() {
+            truncate_to(&mut p.exe, max);
+            p.boot_id = p.boot_id.take().filter(|b| b.len() <= 64);
+        }
         marker.frames.truncate(MAX_FRAMES);
         for f in &mut marker.frames {
             scrub(&mut f.module, &mut inner);

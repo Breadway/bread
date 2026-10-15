@@ -348,25 +348,23 @@ pub fn build(opts: &BuildOptions) -> Result<Prepared> {
     Prepared::from_report(report)
 }
 
-/// Sections that hold only machine facts and app ids. They still get the
-/// pattern rules (an IP in a version string would be caught) but not the
-/// identity literals: on a default install the hostname equals the OS id,
-/// and redacting `os_id` as a hostname would destroy useful data.
-const FACT_SECTIONS: &[&str] = &[
-    "app",
-    "system",
-    "installed_apps",
-    "runtime",
-    "schema",
-    "report_type",
-    "created_unix",
-];
-
 /// Run the whole report through fresh scrubbers. Build-ids are exempt from
-/// the long-hex rules because the server needs them for symbolication.
+/// the long-hex rules because the server needs them for symbolication. A
+/// recognized `system.os_id` may be kept only when it does not equal any
+/// configured identity; if a user or hostname is literally `bos` or `arch`,
+/// the configured identity wins and is redacted even in that field. All
+/// versions, kernels, runtime fields, app fields and free text are always
+/// scrubbed.
 fn scrub_report(report: &mut Report, ctx: &ScrubContext) -> Result<()> {
     let mut full = Scrubber::new(ctx.clone());
-    let mut facts = Scrubber::new(ScrubContext::default());
+    let os_id = report.system.os_id.clone();
+    let os_id_is_identity = os_id.as_ref().is_some_and(|os_id| {
+        ctx.username
+            .iter()
+            .chain(ctx.hostname.iter())
+            .chain(ctx.extra_literals.iter())
+            .any(|identity| identity.trim().eq_ignore_ascii_case(os_id))
+    });
     let ids: Vec<String> = report
         .markers
         .iter()
@@ -381,27 +379,25 @@ fn scrub_report(report: &mut Report, ctx: &ScrubContext) -> Result<()> {
         .collect();
     for id in &ids {
         full.keep_build_id(id);
-        facts.keep_build_id(id);
     }
-    let Value::Object(sections) = serde_json::to_value(&*report)? else {
-        bail!("report did not serialize to an object");
-    };
-    let mut out = serde_json::Map::new();
-    for (key, section) in sections {
-        let scrubber = if FACT_SECTIONS.contains(&key.as_str()) {
-            &mut facts
-        } else {
-            &mut full
-        };
-        out.insert(key, scrubber.scrub_value(&section));
+    // Process identity is stored locally only to guard live capture; it is
+    // never part of ECO-66's report schema. Pids are also unnecessary in the
+    // report, so omit both before the final whole-report scrub.
+    for marker in &mut report.markers {
+        marker.pid = None;
+        marker.process = None;
     }
-    *report =
-        serde_json::from_value(Value::Object(out)).context("scrubbed report no longer parses")?;
-    let mut redactions: BTreeMap<String, usize> = BTreeMap::new();
-    for (k, v) in full.stats().iter().chain(facts.stats().iter()) {
-        *redactions.entry((*k).to_string()).or_default() += *v;
+    let value = serde_json::to_value(&*report)?;
+    let scrubbed = full.scrub_value_preserving_keys(&value);
+    *report = serde_json::from_value(scrubbed).context("scrubbed report no longer parses")?;
+    if !os_id_is_identity {
+        report.system.os_id = os_id;
     }
-    report.redactions = redactions;
+    report.redactions = full
+        .stats()
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), *v))
+        .collect();
     Ok(())
 }
 
@@ -457,12 +453,7 @@ pub fn app_entries(reader: &Reader, installed: Option<&[InstalledApp]>) -> Vec<A
             let last_problem = reader
                 .snapshot(&app, 0, 0)
                 .ok()
-                .and_then(|s| {
-                    s.markers
-                        .into_iter()
-                        .rev()
-                        .find(|m| m.kind != MarkerKind::Recovered)
-                })
+                .and_then(|s| s.markers.into_iter().rev().find(|m| m.kind.is_problem()))
                 .map(|m| (m.kind, m.t));
             AppEntry {
                 app,

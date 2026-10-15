@@ -459,6 +459,40 @@ fn frames_are_capped() {
 }
 
 #[test]
+fn process_identity_is_preserved_locally_but_removed_from_reports() {
+    use crate::report::{self, BuildOptions, ReportType};
+    use serde_json::Value;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path(), StoreLimits::default(), &[]);
+    let mut marker = Marker::new(MarkerKind::Freeze, 10);
+    marker.pid = Some(4242);
+    marker.process = Some(ProcessIdentity {
+        start_ticks: 123456,
+        exe: "/usr/bin/breadpad".into(),
+        boot_id: Some("boot-id-for-local-matching".into()),
+    });
+    s.record_marker("pad", marker).unwrap();
+
+    let local = Reader::open(dir.path()).last_marker("pad").unwrap();
+    assert_eq!(local.pid, Some(4242));
+    assert_eq!(local.process.as_ref().unwrap().start_ticks, 123456);
+    assert_eq!(local.process.as_ref().unwrap().exe, "/usr/bin/breadpad");
+
+    let mut opts = BuildOptions::new("pad", ReportType::Freeze);
+    opts.store_root = dir.path().to_path_buf();
+    opts.include_journal = false;
+    opts.now_unix = 20;
+    let prepared = report::build(&opts).unwrap();
+    let json: Value = serde_json::from_slice(&prepared.bytes).unwrap();
+    let marker = &json["markers"][0];
+    assert!(marker.get("pid").is_none());
+    assert!(marker.get("process").is_none());
+    assert!(!prepared.bytes.windows(12).any(|w| w == b"start_ticks"));
+    assert!(!prepared.bytes.windows(7).any(|w| w == b"boot-id"));
+}
+
+#[test]
 fn long_lines_are_truncated_on_a_char_boundary() {
     let dir = tempfile::tempdir().unwrap();
     let limits = StoreLimits {
