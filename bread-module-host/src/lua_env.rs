@@ -157,7 +157,8 @@ impl ModuleHostLua {
         let granted: HashSet<PermissionKind> = permissions.iter().map(|p| p.kind).collect();
         Self::install_fs(&lua, &bread, cmd_tx.clone(), &granted)?;
         Self::install_exec(&lua, &bread, cmd_tx.clone(), &granted)?;
-        Self::install_state(&lua, &bread, cmd_tx, &granted)?;
+        Self::install_state(&lua, &bread, cmd_tx.clone(), &granted)?;
+        Self::install_hyprland(&lua, &bread, cmd_tx, &granted)?;
 
         lua.globals().set("bread", bread)?;
         lua.load(WAIT_HELPER)
@@ -397,6 +398,101 @@ impl ModuleHostLua {
         })?;
         state_tbl.set("get", get_fn)?;
         bread.set("state", state_tbl)?;
+        Ok(())
+    }
+
+    /// `bread.hyprland.*`, gated on `hyprland`. Every call is a
+    /// `module_host.hyprland_*` RPC: breadd talks to the compositor and runs
+    /// the same checked-reply logic as the in-process binding, so
+    /// `dispatch`/`keyword` raise a Lua error unless Hyprland answered `ok`
+    /// (and binds/monitors were read back), and `eval` returns the raw reply.
+    /// `on_raw` is not bridged; use `bread.on("bread.hyprland.*", ...)`.
+    fn install_hyprland(
+        lua: &Lua,
+        bread: &Table,
+        cmd_tx: mpsc::Sender<IoCommand>,
+        granted: &HashSet<PermissionKind>,
+    ) -> Result<()> {
+        if !granted.contains(&PermissionKind::Hyprland) {
+            return Ok(());
+        }
+        let hypr = lua.create_table()?;
+
+        let tx = cmd_tx.clone();
+        hypr.set(
+            "dispatch",
+            lua.create_function(move |_, (cmd, args): (String, Option<String>)| {
+                call(
+                    &tx,
+                    "module_host.hyprland_dispatch",
+                    json!({ "cmd": cmd, "args": args.unwrap_or_default() }),
+                    RPC_TIMEOUT,
+                )
+                .map(|_| "ok".to_string())
+                .map_err(LuaError::external)
+            })?,
+        )?;
+
+        let tx = cmd_tx.clone();
+        hypr.set(
+            "keyword",
+            lua.create_function(move |_, (key, value): (String, String)| {
+                call(
+                    &tx,
+                    "module_host.hyprland_keyword",
+                    json!({ "key": key, "value": value }),
+                    RPC_TIMEOUT,
+                )
+                .map(|_| "ok".to_string())
+                .map_err(LuaError::external)
+            })?,
+        )?;
+
+        let tx = cmd_tx.clone();
+        hypr.set(
+            "eval",
+            lua.create_function(move |_, expr: String| {
+                let result = call(
+                    &tx,
+                    "module_host.hyprland_eval",
+                    json!({ "expr": expr }),
+                    RPC_TIMEOUT,
+                )
+                .map_err(LuaError::external)?;
+                Ok(result
+                    .get("reply")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string())
+            })?,
+        )?;
+
+        for (name, kind) in [
+            ("active_window", "active_window"),
+            ("monitors", "monitors"),
+            ("workspaces", "workspaces"),
+            ("clients", "clients"),
+        ] {
+            let tx = cmd_tx.clone();
+            hypr.set(
+                name,
+                lua.create_function(move |lua, ()| {
+                    let result = call(
+                        &tx,
+                        "module_host.hyprland_query",
+                        json!({ "kind": kind }),
+                        RPC_TIMEOUT,
+                    )
+                    .map_err(LuaError::external)?;
+                    match result.get("value") {
+                        Some(v) => json_to_lua(lua, v),
+                        None => Ok(LuaValue::Nil),
+                    }
+                })?,
+            )?;
+        }
+
+        bread.set("hyprland", hypr)?;
         Ok(())
     }
 

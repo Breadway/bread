@@ -4,7 +4,7 @@
 //! Currently just `check-docs`: a drift detector between the actual
 //! `bread.*` Lua binding surface + IPC method surface + `bread` CLI command
 //! surface (as implemented in `breadd/src/lua/mod.rs`, `breadd/src/ipc/mod.rs`,
-//! and `bread-cli/src/main.rs`) and the checked-in registry at
+//! `breadd/src/ipc/module_host_bridge.rs` and `bread-cli/src/main.rs`) and the checked-in registry at
 //! `api-schema.toml`, cross-referenced against `Documentation.md` (Lua/IPC)
 //! and `README.md` (CLI commands). See `api-schema.toml`'s header comment for
 //! why this exists and why it's a *drift detector*, not a doc generator.
@@ -59,6 +59,8 @@ fn run_check_docs() -> Result<bool> {
         .context("reading breadd/src/lua/mod.rs")?;
     let ipc_src = std::fs::read_to_string(root.join("breadd/src/ipc/mod.rs"))
         .context("reading breadd/src/ipc/mod.rs")?;
+    let bridge_src = std::fs::read_to_string(root.join("breadd/src/ipc/module_host_bridge.rs"))
+        .context("reading breadd/src/ipc/module_host_bridge.rs")?;
     let cli_src = std::fs::read_to_string(root.join("bread-cli/src/main.rs"))
         .context("reading bread-cli/src/main.rs")?;
     let schema_toml =
@@ -70,6 +72,7 @@ fn run_check_docs() -> Result<bool> {
     let report = check(
         &lua_src,
         &ipc_src,
+        &bridge_src,
         &cli_src,
         &schema_toml,
         &doc_md,
@@ -247,36 +250,40 @@ fn extract_lua_bindings(src: &str) -> BTreeSet<(String, String)> {
 fn extract_ipc_methods(src: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
 
-    // `events.subscribe` is special-cased ahead of the dispatch `match`
-    // (it upgrades the connection to a streaming socket instead of
-    // returning a single response), so it never appears as a match arm.
-    if src.contains("req.method == \"events.subscribe\"") {
-        out.insert("events.subscribe".to_string());
+    // `events.subscribe` and `module_host.hello` are special-cased ahead of
+    // the dispatch `match` (each upgrades the connection to a long-lived
+    // stream instead of returning a single response), so they never appear
+    // as match arms.
+    const SPECIAL: &str = "req.method == \"";
+    for (idx, _) in src.match_indices(SPECIAL) {
+        let name = ident_upto_quote(src, idx + SPECIAL.len());
+        if !name.is_empty() {
+            out.insert(name.to_string());
+        }
     }
 
-    let Some(match_start) = src.find("match req.method.as_str() {") else {
+    out.extend(extract_string_arms(src, "match req.method.as_str() {"));
+    out
+}
+
+/// The string literals matched by the arms of the `match` that starts at the
+/// first occurrence of `marker`, including or-patterns (`"a" | "b" =>`).
+///
+/// Brace depth is tracked so a `"literal" => ...` pattern belonging to some
+/// *other*, nested match inside an arm's body (e.g. the `"emit"` arm's own
+/// `match source_str { "terminal" => ..., "git" => ... }`) isn't mistaken for
+/// a top-level arm. Only depth == 1 (directly inside the outer match) counts.
+fn extract_string_arms(src: &str, marker: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let Some(match_start) = src.find(marker) else {
         return out;
     };
 
-    // Track brace depth so a `"literal" => ...` pattern belonging to some
-    // *other*, nested match inside an arm's body (e.g. the `"emit"` arm's
-    // own `match source_str { "terminal" => ..., "git" => ... }`) isn't
-    // mistaken for a top-level IPC method arm. Only depth == 1 (directly
-    // inside the outer `match req.method.as_str() { ... }`) counts.
     let mut depth: i32 = 0;
     for line in src[match_start..].lines() {
         let pre_depth = depth;
-        let trimmed = line.trim_start();
-
         if pre_depth == 1 {
-            if let Some(rest) = trimmed.strip_prefix('"') {
-                if let Some(end) = rest.find('"') {
-                    let name = &rest[..end];
-                    if rest[end + 1..].trim_start().starts_with("=>") {
-                        out.insert(name.to_string());
-                    }
-                }
-            }
+            out.extend(arm_literals(line.trim_start()));
         }
 
         depth += line.matches('{').count() as i32;
@@ -287,6 +294,69 @@ fn extract_ipc_methods(src: &str) -> BTreeSet<String> {
     }
 
     out
+}
+
+/// `"a" | "b" => ...` -> `["a", "b"]`. Anything that is not a pure string
+/// literal pattern list (a binding, a guard, a wildcard) yields nothing.
+fn arm_literals(line: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = line;
+    loop {
+        let Some(after_quote) = rest.strip_prefix('"') else {
+            return Vec::new();
+        };
+        let Some(end) = after_quote.find('"') else {
+            return Vec::new();
+        };
+        names.push(after_quote[..end].to_string());
+        rest = after_quote[end + 1..].trim_start();
+        if rest.starts_with("=>") {
+            return names;
+        }
+        match rest.strip_prefix('|') {
+            Some(next) => rest = next.trim_start(),
+            None => return Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extraction: breadd/src/ipc/module_host_bridge.rs -> the `module_host.*`
+// IPC methods an authenticated module-host connection can call.
+//
+// Two shapes: plain arms in `dispatch_module_host_method`'s
+// `match req.method.as_str()`, and prefix-dispatched families where one arm
+// matches `method.starts_with(<PREFIX>)` and a second `match` on the suffix
+// picks the real method (`module_host.hyprland_` + `dispatch`).
+
+/// `(prefix constant, marker of the match that dispatches on the suffix)`.
+const BRIDGE_PREFIX_FAMILIES: &[(&str, &str)] = &[(
+    "HYPRLAND_METHOD_PREFIX",
+    "match &method[HYPRLAND_METHOD_PREFIX.len()..] {",
+)];
+
+fn extract_bridge_methods(src: &str) -> BTreeSet<String> {
+    let mut out: BTreeSet<String> = extract_string_arms(src, "match req.method.as_str() {")
+        .into_iter()
+        .filter(|name| name.starts_with("module_host."))
+        .collect();
+
+    for (constant, marker) in BRIDGE_PREFIX_FAMILIES {
+        let Some(prefix) = const_str(src, constant) else {
+            continue;
+        };
+        for suffix in extract_string_arms(src, marker) {
+            out.insert(format!("{prefix}{suffix}"));
+        }
+    }
+    out
+}
+
+/// The value of `const NAME: &str = "value";`.
+fn const_str(src: &str, name: &str) -> Option<String> {
+    let decl = format!("const {name}: &str = \"");
+    let start = src.find(&decl)? + decl.len();
+    Some(ident_upto_quote(src, start).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +573,7 @@ impl CheckReport {
 fn check(
     lua_src: &str,
     ipc_src: &str,
+    bridge_src: &str,
     cli_src: &str,
     schema_toml: &str,
     doc_md: &str,
@@ -544,7 +615,8 @@ fn check(
     }
 
     // --- code vs schema: IPC ---
-    let code_ipc = extract_ipc_methods(ipc_src);
+    let mut code_ipc = extract_ipc_methods(ipc_src);
+    code_ipc.extend(extract_bridge_methods(bridge_src));
     let schema_ipc: BTreeSet<String> = schema_set
         .iter()
         .filter(|(kind, _)| kind == "ipc_method")
@@ -585,6 +657,7 @@ fn check(
     // cli_command is checked against README.md separately, below) ---
     let lua_section = lua_api_section(doc_md);
     let ipc_tbl_section = ipc_section(doc_md);
+    let mut undocumented: BTreeSet<(String, String)> = BTreeSet::new();
     for entry in &schema.entry {
         if !VALID_KINDS.contains(&entry.kind.as_str()) || entry.kind == "cli_command" {
             continue; // already reported above, or checked against README instead
@@ -595,11 +668,18 @@ fn check(
             lua_section.contains(&format!("bread.{}", entry.name))
         };
         if !documented {
-            report
-                .undocumented
-                .push((entry.kind.clone(), entry.name.clone()));
+            undocumented.insert((entry.kind.clone(), entry.name.clone()));
         }
     }
+    // A method that exists in code must be in Documentation.md even when the
+    // schema forgot it too (that case is also reported as missing from the
+    // schema above).
+    for name in &code_ipc {
+        if !ipc_tbl_section.contains(&format!("`{name}`")) {
+            undocumented.insert(("ipc_method".to_string(), name.clone()));
+        }
+    }
+    report.undocumented.extend(undocumented);
 
     // --- schema vs README.md (cli_command only) ---
     let readme_cli = readme_cli_section(readme_md);
@@ -644,6 +724,8 @@ mod tests {
     const IPC_SRC: &str = r#"
         if req.method == "events.subscribe" {
         }
+        if req.method == "module_host.hello" {
+        }
         let result = match req.method.as_str() {
             "ping" => Ok(json!({ "ok": true })),
             "emit" => {
@@ -656,6 +738,48 @@ mod tests {
             }
             _ => Err("unknown method".to_string()),
         };
+    "#;
+
+    const BRIDGE_SRC: &str = r#"
+        async fn dispatch_module_host_method() {
+            match req.method.as_str() {
+                "module_host.on" | "module_host.once" => {
+                    let once = req.method == "module_host.once";
+                    match req.method.as_str() {
+                        "module_host.log" => info!("{message}"),
+                        _ => {}
+                    }
+                    Ok(json!({ "ok": true }))
+                }
+                "module_host.state_get" => {
+                    Ok(json!({}))
+                }
+                method if method.starts_with(HYPRLAND_METHOD_PREFIX) => {
+                    hyprland_bridge(method).await
+                }
+                other => Err(format!("unknown module_host method: {other}")),
+            }
+        }
+
+        const HYPRLAND_METHOD_PREFIX: &str = "module_host.hyprland_";
+
+        fn parse_hyprland_op(method: &str) {
+            match &method[HYPRLAND_METHOD_PREFIX.len()..] {
+                "dispatch" => {
+                    let cmd = text("cmd")?;
+                    Ok(HyprlandOp::Dispatch { cmd })
+                }
+                "eval" => Ok(HyprlandOp::Eval { expr: text("expr")? }),
+                "query" => {
+                    let request = match text("kind")?.as_str() {
+                        "monitors" => "j/monitors",
+                        other => return Err(other),
+                    };
+                    Ok(HyprlandOp::Query { request })
+                }
+                _ => Err(format!("unknown module_host method: {method}")),
+            }
+        }
     "#;
 
     const DOC_MD: &str = r#"
@@ -676,6 +800,13 @@ mod tests {
 | `ping` | - | Connectivity check |
 | `emit` | - | Inject an event |
 | `events.subscribe` | - | Upgrade to streaming mode |
+| `module_host.hello` | `token` | Handshake |
+| `module_host.on` | `pattern` | Subscribe |
+| `module_host.once` | `pattern` | Subscribe once |
+| `module_host.state_get` | `key` | State |
+| `module_host.hyprland_dispatch` | `cmd` | Dispatch |
+| `module_host.hyprland_eval` | `expr` | Eval |
+| `module_host.hyprland_query` | `kind` | Query |
 "#;
 
     /// Mirrors the real `bread-cli/src/main.rs` shape closely enough to
@@ -738,6 +869,13 @@ bread modules info <name>
             ("ping", "ipc_method", "1.0"),
             ("emit", "ipc_method", "1.0"),
             ("events.subscribe", "ipc_method", "1.0"),
+            ("module_host.hello", "ipc_method", "1.6"),
+            ("module_host.on", "ipc_method", "1.6"),
+            ("module_host.once", "ipc_method", "1.6"),
+            ("module_host.state_get", "ipc_method", "1.6"),
+            ("module_host.hyprland_dispatch", "ipc_method", "1.8"),
+            ("module_host.hyprland_eval", "ipc_method", "1.8"),
+            ("module_host.hyprland_query", "ipc_method", "1.8"),
             ("ping", "cli_command", "0.7"),
             ("modules.list", "cli_command", "0.7"),
             ("modules.info", "cli_command", "0.7"),
@@ -766,7 +904,7 @@ bread modules info <name>
     #[test]
     fn extracts_ipc_methods_without_leaking_nested_match_arms() {
         let got = extract_ipc_methods(IPC_SRC);
-        let want: BTreeSet<String> = ["events.subscribe", "ping", "emit"]
+        let want: BTreeSet<String> = ["events.subscribe", "module_host.hello", "ping", "emit"]
             .into_iter()
             .map(String::from)
             .collect();
@@ -778,7 +916,16 @@ bread modules info <name>
 
     #[test]
     fn clean_state_passes() {
-        let report = check(LUA_SRC, IPC_SRC, CLI_SRC, &full_schema(), DOC_MD, README_MD).unwrap();
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            BRIDGE_SRC,
+            CLI_SRC,
+            &full_schema(),
+            DOC_MD,
+            README_MD,
+        )
+        .unwrap();
         assert!(report.is_clean(), "{report:#?}");
     }
 
@@ -791,6 +938,7 @@ bread modules info <name>
         let report = check(
             &renamed_lua_src,
             IPC_SRC,
+            BRIDGE_SRC,
             CLI_SRC,
             &full_schema(),
             DOC_MD,
@@ -812,6 +960,7 @@ bread modules info <name>
         let report = check(
             LUA_SRC,
             &without_emit,
+            BRIDGE_SRC,
             CLI_SRC,
             &full_schema(),
             DOC_MD,
@@ -825,11 +974,136 @@ bread modules info <name>
     }
 
     #[test]
+    fn extracts_bridge_methods_including_prefix_dispatched_suffixes() {
+        let got = extract_bridge_methods(BRIDGE_SRC);
+        let want: BTreeSet<String> = [
+            "module_host.on",
+            "module_host.once",
+            "module_host.state_get",
+            "module_host.hyprland_dispatch",
+            "module_host.hyprland_eval",
+            "module_host.hyprland_query",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            got, want,
+            "must split or-patterns, skip nested matches and the `_`/`other` arms, and expand the prefix family"
+        );
+    }
+
+    #[test]
+    fn bridge_method_missing_from_the_schema_fails() {
+        let schema = full_schema().replace(
+            "[[entry]]\nname = \"module_host.hyprland_eval\"\nkind = \"ipc_method\"\nsince = \"1.8\"\n\n",
+            "",
+        );
+        assert!(
+            !schema.contains("hyprland_eval"),
+            "fixture must drop the entry"
+        );
+        let report = check(
+            LUA_SRC, IPC_SRC, BRIDGE_SRC, CLI_SRC, &schema, DOC_MD, README_MD,
+        )
+        .unwrap();
+        assert!(!report.is_clean());
+        assert!(report.missing_from_schema.contains(&(
+            "ipc_method".to_string(),
+            "module_host.hyprland_eval".to_string()
+        )));
+    }
+
+    #[test]
+    fn plain_bridge_method_missing_from_the_schema_fails() {
+        let schema = full_schema().replace(
+            "[[entry]]\nname = \"module_host.state_get\"\nkind = \"ipc_method\"\nsince = \"1.6\"\n\n",
+            "",
+        );
+        assert!(!schema.contains("state_get"));
+        let report = check(
+            LUA_SRC, IPC_SRC, BRIDGE_SRC, CLI_SRC, &schema, DOC_MD, README_MD,
+        )
+        .unwrap();
+        assert!(report.missing_from_schema.contains(&(
+            "ipc_method".to_string(),
+            "module_host.state_get".to_string()
+        )));
+    }
+
+    #[test]
+    fn bridge_method_missing_from_documentation_fails() {
+        let doc = DOC_MD.replace("| `module_host.hyprland_query` | `kind` | Query |\n", "");
+        assert!(!doc.contains("hyprland_query"));
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            BRIDGE_SRC,
+            CLI_SRC,
+            &full_schema(),
+            &doc,
+            README_MD,
+        )
+        .unwrap();
+        assert!(!report.is_clean());
+        assert!(report.undocumented.contains(&(
+            "ipc_method".to_string(),
+            "module_host.hyprland_query".to_string()
+        )));
+    }
+
+    #[test]
+    fn bridge_method_missing_from_both_schema_and_docs_fails_twice() {
+        let schema = full_schema().replace(
+            "[[entry]]\nname = \"module_host.hyprland_dispatch\"\nkind = \"ipc_method\"\nsince = \"1.8\"\n\n",
+            "",
+        );
+        let doc = DOC_MD.replace(
+            "| `module_host.hyprland_dispatch` | `cmd` | Dispatch |\n",
+            "",
+        );
+        let report = check(
+            LUA_SRC, IPC_SRC, BRIDGE_SRC, CLI_SRC, &schema, &doc, README_MD,
+        )
+        .unwrap();
+        let key = (
+            "ipc_method".to_string(),
+            "module_host.hyprland_dispatch".to_string(),
+        );
+        assert!(report.missing_from_schema.contains(&key));
+        assert!(report.undocumented.contains(&key));
+    }
+
+    #[test]
+    fn stale_bridge_schema_entry_fails() {
+        let bridge = BRIDGE_SRC.replace("\"query\" => {", "\"query_renamed\" => {");
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            &bridge,
+            CLI_SRC,
+            &full_schema(),
+            DOC_MD,
+            README_MD,
+        )
+        .unwrap();
+        assert!(report.stale_in_schema.contains(&(
+            "ipc_method".to_string(),
+            "module_host.hyprland_query".to_string()
+        )));
+        assert!(report.missing_from_schema.contains(&(
+            "ipc_method".to_string(),
+            "module_host.hyprland_query_renamed".to_string()
+        )));
+    }
+
+    #[test]
     fn missing_doc_heading_is_caught_as_drift() {
         let doc_without_spawn_heading = DOC_MD.replace("#### `bread.spawn(fn)`\n", "");
         let report = check(
             LUA_SRC,
             IPC_SRC,
+            BRIDGE_SRC,
             CLI_SRC,
             &full_schema(),
             &doc_without_spawn_heading,
@@ -845,7 +1119,16 @@ bread modules info <name>
     #[test]
     fn unknown_kind_is_rejected() {
         let bad_schema = schema_toml_for(&[("on", "lua_thing", "1.0")]);
-        let report = check(LUA_SRC, IPC_SRC, CLI_SRC, &bad_schema, DOC_MD, README_MD).unwrap();
+        let report = check(
+            LUA_SRC,
+            IPC_SRC,
+            BRIDGE_SRC,
+            CLI_SRC,
+            &bad_schema,
+            DOC_MD,
+            README_MD,
+        )
+        .unwrap();
         assert!(!report.is_clean());
         assert!(report
             .bad_kind
@@ -880,6 +1163,7 @@ bread modules info <name>
         let report = check(
             LUA_SRC,
             IPC_SRC,
+            BRIDGE_SRC,
             &renamed_cli_src,
             &full_schema(),
             DOC_MD,
@@ -904,6 +1188,7 @@ bread modules info <name>
         let report = check(
             LUA_SRC,
             IPC_SRC,
+            BRIDGE_SRC,
             CLI_SRC,
             &full_schema(),
             DOC_MD,

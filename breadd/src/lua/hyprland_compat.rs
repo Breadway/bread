@@ -21,10 +21,262 @@
 //! Hyprland, `/usr/share/hypr/stubs/hl.meta.lua`. The one exception is noted
 //! on the address-targeted window move below.
 
+use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, bail, Result};
+use tracing::warn;
+
+/// Largest request `request_until` will put on the socket.
+pub(crate) const MAX_REQUEST_BYTES: usize = 32 * 1024;
+/// Largest reply `request_until` will buffer before giving up.
+pub(crate) const MAX_REPLY_BYTES: usize = 1024 * 1024;
+/// Per-request budget for callers without an operation deadline of their own
+/// (the in-process `bread.hyprland` bindings).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Blocking socket calls are issued in slices this long so a cancelled
+/// deadline is noticed promptly instead of after the full budget.
+const SLICE: Duration = Duration::from_millis(100);
+const MIN_SLICE: Duration = Duration::from_millis(1);
+
+/// One operation's time budget. A dispatch with its eval fallback, or a
+/// keyword with its read-back, shares a single `Deadline`: every request
+/// asks it for the time left before it connects or writes, so nothing is
+/// sent once it has expired or been cancelled.
+#[derive(Clone)]
+pub(crate) struct Deadline {
+    at: Instant,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Deadline {
+    pub(crate) fn after(budget: Duration) -> Self {
+        Self {
+            at: Instant::now() + budget,
+            cancel: None,
+        }
+    }
+
+    pub(crate) fn cancelled_by(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(flag);
+        self
+    }
+
+    fn remaining(&self) -> Result<Duration> {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            bail!("hyprland request cancelled: the daemon is shutting down");
+        }
+        let left = self.at.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("hyprland request timed out");
+        }
+        Ok(left)
+    }
+
+    fn slice(&self) -> Result<Duration> {
+        Ok(self.remaining()?.min(SLICE).max(MIN_SLICE))
+    }
+}
+
+fn is_retryable(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
+fn sockaddr_for(socket: &Path) -> Result<libc::sockaddr_un> {
+    let bytes = socket.as_os_str().as_bytes();
+    // SAFETY: sockaddr_un is plain data; all-zero is a valid value.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.len() >= addr.sun_path.len() || bytes.contains(&0) {
+        bail!("hyprland socket path is not usable: {}", socket.display());
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+        *dst = *src as libc::c_char;
+    }
+    Ok(addr)
+}
+
+/// `connect(2)` with the deadline applied. std's `UnixStream::connect` has no
+/// timeout and blocks while the listener's backlog is full, so the socket is
+/// created by hand: `SO_SNDTIMEO` bounds a blocking unix connect.
+fn connect_until(socket: &Path, deadline: &Deadline) -> Result<UnixStream> {
+    let addr = sockaddr_for(socket)?;
+
+    // SAFETY: plain socket(2) call.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: `fd` is a socket we just created and own; the stream closes it.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+
+    loop {
+        let slice = deadline.slice()?;
+        let timeval = libc::timeval {
+            tv_sec: slice.as_secs() as libc::time_t,
+            tv_usec: slice.subsec_micros() as libc::suseconds_t,
+        };
+        // SAFETY: `timeval` outlives the call and the length matches.
+        let rc = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_SNDTIMEO,
+                (&timeval as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: `addr` is a fully initialised sockaddr_un and the length
+        // passed is its size.
+        let rc = unsafe {
+            libc::connect(
+                fd,
+                (&addr as *const libc::sockaddr_un).cast(),
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            )
+        };
+        if rc == 0 {
+            return Ok(stream);
+        }
+        let err = std::io::Error::last_os_error();
+        if !is_retryable(err.kind()) {
+            return Err(anyhow!("connecting to {}: {err}", socket.display()));
+        }
+    }
+}
+
+pub(crate) fn request_socket() -> Result<PathBuf> {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+
+    if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
+        return Ok(PathBuf::from(runtime)
+            .join("hypr")
+            .join(instance)
+            .join(".socket.sock"));
+    }
+
+    let hypr_dir = PathBuf::from(&runtime).join("hypr");
+    let mut sockets: Vec<PathBuf> = std::fs::read_dir(&hypr_dir)
+        .map_err(|_| anyhow!("no Hyprland instance found ({})", hypr_dir.display()))?
+        .flatten()
+        .map(|e| e.path().join(".socket.sock"))
+        .filter(|p| p.exists())
+        .collect();
+
+    match sockets.len() {
+        0 => Err(anyhow!(
+            "no Hyprland instance found in {}",
+            hypr_dir.display()
+        )),
+        1 => Ok(sockets.remove(0)),
+        _ => {
+            warn!(
+                "multiple Hyprland instances found in {}; using the first one",
+                hypr_dir.display()
+            );
+            Ok(sockets.remove(0))
+        }
+    }
+}
+
+/// One request with its own [`REQUEST_TIMEOUT`] budget.
+pub(crate) fn request(request: &str) -> Result<String> {
+    let socket = request_socket()?;
+    request_until(&socket, request, &Deadline::after(REQUEST_TIMEOUT))
+}
+
+/// A `send` for [`dispatch`] / [`keyword`] that spends one [`REQUEST_TIMEOUT`]
+/// budget across every request of the operation (legacy form, eval fallback,
+/// read-back) and resolves the socket once, so all of them go to the same
+/// Hyprland instance.
+pub(crate) fn operation_sender() -> impl FnMut(&str) -> Result<String> {
+    let deadline = Deadline::after(REQUEST_TIMEOUT);
+    let mut socket: Option<PathBuf> = None;
+    move |req| {
+        if socket.is_none() {
+            socket = Some(request_socket()?);
+        }
+        match &socket {
+            Some(path) => request_until(path, req, &deadline),
+            None => bail!("no Hyprland socket"),
+        }
+    }
+}
+
+/// A `send` bound to an already chosen socket and an operation `deadline`.
+pub(crate) fn sender_until(
+    socket: PathBuf,
+    deadline: Deadline,
+) -> impl FnMut(&str) -> Result<String> {
+    move |req| request_until(&socket, req, &deadline)
+}
+
+/// One request/reply exchange on the Hyprland request socket. Connect, write
+/// and read all stop at `deadline`; the deadline is checked before anything
+/// is sent, the request is capped at [`MAX_REQUEST_BYTES`] and the reply at
+/// [`MAX_REPLY_BYTES`].
+pub(crate) fn request_until(socket: &Path, request: &str, deadline: &Deadline) -> Result<String> {
+    if request.len() > MAX_REQUEST_BYTES {
+        bail!(
+            "hyprland request is {} bytes, over the {MAX_REQUEST_BYTES} byte limit",
+            request.len()
+        );
+    }
+    deadline.remaining()?;
+
+    let mut stream = connect_until(socket, deadline)?;
+
+    let bytes = request.as_bytes();
+    let mut sent = 0;
+    while sent < bytes.len() {
+        stream.set_write_timeout(Some(deadline.slice()?))?;
+        match stream.write(&bytes[sent..]) {
+            Ok(0) => bail!("hyprland socket closed while writing the request"),
+            Ok(n) => sent += n,
+            Err(e) if is_retryable(e.kind()) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        stream.set_read_timeout(Some(deadline.slice()?))?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                if reply.len() + n > MAX_REPLY_BYTES {
+                    bail!("hyprland reply exceeds the {MAX_REPLY_BYTES} byte limit");
+                }
+                reply.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if is_retryable(e.kind()) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    String::from_utf8(reply).map_err(|_| anyhow!("hyprland reply is not valid UTF-8"))
+}
 
 /// True when a Hyprland socket reply means success.
-pub(super) fn is_ok(reply: &str) -> bool {
+pub(crate) fn is_ok(reply: &str) -> bool {
     reply.trim() == "ok"
 }
 
@@ -35,7 +287,7 @@ pub(super) fn is_ok(reply: &str) -> bool {
 /// `cmd` may also be a Lua dispatcher expression such as
 /// `hl.dsp.focus({ workspace = '5' })` (with no args); Hyprland running from
 /// `hyprland.lua` accepts that directly.
-pub(super) fn dispatch<F>(mut send: F, cmd: &str, args: &str) -> Result<()>
+pub(crate) fn dispatch<F>(mut send: F, cmd: &str, args: &str) -> Result<()>
 where
     F: FnMut(&str) -> Result<String>,
 {
@@ -69,7 +321,7 @@ where
 /// An `ok` reply is not trusted on its own for binds, unbinds and monitors:
 /// the result is read back over the same socket (`binds -j`, `monitors all -j`)
 /// and an error is returned when the state does not match.
-pub(super) fn keyword<F>(mut send: F, key: &str, value: &str) -> Result<()>
+pub(crate) fn keyword<F>(mut send: F, key: &str, value: &str) -> Result<()>
 where
     F: FnMut(&str) -> Result<String>,
 {
@@ -224,7 +476,7 @@ fn lua_str(s: &str) -> String {
 /// evaluates to a dispatcher (or a function `hl.dispatch` / `hl.bind` accept).
 ///
 /// A `cmd` that already is Lua (starts with `hl.`) is passed through.
-pub(super) fn legacy_dispatch_to_lua(cmd: &str, args: &str) -> Result<String> {
+pub(crate) fn legacy_dispatch_to_lua(cmd: &str, args: &str) -> Result<String> {
     let cmd = cmd.trim();
     let args = args.trim();
     if cmd.starts_with("hl.") {
@@ -369,7 +621,7 @@ fn move_to_workspace(args: &str, follow: bool) -> Result<String> {
 }
 
 /// Translate a legacy `keyword <key> <value>` into a Lua statement.
-pub(super) fn legacy_keyword_to_lua(key: &str, value: &str) -> Result<String> {
+pub(crate) fn legacy_keyword_to_lua(key: &str, value: &str) -> Result<String> {
     let key = key.trim();
     let value = value.trim();
     match key {
@@ -934,5 +1186,289 @@ mod tests {
         let err = res.unwrap_err().to_string();
         assert!(err.contains("JSON"), "{err}");
         assert_eq!(seen, vec!["j/monitors all"]);
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod fake {
+    //! A stand-in Hyprland request socket for tests: records every request
+    //! and lets each test script what happens on a connection.
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use std::sync::Mutex;
+
+    pub(crate) type Handler = Arc<dyn Fn(usize, &str, &mut UnixStream) + Send + Sync>;
+
+    pub(crate) struct FakeSocket {
+        pub(crate) path: PathBuf,
+        pub(crate) requests: Arc<Mutex<Vec<String>>>,
+        pub(crate) connections: Arc<std::sync::atomic::AtomicUsize>,
+        stop: Arc<AtomicBool>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FakeSocket {
+        pub(crate) fn start(handler: Handler) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(".socket.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop = Arc::new(AtomicBool::new(false));
+            let (log, count, flag) = (requests.clone(), connections.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !flag.load(Ordering::Relaxed) {
+                    let Ok((mut conn, _)) = listener.accept() else {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    let index = count.fetch_add(1, Ordering::SeqCst);
+                    let (log, handler) = (log.clone(), handler.clone());
+                    std::thread::spawn(move || {
+                        let _ = conn.set_nonblocking(false);
+                        let mut buf = vec![0u8; 128 * 1024];
+                        let Ok(n) = conn.read(&mut buf) else { return };
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                        log.lock().unwrap().push(request.clone());
+                        handler(index, &request, &mut conn);
+                    });
+                }
+            });
+            Self {
+                path,
+                requests,
+                connections,
+                stop,
+                _dir: dir,
+            }
+        }
+
+        pub(crate) fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl Drop for FakeSocket {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// A listening socket that never accepts and whose backlog is full, so a
+    /// further blocking `connect(2)` does not complete.
+    pub(crate) struct FullBacklog {
+        pub(crate) path: PathBuf,
+        _fds: Vec<std::os::fd::OwnedFd>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FullBacklog {
+        pub(crate) fn new() -> Self {
+            use std::os::fd::{FromRawFd, OwnedFd};
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(".socket.sock");
+            let addr = sockaddr_for(&path).unwrap();
+            let size = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            let mut fds = Vec::new();
+            // SAFETY: plain socket/bind/listen/connect calls on sockets owned
+            // here; every fd is wrapped in an OwnedFd so it is closed on drop.
+            unsafe {
+                let listener = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                assert!(listener >= 0);
+                fds.push(OwnedFd::from_raw_fd(listener));
+                let sa = (&addr as *const libc::sockaddr_un).cast();
+                assert_eq!(libc::bind(listener, sa, size), 0);
+                assert_eq!(libc::listen(listener, 0), 0);
+                for _ in 0..16 {
+                    let c = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0);
+                    assert!(c >= 0);
+                    fds.push(OwnedFd::from_raw_fd(c));
+                    let _ = libc::connect(c, sa, size);
+                }
+            }
+            Self {
+                path,
+                _fds: fds,
+                _dir: dir,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::fake::*;
+    use super::*;
+
+    fn never_replies() -> Handler {
+        Arc::new(|_, _, conn| {
+            std::thread::sleep(Duration::from_secs(5));
+            let _ = conn.write_all(b"too late");
+        })
+    }
+
+    #[test]
+    fn read_stall_stops_at_the_deadline() {
+        let sock = FakeSocket::start(never_replies());
+        let started = Instant::now();
+        let err = request_until(
+            &sock.path,
+            "dispatch workspace 9",
+            &Deadline::after(Duration::from_millis(400)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn expired_deadline_sends_nothing() {
+        let sock = FakeSocket::start(Arc::new(|_, _, _| {}));
+        let deadline = Deadline::after(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+        let err = request_until(&sock.path, "dispatch workspace 9", &deadline)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sock.connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn one_deadline_spans_dispatch_and_its_fallback() {
+        // The legacy form is rejected after 300ms and the fallback then
+        // stalls. With a 600ms operation budget the fallback may only use the
+        // ~300ms that are left: a per-request budget would run to ~900ms.
+        let sock = FakeSocket::start(Arc::new(|index, _, conn| {
+            if index == 0 {
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = conn.write_all(b"Invalid dispatcher");
+            } else {
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }));
+        let started = Instant::now();
+        let err = dispatch(
+            sender_until(
+                sock.path.clone(),
+                Deadline::after(Duration::from_millis(600)),
+            ),
+            "workspace",
+            "9",
+        )
+        .unwrap_err()
+        .to_string();
+        let elapsed = started.elapsed();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(elapsed < Duration::from_millis(850), "{elapsed:?}");
+        assert_eq!(sock.requests().len(), 2);
+    }
+
+    #[test]
+    fn budget_spent_by_the_first_request_means_no_second_request() {
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            std::thread::sleep(Duration::from_millis(500));
+            let _ = conn.write_all(b"Invalid dispatcher");
+        }));
+        let err = dispatch(
+            sender_until(
+                sock.path.clone(),
+                Deadline::after(Duration::from_millis(300)),
+            ),
+            "workspace",
+            "9",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(sock.requests(), vec!["dispatch workspace 9"]);
+    }
+
+    #[test]
+    fn cancelling_stops_a_stalled_request_promptly() {
+        let sock = FakeSocket::start(never_replies());
+        let flag = Arc::new(AtomicBool::new(false));
+        let deadline = Deadline::after(Duration::from_secs(30)).cancelled_by(flag.clone());
+        let canceller = {
+            let flag = flag.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::Relaxed);
+            })
+        };
+        let started = Instant::now();
+        let err = request_until(&sock.path, "j/monitors", &deadline)
+            .unwrap_err()
+            .to_string();
+        canceller.join().unwrap();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn oversized_reply_is_refused_and_not_followed_up() {
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..(MAX_REPLY_BYTES / chunk.len() + 2) {
+                if conn.write_all(&chunk).is_err() {
+                    return;
+                }
+            }
+        }));
+        let err = dispatch(
+            sender_until(sock.path.clone(), Deadline::after(Duration::from_secs(10))),
+            "workspace",
+            "9",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("byte limit"), "{err}");
+        assert_eq!(
+            sock.requests().len(),
+            1,
+            "no fallback after an oversized reply"
+        );
+    }
+
+    #[test]
+    fn oversized_request_is_refused_before_connecting() {
+        let sock = FakeSocket::start(Arc::new(|_, _, _| {}));
+        let big = "x".repeat(MAX_REQUEST_BYTES + 1);
+        let err = request_until(&sock.path, &big, &Deadline::after(Duration::from_secs(5)))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("byte limit"), "{err}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(sock.connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn listener_that_never_accepts_cannot_hold_the_caller() {
+        let sock = FullBacklog::new();
+        let started = Instant::now();
+        let err = request_until(
+            &sock.path,
+            "j/monitors",
+            &Deadline::after(Duration::from_millis(400)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }
