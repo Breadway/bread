@@ -14,10 +14,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Temporary inline bootstrap: the shared helper is not merged yet,
+          # so do not fetch or pin an unreviewed branch commit. After ECO-79
+          # merges, replace this block with a pinned helper fetch plus hash
+          # verification. The helper/bootstrap contract is documented in the
+          # bread-ecosystem repo's docs/ci-checkout.md.
+          if ! [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "checkout: GITHUB_SHA is not a full commit id" >&2
+              exit 1
+          fi
           checkout=$(mktemp -d "${RUNNER_TEMP:-/tmp}/bread-ci.XXXXXX")
           printf 'BREAD_CI_JOB_DIR=%s\n' "$checkout" >> "$GITHUB_ENV"
           git clone --no-checkout "https://git.breadway.dev/${GITHUB_REPOSITORY}.git" "$checkout/src"
-          git -C "$checkout/src" checkout --detach "$GITHUB_SHA"
+          git -C "$checkout/src" -c advice.detachedHead=false checkout --quiet --detach "$GITHUB_SHA"
+          actual="$(git -C "$checkout/src" rev-parse HEAD)"
+          if [ "$actual" != "$GITHUB_SHA" ]; then
+              echo "checkout: HEAD is $actual, expected $GITHUB_SHA" >&2
+              exit 1
+          fi
 
       - name: clippy
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo clippy --workspace --all-targets --locked -- -D warnings
