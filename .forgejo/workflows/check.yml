@@ -18,11 +18,9 @@ jobs:
           printf 'BREAD_CI_JOB_DIR=%s\n' "$checkout" >> "$GITHUB_ENV"
           git clone --no-checkout "https://git.breadway.dev/${GITHUB_REPOSITORY}.git" "$checkout/src"
           git -C "$checkout/src" checkout --detach "$GITHUB_SHA"
-          rm -f src
-          ln -s "$checkout/src" src
 
       - name: clippy
-        run: cd src && bash ci/build.sh cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: build --workspace
         # Belt-and-braces alongside breadd/tests/common's own explicit
@@ -30,10 +28,10 @@ jobs:
         # sure every workspace binary, bread-module-host included, is
         # already built before any test runs, so a test's own build-and-wait
         # is never the first time this CI container has compiled it.
-        run: cd src && bash ci/build.sh cargo build --workspace --locked
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo build --workspace --locked
 
       - name: test
-        run: cd src && bash ci/build.sh cargo test --workspace --locked
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --workspace --locked
 
       - name: clean owned checkout
         if: always()
