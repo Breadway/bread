@@ -64,6 +64,8 @@ pub struct Server {
     /// `crate::module_host` and `module_host_bridge` (this module's
     /// `module_host.*` method handling).
     module_host_registry: ModuleHostRegistry,
+    /// In-flight limits and deadline for `module_host.hyprland_*`.
+    hyprland: module_host_bridge::HyprlandBridge,
     /// breadbug's on-disk log/event store (`bug.*` methods). `None` when it
     /// could not be opened; the methods then report it as unavailable.
     bug_store: Option<Arc<bread_bug::store::Store>>,
@@ -115,6 +117,7 @@ impl Server {
             raw_tx,
             adapter_status,
             module_host_registry,
+            hyprland: module_host_bridge::HyprlandBridge::new(),
             bug_store,
             bug_watchdog,
             subscription_count,

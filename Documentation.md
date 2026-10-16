@@ -285,7 +285,7 @@ That module's `bread` table has `bread.exec`, `bread.state` (read
 functions only; no `bread.state.watch`), and `bread.fs` (read functions
 only; no `bread.fs.write`), plus the full baseline. `bread.hyprland`,
 `bread.bluetooth`, `bread.notify`, `bread.machine`, and `bread.widget` are
-all `nil`.
+all `nil`. This holds in process and out of process.
 
 An explicit empty list (`permissions = []`) is a deliberate "baseline only"
 declaration: different from omitting the key entirely. It scopes the
@@ -547,11 +547,19 @@ same event broadcast every other IPC subscriber reads from.
 `.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/
 `.profile` shorthands, `bread.state.watch`, `bread.fs.exists`/`.readlink`/
 `.expand`, `bread.profile.activate`, `bread.notify`, `bread.machine.*`,
-`bread.hyprland.*`, `bread.widget.*`, `bread.bluetooth.*`,
+`bread.hyprland.on_raw` (subscribe with `bread.on("bread.hyprland.*", ...)`
+instead), `bread.widget.*`, `bread.bluetooth.*`,
 `bread.wait_any`/`.wait_all`/`bread.workflow.*`. These namespaces are
 simply absent (`nil`) from an out-of-process module's `bread` table
 regardless of what the manifest grants: a real coverage gap versus the
 in-process mechanism, not a permission-check bug.
+
+**`bread.hyprland` is bridged** for modules granted `hyprland`:
+`dispatch`, `keyword`, `eval`, `active_window`, `monitors`, `workspaces` and
+`clients` go over the `module_host.hyprland_*` methods below, with the same
+checked-reply behavior as in-process (a refused `dispatch`/`keyword` raises a
+Lua error). Without the grant `bread.hyprland` is `nil` and the daemon refuses
+the methods regardless.
 
 **`bread.module().store` is process-local**, not synced back to `breadd`'s
 `RuntimeState`: a real, known limitation versus the in-process mechanism
@@ -623,7 +631,7 @@ for the full list alongside the pre-existing methods.
 - The remaining `bread.*` namespaces over RPC: `bread.state.watch` and the
   `.monitors`/`.active_workspace`/etc. shorthands, `bread.fs.exists`/
   `.readlink`/`.expand`, `bread.profile.activate`, `bread.notify`,
-  `bread.machine.*`, `bread.hyprland.*`, `bread.widget.*`,
+  `bread.machine.*`, `bread.hyprland.on_raw`, `bread.widget.*`,
   `bread.bluetooth.*`, `bread.wait_any`/`.wait_all`/`bread.workflow.*`:
   mechanically the same pattern as the ones already bridged.
 
@@ -1803,23 +1811,56 @@ direct use by other clients.
 | Method | Params | Description |
 |--------|--------|-------------|
 | `module_host.hello` | `token` | One-time handshake. Consumes the token, replies with `{ module, permissions, api_version }` or an error for an unknown/expired token. Takes over the rest of the connection's lifetime as a bidirectional RPC bridge, same as `events.subscribe` does for a plain event stream. |
-| `module_host.on` / `.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
+| `module_host.on` / `module_host.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
 | `module_host.off` | `id` | Cancel a subscription. |
-| `module_host.after` / `.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
+| `module_host.after` / `module_host.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
 | `module_host.cancel` | `id` | Cancel a timer. |
 | `module_host.emit` | `event`, `data` | Same manual-emit semantics (and reserved-domain guard) as the top-level `emit` method. |
-| `module_host.log` / `.warn` / `.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
+| `module_host.log` / `module_host.warn` / `module_host.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
 | `module_host.fs_read` | `path` | Requires `fs.read` granted; path-prefix-checked against the manifest's `path` hint if one was declared. Replies `{ content }` (`null` if unreadable). |
 | `module_host.fs_write` | `path`, `content` | Requires `fs.write`, same scoping check. |
 | `module_host.exec` | `cmd` | Requires `exec`; `bin`-hint-checked (by leading command word) if declared. Fire-and-forget, matching `bread.exec`'s own semantics. |
 | `module_host.exec_capture` | `cmd`, `timeout_ms` | Requires `exec`. Replies `{ ok, stdout }`. |
 | `module_host.state_get` | `key` | Requires `state.read`. Replies `{ value }`. |
+| `module_host.hyprland_dispatch` | `cmd`, `args` | Requires `hyprland`. Same checked-reply semantics as `bread.hyprland.dispatch`: an error unless Hyprland answered `ok` (legacy form, then the `hl.*` eval fallback). Replies `{ ok }`. |
+| `module_host.hyprland_keyword` | `key`, `value` | Requires `hyprland`. Same as `bread.hyprland.keyword`, including the bind/unbind/monitor read-back. Replies `{ ok }`. |
+| `module_host.hyprland_eval` | `expr` | Requires `hyprland`. Replies `{ reply }`, the raw Hyprland reply (`ok` or the error text). |
+| `module_host.hyprland_query` | `kind` (`active_window`\|`monitors`\|`workspaces`\|`clients`) | Requires `hyprland`. Replies `{ value }`. |
 | `module_host.status` | `state` (`"loaded"`\|`"load_error"`), `error` | The module-host reports its own load outcome after running `init.lua`; updates `modules.list` status and unblocks `breadd`'s spawn-side wait. |
 
 Every gated method above checks the module's granted `PermissionKind`s
 (learned at hello-time) before attempting the call: belt-and-suspenders
 alongside the Landlock sandbox enforced at the OS level on the
 module-host process itself, not a replacement for it.
+
+The `hyprland` grant is checked for every method name under the
+`module_host.hyprland_` prefix before the name is even matched, so a host
+without the grant gets `hyprland not granted to this module` for any such
+method, real or invented. The compositor request is made by `breadd`, never by
+the child, which is sandboxed and holds no Hyprland socket.
+
+Each `module_host.hyprland_*` call is one bounded operation:
+
+- **One deadline.** The first request, any `hyprland.lua` `eval` fallback and
+  any bind/unbind/monitor read-back all share a single 8 second budget, and
+  socket connect, write and read each stop at it. When the budget expires or
+  the host connection closes, the worker sends no further compositor request,
+  including fallbacks and read-backs. A request that was already transmitted
+  may still have reached the compositor, so its effects cannot be revoked;
+  the guarantee is no additional request after cancellation or expiry.
+- **Size caps.** A request line over 32 KiB, a string parameter over 16 KiB, or
+  a compositor reply over 1 MiB is refused with an error mentioning the byte
+  limit. Parameters must have the documented types: `args` must be a string
+  when present, and a non-string value is an error rather than being treated as
+  empty.
+- **Bounded concurrency.** A module has at most one such call in flight (a
+  second is refused with `hyprland busy`) and the daemon at most 8 across all
+  modules (`hyprland busy: too many requests in flight`). Refused calls never
+  reach the compositor, and a stalled compositor cannot hold more than 8
+  short-lived workers or delay daemon shutdown.
+
+The in-process `bread.hyprland.*` functions share the socket deadline and size
+caps, with a 5 second budget per call.
 
 The `health` response's `api_version` field lets a client (the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app) assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).
 
