@@ -4,6 +4,7 @@ mod core;
 mod ipc;
 mod lua;
 mod module_host;
+mod watchdog;
 
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -23,7 +24,8 @@ use crate::core::types::RuntimeState;
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load()?;
-    let bug_store = bugstore::open();
+    let bug_config = bugstore::load_config();
+    let bug_store = bugstore::open(&bug_config);
     {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -107,9 +109,23 @@ async fn main() -> Result<()> {
 
     let adapter_status = adapter_manager.status_handle();
 
+    let bug_watchdog = Arc::new(watchdog::Watchdog::with_excluded(
+        std::time::Duration::from_millis(bug_config.freeze_after_ms),
+        &bug_config.excluded_apps,
+    ));
     if let Some(store) = bug_store.clone() {
         bugstore::spawn_journal_recorder(store.clone(), shutdown_rx.clone());
         bugstore::spawn_event_recorder(store, event_stream_tx.subscribe());
+    }
+    if bug_config.watchdog_enabled {
+        // The watchdog and its grace window do not need the store.
+        bugstore::spawn_grace_listener(bug_watchdog.clone(), event_stream_tx.subscribe());
+        bugstore::spawn_watchdog(
+            bug_store.clone(),
+            bug_watchdog.clone(),
+            normalized_tx.clone(),
+            shutdown_rx.clone(),
+        );
     }
 
     let event_buffer = Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(1000)));
@@ -144,6 +160,7 @@ async fn main() -> Result<()> {
         event_buffer,
         module_host_registry.clone(),
         bug_store,
+        bug_watchdog,
     );
 
     info!("breadd fully started");

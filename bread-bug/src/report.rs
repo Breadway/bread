@@ -348,11 +348,24 @@ pub fn build(opts: &BuildOptions) -> Result<Prepared> {
     Prepared::from_report(report)
 }
 
-/// Run the whole report through a fresh scrubber. Build-ids are exempt from
-/// the long-hex rules because the server needs them for symbolication.
+/// Run the whole report through fresh scrubbers. Build-ids are exempt from
+/// the long-hex rules because the server needs them for symbolication. A
+/// recognized `system.os_id` may be kept only when it does not equal any
+/// configured identity; if a user or hostname is literally `bos` or `arch`,
+/// the configured identity wins and is redacted even in that field. All
+/// versions, kernels, runtime fields, app fields and free text are always
+/// scrubbed.
 fn scrub_report(report: &mut Report, ctx: &ScrubContext) -> Result<()> {
-    let mut scrubber = Scrubber::new(ctx.clone());
-    let ids = report
+    let mut full = Scrubber::new(ctx.clone());
+    let os_id = report.system.os_id.clone();
+    let os_id_is_identity = os_id.as_ref().is_some_and(|os_id| {
+        ctx.username
+            .iter()
+            .chain(ctx.hostname.iter())
+            .chain(ctx.extra_literals.iter())
+            .any(|identity| identity.trim().eq_ignore_ascii_case(os_id))
+    });
+    let ids: Vec<String> = report
         .markers
         .iter()
         .flat_map(|m| {
@@ -361,14 +374,26 @@ fn scrub_report(report: &mut Report, ctx: &ScrubContext) -> Result<()> {
                 .chain(m.frames.iter().filter_map(|f| f.build_id.as_ref()))
         })
         .chain(report.app.build_id.iter())
-        .chain(report.live_stack.iter().filter_map(|f| f.build_id.as_ref()));
-    for id in ids {
-        scrubber.keep_build_id(id);
+        .chain(report.live_stack.iter().filter_map(|f| f.build_id.as_ref()))
+        .cloned()
+        .collect();
+    for id in &ids {
+        full.keep_build_id(id);
+    }
+    // Process identity is stored locally only to guard live capture; it is
+    // never part of ECO-66's report schema. Pids are also unnecessary in the
+    // report, so omit both before the final whole-report scrub.
+    for marker in &mut report.markers {
+        marker.pid = None;
+        marker.process = None;
     }
     let value = serde_json::to_value(&*report)?;
-    let scrubbed = scrubber.scrub_value(&value);
+    let scrubbed = full.scrub_value_preserving_keys(&value);
     *report = serde_json::from_value(scrubbed).context("scrubbed report no longer parses")?;
-    report.redactions = scrubber
+    if !os_id_is_identity {
+        report.system.os_id = os_id;
+    }
+    report.redactions = full
         .stats()
         .iter()
         .map(|(k, v)| ((*k).to_string(), *v))
@@ -428,12 +453,7 @@ pub fn app_entries(reader: &Reader, installed: Option<&[InstalledApp]>) -> Vec<A
             let last_problem = reader
                 .snapshot(&app, 0, 0)
                 .ok()
-                .and_then(|s| {
-                    s.markers
-                        .into_iter()
-                        .rev()
-                        .find(|m| m.kind != MarkerKind::Recovered)
-                })
+                .and_then(|s| s.markers.into_iter().rev().find(|m| m.kind.is_problem()))
                 .map(|m| (m.kind, m.t));
             AppEntry {
                 app,

@@ -249,3 +249,70 @@ fn picker_orders_problem_apps_first_and_limits_to_installed() {
         .collect();
     assert!(fallback.contains(&"search".to_string()));
 }
+
+#[test]
+fn only_os_id_is_exempt_from_identity_scrubbing() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(dir.path(), &BugConfig::default(), ScrubContext::default()).unwrap();
+    s.append_log("clip", "info", "mybox-7 arch bos kernel v3.14", 1)
+        .unwrap();
+    let mut o = opts(dir.path());
+    o.scrub = ScrubContext {
+        hostname: Some("mybox-7".into()),
+        username: Some("arch".into()),
+        ..ScrubContext::default()
+    };
+    let p = build(&o).unwrap();
+    assert!(
+        !p.report.logs[0].msg.contains("mybox-7"),
+        "{:?}",
+        p.report.logs
+    );
+    let mut report = p.report.clone();
+    report.system.arch = "x86_64".into();
+    report.system.os_id = Some("bos".into());
+    report.system.kernel = Some("mybox-7 arch".into());
+    report.system.os_version = Some("mybox-7".into());
+    report
+        .runtime
+        .adapters
+        .insert("adapter".into(), "arch".into());
+    super::scrub_report(&mut report, &o.scrub).unwrap();
+    assert_eq!(report.system.os_id.as_deref(), Some("bos"));
+    assert!(!report.system.kernel.as_deref().unwrap().contains("mybox-7"));
+    assert!(!report.system.kernel.as_deref().unwrap().contains("arch"));
+    assert!(!report
+        .system
+        .os_version
+        .as_deref()
+        .unwrap()
+        .contains("mybox-7"));
+    let runtime = serde_json::to_string(&report.runtime).unwrap();
+    assert!(!runtime.contains("arch"));
+}
+
+#[test]
+fn os_id_cannot_exempt_a_matching_real_username_or_hostname() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = opts(dir.path());
+    opts.scrub = ScrubContext {
+        username: Some("arch".into()),
+        hostname: Some("bos".into()),
+        ..ScrubContext::default()
+    };
+    let mut report = build(&opts).unwrap().report;
+    report.system.os_id = Some("arch".into());
+    report.system.arch = "x86_64".into();
+    report.notes = Some("arch logged in on bos".into());
+    super::scrub_report(&mut report, &opts.scrub).unwrap();
+    assert_ne!(report.system.os_id.as_deref(), Some("arch"));
+    assert!(!report.notes.as_deref().unwrap().contains("arch"));
+    assert!(!report.notes.as_deref().unwrap().contains("bos"));
+    assert_eq!(report.system.arch, "x86_64");
+
+    let mut report = build(&opts).unwrap().report;
+    report.system.os_id = Some("bos".into());
+    report.system.arch = "x86_64".into();
+    super::scrub_report(&mut report, &opts.scrub).unwrap();
+    assert_ne!(report.system.os_id.as_deref(), Some("bos"));
+}

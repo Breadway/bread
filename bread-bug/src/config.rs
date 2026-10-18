@@ -53,6 +53,11 @@ pub struct BugConfig {
     pub endpoint: String,
     /// Local store bounds.
     pub store: StoreLimits,
+    /// Whether breadd watches app heartbeats for freezes.
+    pub watchdog_enabled: bool,
+    /// An app that sends heartbeats and goes silent for this long (and
+    /// longer than four of its own intervals) is considered frozen.
+    pub freeze_after_ms: u64,
 }
 
 impl Default for BugConfig {
@@ -62,6 +67,8 @@ impl Default for BugConfig {
             excluded_apps: Vec::new(),
             endpoint: DEFAULT_ENDPOINT.to_string(),
             store: StoreLimits::default(),
+            watchdog_enabled: true,
+            freeze_after_ms: 15_000,
         }
     }
 }

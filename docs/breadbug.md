@@ -48,6 +48,25 @@ contents) and breadsearch (queries) to be excluded by default, with a clear,
 user-controlled way to retain an exclusion. That default policy is not yet
 implemented. No clipboard contents or search queries are allowed report fields.
 
+Configuration lives in `~/.config/bread/breadbug.toml` (`upload_enabled`,
+`excluded_apps`, `endpoint`, `watchdog_enabled`, `freeze_after_ms`, `[store]`
+limits).
+
+## Freeze detection
+
+Apps send `bug.heartbeat` from their main loop. If heartbeats stop while the
+process is still alive for longer than `freeze_after_ms` (default 15 s) and
+four of the app's own intervals, breadd records a `freeze` marker and
+publishes `bread.bug.freeze`; a later heartbeat records `recovered`. Detection
+is paused for ten seconds after power or monitor events and after a stalled
+daemon tick, so suspend/resume and display hotplug do not look like freezes.
+An exited process is forgotten, not reported. Nothing is ever killed.
+
+For a frozen app that is still running, `breadbug` can include a stack trace
+(function names and offsets only) if the user agrees (`--live-stack` or the
+prompt). The pid comes from the freeze marker and is re-checked to be a live
+`bread*` process before anything attaches.
+
 ## Scrubbing
 
 `bread-scrub` runs on ingest into the store and again over a report. Structured
@@ -85,8 +104,12 @@ Other v1 fields are explicitly limited to these shapes:
   arbitrary process state. Map counts and string sizes have no separate cap
   today.
 * `markers`: at most the newest 5 markers per report. Each includes timestamp,
-  kind (`panic`, `crash`, `freeze`, `recovered`), optional app version, build-id,
-  message, location, signal and at most 128 frames per stored marker. A frame
+  kind (`panic`, `crash`, `freeze`, `recovered`; local-only `stopped` markers
+  close a retired freeze and are not problems), optional app version, build-id,
+  message, location, signal and at most 128 frames per stored marker. The
+  freeze marker's pid and process identity (executable, boot id and kernel
+  start ticks) are local bookkeeping used only to verify a consented live
+  capture; they are removed before report serialization. A frame
   contains optional module and symbol strings, unsigned module-relative offset,
   and build-id. Message/location/module/symbol are scrubbed strings; the 4096
   byte store-line limit applies on ingest. Report-level trimming can still fail

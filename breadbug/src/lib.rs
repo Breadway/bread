@@ -9,8 +9,9 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 use bread_bug::config::{self, BugConfig};
+use bread_bug::livestack::{self, Refusal};
 use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
-use bread_bug::store::{MarkerKind, Reader};
+use bread_bug::store::{Frame, MarkerKind, ProcessIdentity, Reader};
 use bread_bug::system::{installed_apps, InstalledApp};
 use bread_scrub::ScrubContext;
 use clap::{Parser, Subcommand};
@@ -46,6 +47,11 @@ pub struct Cli {
     /// Send the previewed report (needs upload to be enabled in settings).
     #[arg(long)]
     pub send: bool,
+
+    /// For a frozen app that is still running, include a stack trace of it
+    /// (frames only, taken now with your consent).
+    #[arg(long)]
+    pub live_stack: bool,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -84,7 +90,18 @@ pub struct Env {
     /// `None` reads bakery's real state.
     pub installed: Option<Option<Vec<InstalledApp>>>,
     pub include_journal: bool,
+    /// Captures the frames of a live process (injectable for tests). It must
+    /// verify `(app, pid, identity)` itself immediately before attaching.
+    pub live_capture: LiveCapture,
+    /// Whether the recorded instance is still the process behind its pid
+    /// (injectable for tests). Used before offering a capture at all.
+    pub live_check: LiveCheck,
 }
+
+/// See [`Env::live_capture`].
+pub type LiveCapture = fn(&str, u32, &ProcessIdentity) -> Result<Vec<Frame>, Refusal>;
+/// See [`Env::live_check`].
+pub type LiveCheck = fn(&str, u32, &ProcessIdentity) -> Result<(), Refusal>;
 
 impl Env {
     pub fn from_environment() -> Self {
@@ -95,6 +112,8 @@ impl Env {
             scrub: ScrubContext::from_environment(),
             installed: None,
             include_journal: true,
+            live_capture: livestack::capture,
+            live_check: livestack::check_target,
         }
     }
 
@@ -154,6 +173,9 @@ pub fn run(
     opts.scrub = env.scrub.clone();
     opts.include_journal = env.include_journal;
     opts.notes = notes;
+    if report_type == ReportType::Freeze {
+        opts.live_stack = maybe_live_stack(cli, env, &app, input, out, interactive)?;
+    }
     let prepared = report::build(&opts).context("build report")?;
 
     if cli.dry_run {
@@ -186,6 +208,76 @@ pub fn run(
         return Ok(());
     }
     review_loop(&prepared, env, input, out)
+}
+
+/// Why the app has no capturable frozen process, or the target if it has.
+///
+/// Only the app's *latest* marker counts. A `recovered`, `stopped` (clean
+/// exit, death or replacement) or later crash marker closes the freeze, so an
+/// old freeze is never walked back to. The marker's recorded process identity
+/// (pid, start time, executable) must still match the live process.
+fn live_target(env: &Env, app: &str) -> Result<(u32, ProcessIdentity), Refusal> {
+    let marker = Reader::open(&env.store_root)
+        .snapshot(app, 0, 0)
+        .ok()
+        .and_then(|s| s.markers.into_iter().next_back())
+        .filter(|m| m.kind == MarkerKind::Freeze)
+        .ok_or(Refusal::NoActiveFreeze)?;
+    let (Some(pid), Some(identity)) = (marker.pid, marker.process) else {
+        return Err(Refusal::NoIdentity);
+    };
+    (env.live_check)(app, pid, &identity)?;
+    Ok((pid, identity))
+}
+
+/// Offer (or, with `--live-stack`, just do) a stack capture of a frozen
+/// process. Only for the instance recorded in the app's latest marker, only
+/// while it is still that instance, and checked again after consent and right
+/// before attaching.
+fn maybe_live_stack(
+    cli: &Cli,
+    env: &Env,
+    app: &str,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+    interactive: bool,
+) -> Result<Vec<Frame>> {
+    let (pid, identity) = match live_target(env, app) {
+        Ok(target) => target,
+        Err(why) => {
+            if cli.live_stack {
+                writeln!(out, "Not capturing a live stack for {app}: {why}.")?;
+            }
+            return Ok(Vec::new());
+        }
+    };
+    let consent = if cli.live_stack {
+        true
+    } else if interactive && cli.app.is_none() {
+        writeln!(
+            out,
+            "\n{app} (pid {pid}) looks frozen and is still running. A stack trace shows where it is stuck.\nIt contains module names, offsets and build ids only, no memory, registers or environment."
+        )?;
+        prompt(input, out, "Capture one now and include it? [y/N]: ")?
+            .is_some_and(|a| matches!(a.to_lowercase().as_str(), "y" | "yes"))
+    } else {
+        false
+    };
+    if !consent {
+        return Ok(Vec::new());
+    }
+    // Time has passed (the user was reading a prompt): the capture function
+    // verifies the instance again immediately before it attaches.
+    match (env.live_capture)(app, pid, &identity) {
+        Ok(frames) => Ok(frames),
+        Err(why) => {
+            writeln!(
+                out,
+                "Not capturing a live stack for {app}: {why}. Continuing without it."
+            )?;
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn entries(env: &Env) -> Vec<AppEntry> {

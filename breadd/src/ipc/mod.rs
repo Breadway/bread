@@ -69,6 +69,8 @@ pub struct Server {
     /// breadbug's on-disk log/event store (`bug.*` methods). `None` when it
     /// could not be opened; the methods then report it as unavailable.
     bug_store: Option<Arc<bread_bug::store::Store>>,
+    /// Freeze watchdog fed by `bug.heartbeat`.
+    bug_watchdog: Arc<crate::watchdog::Watchdog>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +106,7 @@ impl Server {
         event_buffer: Arc<std::sync::Mutex<VecDeque<BreadEvent>>>,
         module_host_registry: ModuleHostRegistry,
         bug_store: Option<Arc<bread_bug::store::Store>>,
+        bug_watchdog: Arc<crate::watchdog::Watchdog>,
     ) -> Self {
         Self {
             socket_path,
@@ -116,6 +119,7 @@ impl Server {
             module_host_registry,
             hyprland: module_host_bridge::HyprlandBridge::new(),
             bug_store,
+            bug_watchdog,
             subscription_count,
             event_buffer,
             started_at: Instant::now(),
@@ -459,18 +463,16 @@ impl Server {
             "bug.marker" => bugstore::ipc_marker(self.bug_store.as_deref(), &req.params).map(
                 |(app, marker, stored)| {
                     if stored {
-                        let kind = serde_json::to_value(marker.kind)
-                            .ok()
-                            .and_then(|v| v.as_str().map(ToString::to_string))
-                            .unwrap_or_default();
-                        let _ = self.emit_tx.send(BreadEvent::new(
-                            format!("bread.bug.{kind}"),
-                            AdapterSource::System,
-                            json!({ "app": app, "kind": kind, "t": marker.t }),
-                        ));
+                        bugstore::publish_marker(&self.emit_tx, &app, &marker, true);
                     }
                     json!({ "stored": stored })
                 },
+            ),
+            "bug.heartbeat" => bugstore::ipc_heartbeat(
+                self.bug_store.as_deref(),
+                &self.bug_watchdog,
+                &self.emit_tx,
+                &req.params,
             ),
             "bug.status" => Ok(bugstore::ipc_status(self.bug_store.as_deref())),
             "bug.wipe" => bugstore::ipc_wipe(self.bug_store.as_deref(), &req.params),
