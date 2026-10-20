@@ -782,3 +782,156 @@ fn scripted_use_never_shows_the_notice() {
     let (r, _) = go(&[], &e, "", true);
     r.unwrap();
 }
+
+// ---- session (structured results, shared by the CLI and the GUI) ---------
+
+mod session_api {
+    use super::*;
+    use crate::session::{self, SendOutcome};
+    use bread_bug::report::{build, BuildOptions, ReportType};
+
+    fn prepared(e: &Env, notes: &str) -> bread_bug::report::Prepared {
+        let mut o = BuildOptions::new("clip", ReportType::Crash);
+        o.store_root = e.store_root.clone();
+        o.socket = e.socket.clone();
+        o.scrub = e.scrub.clone();
+        o.include_journal = false;
+        o.notes = Some(notes.to_string());
+        build(&o).unwrap()
+    }
+
+    #[test]
+    fn send_is_disabled_until_the_user_allows_it_and_never_touches_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = env(dir.path());
+        assert!(!session::upload_enabled(&e).unwrap());
+        // a server that would fail the test if contacted
+        let url = serve(vec![(500, "{}")]);
+        BugConfig {
+            upload_enabled: false,
+            endpoint: url,
+            ..BugConfig::default()
+        }
+        .save_to(&e.config_path)
+        .unwrap();
+        assert_eq!(
+            session::send(&e, &prepared(&e, "x")).unwrap(),
+            SendOutcome::Disabled
+        );
+        assert!(Queue::open(&e.state_dir).unwrap().list().is_empty());
+        assert!(History::open(&e.state_dir).unwrap().list().is_empty());
+    }
+
+    #[test]
+    fn every_outcome_is_reported_distinctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = env(dir.path());
+        let sent = |url: String| {
+            BugConfig {
+                upload_enabled: true,
+                endpoint: url,
+                ..BugConfig::default()
+            }
+            .save_to(&e.config_path)
+            .unwrap();
+        };
+        sent(serve(vec![(
+            201,
+            r#"{"receipt":"0123456789abcdef0123456789abcdef","deletion_token":"tok"}"#,
+        )]));
+        assert_eq!(
+            session::send(&e, &prepared(&e, "one")).unwrap(),
+            SendOutcome::Sent {
+                receipt: RECEIPT.into(),
+                deletable: true
+            }
+        );
+        sent(serve(vec![(400, r#"{"error":"invalid report"}"#)]));
+        assert!(matches!(
+            session::send(&e, &prepared(&e, "two")).unwrap(),
+            SendOutcome::Rejected { why } if why == "invalid report"
+        ));
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        sent(dead);
+        assert!(matches!(
+            session::send(&e, &prepared(&e, "three")).unwrap(),
+            SendOutcome::Queued { .. }
+        ));
+        assert_eq!(Queue::open(&e.state_dir).unwrap().list().len(), 1);
+        // fill the queue, then the next one is refused
+        for i in 0..bread_bug::upload::MAX_QUEUED {
+            let _ = session::send(&e, &prepared(&e, &format!("fill {i}")));
+        }
+        assert!(matches!(
+            session::send(&e, &prepared(&e, "overflow")).unwrap(),
+            SendOutcome::QueueFull { .. }
+        ));
+    }
+
+    #[test]
+    fn save_writes_the_exact_bytes_and_records_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = env(dir.path());
+        let p = prepared(&e, "saved note");
+        let path = dir.path().join("r.json");
+        session::save(&e, &p, &path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), p.bytes);
+        let h = History::open(&e.state_dir).unwrap().list();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].path.as_deref(), Some(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn apps_and_default_types_follow_the_last_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = freeze_env(dir.path(), 4242);
+        let names: Vec<_> = session::apps(&e).into_iter().map(|a| a.app).collect();
+        assert_eq!(names[0], "pad", "newest problem first");
+        assert_eq!(session::default_type(&e, "pad"), ReportType::Freeze);
+        assert_eq!(session::default_type(&e, "clip"), ReportType::Crash);
+        assert_eq!(session::default_type(&e, "unknown"), ReportType::Behavior);
+    }
+}
+
+mod session_build {
+    use super::*;
+    use crate::session;
+    use bread_bug::report::ReportType;
+
+    #[test]
+    fn build_report_applies_notes_and_only_captures_a_stack_when_asked() {
+        let _g = CAPTURE_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let e = freeze_env(dir.path(), 4242);
+        let none =
+            session::build_report(&e, "pad", ReportType::Freeze, Some("  ".into()), None).unwrap();
+        assert!(none.report.notes.is_none(), "blank notes are dropped");
+        assert!(none.report.live_stack.is_empty());
+        let with = session::build_report(
+            &e,
+            "pad",
+            ReportType::Freeze,
+            Some("it hung".into()),
+            Some(4242),
+        )
+        .unwrap();
+        assert_eq!(with.report.notes.as_deref(), Some("it hung"));
+        assert_eq!(with.report.live_stack.len(), 1);
+    }
+
+    #[test]
+    fn live_stack_pid_needs_a_live_bread_process_and_a_freeze_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = freeze_env(dir.path(), 4242);
+        assert_eq!(session::live_stack_pid(&e, "pad"), Some(4242));
+        assert_eq!(
+            session::live_stack_pid(&e, "clip"),
+            None,
+            "a panic is not a freeze"
+        );
+        let gone = freeze_env(tempfile::tempdir().unwrap().path(), 9999);
+        assert_eq!(session::live_stack_pid(&gone, "pad"), None, "pid not alive");
+    }
+}
