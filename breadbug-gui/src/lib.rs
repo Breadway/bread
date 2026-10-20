@@ -6,6 +6,7 @@
 //! is only layout and wiring. Slow work (building a report runs helper
 //! commands; sending touches the network) runs off the UI thread.
 
+pub mod preview;
 pub mod text;
 
 use std::cell::RefCell;
@@ -70,6 +71,12 @@ fn buttons() -> GBox {
     b.set_halign(gtk4::Align::End);
     b.set_margin_top(8);
     b
+}
+
+/// Apply the `(save, send)` decision from `preview::actions` to the buttons.
+fn set_actions(save: &Button, send: &Button, save_on: bool, send_on: bool) {
+    save.set_sensitive(save_on);
+    send.set_sensitive(send_on);
 }
 
 fn mono_view(content: &str) -> ScrolledWindow {
@@ -327,11 +334,12 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
     {
         let (state, stack) = (state.clone(), stack.clone());
         let (dd, notes, live) = (type_dd.clone(), notes.clone(), live_check.clone());
-        let (summary, holder, status_line, send_btn, preview_btn) = (
+        let (summary, holder, status_line, send_btn, save_btn, preview_btn) = (
             summary.clone(),
             preview_holder.clone(),
             status_line.clone(),
             v_send.clone(),
+            v_save.clone(),
             d_preview.clone(),
         );
         d_preview.connect_clicked(move |_| {
@@ -344,15 +352,24 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
             let buf = notes.buffer();
             let note_text = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
             let live_pid = if live.is_active() { pid } else { None };
+            // The previous report must not stay saveable or sendable while
+            // the new one is built, or if that build fails.
+            preview::rebuild_started(&mut state.borrow_mut().prepared);
+            set_actions(&save_btn, &send_btn, false, false);
+            while let Some(c) = holder.first_child() {
+                holder.remove(&c);
+            }
+            summary.set_text("");
             preview_btn.set_sensitive(false);
             preview_btn.set_label("Preparing…");
-            let (state, stack, summary, holder, status_line, send_btn, preview_btn) = (
+            let (state, stack, summary, holder, status_line, send_btn, save_btn, preview_btn) = (
                 state.clone(),
                 stack.clone(),
                 summary.clone(),
                 holder.clone(),
                 status_line.clone(),
                 send_btn.clone(),
+                save_btn.clone(),
                 preview_btn.clone(),
             );
             glib::spawn_future_local(async move {
@@ -384,22 +401,29 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
                         }
                         holder.append(&mono_view(&String::from_utf8_lossy(&prepared.bytes)));
                         let enabled = session::upload_enabled(&env).unwrap_or(false);
-                        send_btn.set_sensitive(enabled);
+                        let (save, send) = preview::actions(true, enabled);
+                        set_actions(&save_btn, &send_btn, save, send);
                         status_line.set_text(if enabled {
                             "Send uploads exactly this report. You will get a receipt you can use to delete it."
                         } else {
                             text::SENDING_OFF_HINT
                         });
-                        state.borrow_mut().prepared = Some(prepared);
+                        preview::settle(&mut state.borrow_mut().prepared, Ok::<_, String>(prepared));
                         stack.set_visible_child_name("preview");
                     }
                     Ok(Err(e)) => {
+                        preview::settle(&mut state.borrow_mut().prepared, Err::<Prepared, _>(()));
+                        set_actions(&save_btn, &send_btn, false, false);
+                        summary.set_text("The report could not be prepared. Go back to try again.");
                         status_line.set_text(&format!("Could not build the report: {e}"));
                         stack.set_visible_child_name("preview");
-                        send_btn.set_sensitive(false);
                     }
                     Err(_) => {
+                        preview::settle(&mut state.borrow_mut().prepared, Err::<Prepared, _>(()));
+                        set_actions(&save_btn, &send_btn, false, false);
+                        summary.set_text("The report could not be prepared. Go back to try again.");
                         status_line.set_text("Building the report failed unexpectedly.");
+                        stack.set_visible_child_name("preview");
                     }
                 }
             });
