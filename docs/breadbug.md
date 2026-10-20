@@ -71,6 +71,18 @@ the queue, `history --refresh` and `delete`.
   `history.jsonl` (0600). `breadbug delete <receipt>` removes it from the
   server. An identical resend returns the original receipt.
 
+## Status and fix notifications
+
+`breadbug status` asks the server how the reports you sent are doing
+(`received`, `duplicate`, `investigating`, `fixed` in a version, `closed`),
+updates your history, and tells you when one is fixed in a version newer than
+the one you have installed. With `notify_fixed = true` in `breadbug.toml`
+(off by default, a bos-settings toggle) and `--notify` it also shows one
+desktop notification per fix. It only ever polls receipts you hold, never
+sends anything, and does nothing at all while sending is off. A daily user
+timer (`packaging/systemd/breadbug-status.timer`) runs it quietly; there is no
+push channel and no email.
+
 ## Freeze detection
 
 Apps send `bug.heartbeat` from their main loop. If heartbeats stop while the

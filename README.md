@@ -262,6 +262,7 @@ breadbug config upload on         # allow sending (off by default)
 breadbug history [--refresh]      # what you sent or saved, with receipts and status
 breadbug delete <receipt>         # delete a sent report from the server
 breadbug queue [flush|cancel|clear] # reports waiting for the network
+breadbug status [--notify]        # how your sent reports are doing; fixes you can update to
 ```
 
 ## Module system

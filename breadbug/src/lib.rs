@@ -69,6 +69,15 @@ pub enum Command {
         #[arg(long)]
         refresh: bool,
     },
+    /// Ask the server how your sent reports are doing; with --notify, tell you
+    /// about fixes you can update to (needs notify_fixed in breadbug.toml).
+    Status {
+        #[arg(long)]
+        notify: bool,
+        /// Print nothing unless there is news.
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Delete a report you sent from the server (needs the receipt id).
     Delete { receipt: String },
     /// Reports waiting to be sent because the server was unreachable.
@@ -123,6 +132,8 @@ pub struct Env {
     /// Whether the recorded instance is still the process behind its pid
     /// (injectable for tests). Used before offering a capture at all.
     pub live_check: LiveCheck,
+    /// Shows a desktop notification (injectable for tests).
+    pub notifier: fn(&str, &str),
 }
 
 /// See [`Env::live_capture`].
@@ -142,6 +153,7 @@ impl Env {
             include_journal: true,
             live_capture: livestack::capture,
             live_check: livestack::check_target,
+            notifier: desktop_notify,
         }
     }
 
@@ -163,6 +175,7 @@ pub fn run(
     match &cli.command {
         Some(Command::List) => return list(env, out),
         Some(Command::History { refresh }) => return history(env, *refresh, out),
+        Some(Command::Status { notify, quiet }) => return status(env, *notify, *quiet, out),
         Some(Command::Delete { receipt }) => return delete(env, receipt, out),
         Some(Command::Queue { action }) => return queue(env, action.as_ref(), out),
         Some(Command::Config {
@@ -517,6 +530,8 @@ fn save(p: &Prepared, path: &std::path::Path, env: &Env, out: &mut dyn Write) ->
             deletion_token: None,
             path: Some(path.display().to_string()),
             status: None,
+            fixed_in: None,
+            told_fixed: false,
         });
     }
     writeln!(
@@ -562,6 +577,8 @@ fn send(p: &Prepared, env: &Env, out: &mut dyn Write) -> Result<()> {
                 deletion_token: acc.deletion_token.clone(),
                 path: None,
                 status: Some("received".into()),
+                fixed_in: None,
+                told_fixed: false,
             })?;
             writeln!(out, "\nSent. Thank you. Your receipt: {}", acc.receipt)?;
             if acc.deletion_token.is_some() {
@@ -596,20 +613,35 @@ fn send(p: &Prepared, env: &Env, out: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
+/// Query the server for every sent report and store the answers. Returns
+/// `(receipt, app, new status, fixed_in)` for reports that just became fixed.
+fn refresh_statuses(h: &History, client: &Client) -> Result<Vec<(String, String, String)>> {
+    let mut newly_fixed = Vec::new();
+    for e in h.list() {
+        let Some(r) = e.receipt.as_deref() else {
+            continue;
+        };
+        match client.status(r) {
+            Ok(Some(st)) => {
+                h.set_status(r, &st.status, st.fixed_in.as_deref())?;
+                if st.status == "fixed" && e.status.as_deref() != Some("fixed") {
+                    if let Some(v) = st.fixed_in {
+                        newly_fixed.push((r.to_string(), e.app.clone(), v));
+                    }
+                }
+            }
+            Ok(None) => h.set_status(r, "unknown to the server", None)?,
+            Err(_) => {}
+        }
+    }
+    Ok(newly_fixed)
+}
+
 fn history(env: &Env, refresh: bool, out: &mut dyn Write) -> Result<()> {
     let h = History::open(&env.state_dir)?;
     if refresh {
         if let Some(client) = client_if_enabled(env, out)? {
-            for e in h.list() {
-                let Some(r) = e.receipt.as_deref() else {
-                    continue;
-                };
-                match client.status(r) {
-                    Ok(Some(status)) => h.set_status(r, &status)?,
-                    Ok(None) => h.set_status(r, "unknown to the server")?,
-                    Err(_) => {}
-                }
-            }
+            refresh_statuses(&h, &client)?;
         }
     }
     let all = h.list();
@@ -620,11 +652,14 @@ fn history(env: &Env, refresh: bool, out: &mut dyn Write) -> Result<()> {
         match e.kind {
             HistoryKind::Sent => writeln!(
                 out,
-                "sent   {}  {}  receipt {}  {}",
+                "sent   {}  {}  receipt {}  {}{}",
                 e.t,
                 e.app,
                 e.receipt.as_deref().unwrap_or("?"),
-                e.status.as_deref().unwrap_or("")
+                e.status.as_deref().unwrap_or(""),
+                e.fixed_in
+                    .as_deref()
+                    .map_or(String::new(), |v| format!(" in {v}"))
             )?,
             HistoryKind::Saved => writeln!(
                 out,
@@ -634,6 +669,64 @@ fn history(env: &Env, refresh: bool, out: &mut dyn Write) -> Result<()> {
                 e.path.as_deref().unwrap_or("?")
             )?,
         }
+    }
+    Ok(())
+}
+
+/// Best-effort desktop notification through `notify-send`.
+fn desktop_notify(title: &str, body: &str) {
+    let _ = bread_bug::runcmd::run(
+        "notify-send",
+        &["--app-name=breadbug", title, body],
+        std::time::Duration::from_secs(5),
+    );
+}
+
+fn status(env: &Env, notify: bool, quiet: bool, out: &mut dyn Write) -> Result<()> {
+    let h = History::open(&env.state_dir)?;
+    if h.list().iter().all(|e| e.receipt.is_none()) {
+        if !quiet {
+            writeln!(out, "No sent reports to check.")?;
+        }
+        return Ok(());
+    }
+    let cfg = BugConfig::load_from(&env.config_path)?;
+    if !cfg.upload_enabled {
+        if !quiet {
+            writeln!(
+                out,
+                "Sending is turned off, so breadbug does not contact the server."
+            )?;
+        }
+        return Ok(());
+    }
+    let client = Client::new(&cfg.endpoint)?;
+    let installed = env.installed_apps().unwrap_or_default();
+    let newly = refresh_statuses(&h, &client)?;
+    let mut news = false;
+    for (receipt, app, fixed_in) in newly {
+        let have = installed
+            .iter()
+            .find(|a| a.id == app)
+            .map(|a| a.version.clone());
+        let update = have
+            .as_deref()
+            .is_some_and(|v| bread_bug::version::older_than(v, &fixed_in));
+        news = true;
+        let line = if update {
+            format!("Your report about {app} is fixed in {fixed_in}. You have {}; update with `bakery update`.", have.unwrap_or_default())
+        } else {
+            format!("Your report about {app} is fixed in {fixed_in}.")
+        };
+        writeln!(out, "{line}")?;
+        let already = h.find(&receipt).is_some_and(|e| e.told_fixed);
+        if notify && cfg.notify_fixed && update && !already {
+            (env.notifier)("A bug you reported is fixed", &line);
+            h.mark_told_fixed(&receipt)?;
+        }
+    }
+    if !news && !quiet {
+        writeln!(out, "No news on your reports.")?;
     }
     Ok(())
 }

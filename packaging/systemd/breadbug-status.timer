@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily check on bug reports you sent (breadbug)
+
+[Timer]
+OnStartupSec=15min
+OnUnitActiveSec=1d
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

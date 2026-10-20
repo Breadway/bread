@@ -1,0 +1,8 @@
+[Unit]
+Description=Check the status of bug reports you sent (breadbug)
+ConditionPathExists=%h/.config/bread/breadbug.toml
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/breadbug status --notify --quiet
+Nice=10
