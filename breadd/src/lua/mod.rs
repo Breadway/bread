@@ -153,8 +153,18 @@ pub enum LuaMessage {
     StartupComplete {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
-    Shutdown,
+    /// Run every module's `on_unload` hook, then answer on `reply` and exit
+    /// the Lua thread.
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
+
+/// How long daemon shutdown waits for module `on_unload` hooks before
+/// exiting anyway. Kept well under the systemd unit's `TimeoutStopSec=5`
+/// (`packaging/systemd/breadd.service`), so a stuck hook can never make
+/// the daemon hang until systemd kills it.
+pub(crate) const LUA_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorEntry {
@@ -198,8 +208,28 @@ impl RuntimeHandle {
         }
     }
 
-    pub fn shutdown(&self) {
-        let _ = self.tx.send(LuaMessage::Shutdown);
+    /// Run every module's `on_unload` hook (in reverse load order) and wait
+    /// for the Lua thread to finish them, for at most
+    /// [`LUA_SHUTDOWN_TIMEOUT`]. Never panics: if the runtime already
+    /// stopped, there is nothing left to unload and this returns.
+    pub async fn shutdown(&self) {
+        let (reply, done) = oneshot::channel();
+        if self.tx.send(LuaMessage::Shutdown { reply }).is_err() {
+            warn!("lua runtime already stopped; skipping module on_unload hooks");
+            return;
+        }
+        match tokio::time::timeout(LUA_SHUTDOWN_TIMEOUT, done).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                warn!("lua runtime exited before confirming module on_unload hooks");
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = LUA_SHUTDOWN_TIMEOUT.as_millis() as u64,
+                    "module on_unload hooks did not finish in time; exiting anyway"
+                );
+            }
+        }
     }
 
     pub fn recent_errors(&self) -> Vec<ErrorEntry> {
@@ -306,7 +336,9 @@ pub fn spawn_runtime(
                             };
                             let _ = reply.send(result);
                         }
-                        LuaMessage::Shutdown => {
+                        LuaMessage::Shutdown { reply } => {
+                            engine.run_on_unload();
+                            let _ = reply.send(());
                             break;
                         }
                     }

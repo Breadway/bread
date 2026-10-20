@@ -177,7 +177,7 @@ async fn main() -> Result<()> {
 
     let _ = shutdown_tx.send(true);
 
-    lua_runtime.shutdown();
+    lua_runtime.shutdown().await;
     module_host_registry.shutdown_all();
     Ok(())
 }
