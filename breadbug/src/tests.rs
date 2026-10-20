@@ -902,6 +902,7 @@ mod session_build {
 
     #[test]
     fn build_report_applies_notes_and_only_captures_a_stack_when_asked() {
+        let _g = CAPTURE_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let e = freeze_env(dir.path(), 4242);
         let none =
