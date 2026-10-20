@@ -162,6 +162,23 @@ impl Watchdog {
             .contains(app)
     }
 
+    /// Replace the exclusion list at runtime.
+    ///
+    /// Newly excluded apps stop being tracked immediately, so a pending or
+    /// future freeze cannot be reported and no stale state survives until the
+    /// process exits. Removing an exclusion does not start tracking: the next
+    /// heartbeat does.
+    pub fn set_excluded(&self, excluded: &[String]) {
+        let next: HashSet<String> = excluded.iter().cloned().collect();
+        // Same order as heartbeat/stopping: excluded, then inner. Holding the
+        // exclusion lock across the insert/remove makes the check and the
+        // track decision atomic against a concurrent reload.
+        let mut guard = self.excluded.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = next;
+        let mut inner = self.lock();
+        inner.apps.retain(|app, _| !guard.contains(app));
+    }
+
     /// Record a heartbeat from `instance`.
     ///
     /// The same instance that had been frozen is `recovered`. A heartbeat from
@@ -174,7 +191,8 @@ impl Watchdog {
         interval: Option<Duration>,
         now: Instant,
     ) -> HeartbeatOutcome {
-        if self.is_excluded(app) {
+        let excluded = self.excluded.lock().unwrap_or_else(|p| p.into_inner());
+        if excluded.contains(app) {
             return HeartbeatOutcome {
                 excluded: true,
                 ..HeartbeatOutcome::default()
@@ -215,7 +233,8 @@ impl Watchdog {
     /// `instance` announced a clean exit. Only the tracked instance can stop
     /// tracking; a late message from an older one is ignored.
     pub fn stopping(&self, app: &str, instance: &Instance) -> StopOutcome {
-        if self.is_excluded(app) {
+        let excluded = self.excluded.lock().unwrap_or_else(|p| p.into_inner());
+        if excluded.contains(app) {
             return StopOutcome::Excluded;
         }
         let mut inner = self.lock();
@@ -578,6 +597,27 @@ mod tests {
         // Other apps are unaffected.
         assert!(!w.heartbeat("pad", inst(11, 1), None, t0).excluded);
         assert!(w.is_tracked("pad"));
+    }
+
+    #[test]
+    fn runtime_exclusion_drops_a_tracked_app_and_blocks_new_heartbeats() {
+        let (w, t0) = wd();
+        hb(&w, "clip", &inst(10, 1), t0);
+        assert!(w.is_tracked("clip"));
+        w.set_excluded(&["clip".to_string()]);
+        assert!(w.is_excluded("clip"));
+        assert!(!w.is_tracked("clip"));
+        assert!(w.check(at(t0, 60), TICK, TICK, alive).is_empty());
+        let out = w.heartbeat("clip", inst(10, 1), None, at(t0, 61));
+        assert!(out.excluded);
+        assert!(!w.is_tracked("clip"));
+        // Removing the exclusion does not resurrect stale tracking: the next
+        // heartbeat starts a fresh instance instead of "recovering" one.
+        w.set_excluded(&[]);
+        assert!(!w.is_tracked("clip"));
+        let out = w.heartbeat("clip", inst(10, 1), None, at(t0, 62));
+        assert!(!out.excluded && !out.recovered);
+        assert!(w.is_tracked("clip"));
     }
 
     #[test]
