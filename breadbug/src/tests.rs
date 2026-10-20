@@ -59,6 +59,7 @@ fn env(dir: &std::path::Path) -> Env {
         .record_marker("clip", Marker::new(MarkerKind::Panic, 9))
         .unwrap();
     store.append_log("pad", "info", "ok", 6).unwrap();
+    bread_bug::consent::mark_seen(&dir.join("state"));
     Env {
         store_root: dir.join("store"),
         socket: dir.join("none.sock"),
@@ -728,4 +729,56 @@ fn status_is_quiet_and_offline_while_upload_is_off() {
     assert!(out.contains("turned off"), "{out}");
     let (_, out) = go(&["status", "--quiet"], &e, "", false);
     assert!(out.is_empty(), "{out}");
+}
+
+// ---- consent notice ------------------------------------------------------
+
+#[test]
+fn first_interactive_run_shows_the_notice_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    std::fs::remove_file(e.state_dir.join("consent-shown")).unwrap();
+    // Enter acknowledges, then the normal flow continues (pick 1, defaults, cancel).
+    let (r, out) = go(&[], &e, "\n1\n\n\nc\n", true);
+    r.unwrap();
+    assert!(
+        out.contains("Nothing is sent unless you choose Send"),
+        "{out}"
+    );
+    assert!(out.contains("Which app has the problem?"), "{out}");
+    // Second run: no notice.
+    let (_, out) = go(&[], &e, "1\n\n\nc\n", true);
+    assert!(!out.contains("Reporting a problem"), "{out}");
+}
+
+#[test]
+fn quitting_at_the_notice_does_nothing_and_it_is_shown_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    std::fs::remove_file(e.state_dir.join("consent-shown")).unwrap();
+    let (r, out) = go(&[], &e, "q\n", true);
+    r.unwrap();
+    assert!(out.contains("Nothing was done"), "{out}");
+    assert!(!out.contains("Which app"), "{out}");
+    let (_, out) = go(&[], &e, "\n1\n\n\nc\n", true);
+    assert!(out.contains("Reporting a problem"), "{out}");
+}
+
+#[test]
+fn scripted_use_never_shows_the_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    std::fs::remove_file(e.state_dir.join("consent-shown")).unwrap();
+    for args in [
+        vec!["--app", "clip", "--dry-run"],
+        vec!["list"],
+        vec!["--app", "clip"],
+    ] {
+        let (r, out) = go(&args, &e, "", false);
+        r.unwrap();
+        assert!(!out.contains("Reporting a problem"), "{args:?}: {out}");
+    }
+    // eof at the notice is a clean stop
+    let (r, _) = go(&[], &e, "", true);
+    r.unwrap();
 }

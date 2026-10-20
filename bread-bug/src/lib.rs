@@ -1,6 +1,7 @@
 //! breadbug core library. See ECO-66 for the design.
 
 pub mod config;
+pub mod consent;
 pub mod ipc;
 pub mod livestack;
 pub mod procid;

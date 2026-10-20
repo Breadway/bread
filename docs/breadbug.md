@@ -168,27 +168,23 @@ preview exists so users can inspect the exact payload.
 
 ## Consent copy (intended user-facing copy)
 
-> Upload is off by default. Nothing is uploaded unless you turn on report
-> sending in settings and then choose **Send** for this report. Before sending,
-> review the exact report shown here; you can instead save it to a file or
-> cancel. A report may contain crash frames, recent scrubbed app and daemon
-> logs, event names with the listed safe fields, a limited set of system and
-> installed bread-app versions, journal lines, and any notes you add. Personal
-> information can remain if the scrubber misses it, so inspect the full report
-> and do not include secrets in notes. If live stack capture is offered, it is
-> a separate optional consent and includes frames only, never process memory.
->
-> When upload is implemented, the destination must be shown before confirmation:
-> `https://bugs.breadway.dev` (or the exact configured endpoint). The proposed
-> retention is raw reports for 90 days, then deletion; cluster metadata may be
-> retained without raw report content. A receipt should explain how to request
-> deletion. A receipt ID or deletion request is not a guarantee of immediate
-> erasure from backups, logs or already-derived cluster metadata; the service
-> must document those limits before launch.
+The text is `bread_bug::consent::CONSENT_TEXT`. It is shown once, before the
+first interactive `breadbug` session (Enter acknowledges and records it; `q`
+stops without recording, so it is shown again next time). The GUI,
+bos-settings and breadhelp reuse the same constant. In short:
 
-The endpoint and retention text above are ECO-66 design requirements, not a
-claim that an upload service exists. The present binary's configured default
-endpoint is `https://bugs.breadway.dev`, but it does not send data.
+> A report contains your app's recent log lines, crash frames, event names and
+> basic system facts such as OS, kernel, GPU driver and bread versions.
+> Personal values such as your name, home folder, hostname, IP addresses,
+> emails and tokens are replaced before anything is stored or shown. You can
+> read the whole report before deciding. Nothing is sent unless you choose
+> Send, and sending is off by default. You can save the report to a file
+> instead.
+
+The configured default endpoint is `https://bugs.breadway.dev`. Nothing is
+sent unless upload is enabled and the user chooses Send for that report, and
+`breadbug status` only polls receipts the user holds. The intake service and
+its retention controls are not part of this repo.
 
 ## Server trust boundaries and threat model (requirements, not current controls)
 
