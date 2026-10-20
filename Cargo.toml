@@ -33,3 +33,9 @@ tempfile = "3"
 # path), not merely a Lua-level check.
 landlock = "0.4"
 uuid = { version = "1", features = ["v4"] }
+
+# Keep line tables in release builds so breadbug can resolve crash frames to
+# file and line. The shipped binaries are stripped after the symbols are
+# published (see ci/publish-symbols.sh), so users do not download them.
+[profile.release]
+debug = "line-tables-only"

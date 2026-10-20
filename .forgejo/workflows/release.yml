@@ -22,19 +22,30 @@ jobs:
       - name: test
         run: cd src && bash ci/build.sh cargo test --release --locked --workspace
 
+      # Debug symbols for breadbug, keyed by build-id, taken from the
+      # unstripped binaries (the strip happens in "prepare artifacts").
+      - name: publish debug symbols
+        run: |
+          cd src
+          bash ci/publish-symbols.sh \
+            target/release/breadd target/release/bread target/release/bread-emit \
+            target/release/bread-module-host target/release/breadbug
+
       - name: prepare artifacts
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           PKG_DIR="/srv/breadway-dl/bread/${VERSION}"
           mkdir -p "${PKG_DIR}"
-          for bin in breadd bread bread-emit bread-module-host; do
+          for bin in breadd bread bread-emit bread-module-host breadbug; do
             cp "src/target/release/${bin}" "${PKG_DIR}/${bin}-x86_64"
             strip "${PKG_DIR}/${bin}-x86_64"
             sha256sum "${PKG_DIR}/${bin}-x86_64" | awk '{print $1}' \
               > "${PKG_DIR}/${bin}-x86_64.sha256"
           done
           cp src/packaging/systemd/breadd.service "${PKG_DIR}/"
+          cp src/packaging/systemd/breadbug-status.service "${PKG_DIR}/"
+          cp src/packaging/systemd/breadbug-status.timer "${PKG_DIR}/"
           cp src/LICENSE "${PKG_DIR}/"
           cp src/bakery.toml "${PKG_DIR}/bakery.toml"
           ln -sfn "${VERSION}" "/srv/breadway-dl/bread/latest"
@@ -69,8 +80,10 @@ jobs:
             "${PKG_DIR}/bread-x86_64" \
             "${PKG_DIR}/bread-emit-x86_64" \
             "${PKG_DIR}/bread-module-host-x86_64" \
+            "${PKG_DIR}/breadbug-x86_64" \
             "${PKG_DIR}/breadd-x86_64.sha256" \
             "${PKG_DIR}/bread-x86_64.sha256" \
             "${PKG_DIR}/bread-emit-x86_64.sha256" \
             "${PKG_DIR}/bread-module-host-x86_64.sha256" \
+            "${PKG_DIR}/breadbug-x86_64.sha256" \
             --clobber
