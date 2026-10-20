@@ -67,7 +67,12 @@ fn longer_dotted_numbers_are_not_ips() {
 fn rust_paths_are_not_ipv6() {
     let mut s = scrubber();
     let line = "at core::fmt::Write::write_fmt cafe::bad 12:34:56";
-    assert_eq!(s.scrub_text(line), line);
+    // Alphabetic hextets are valid IPv6. Ambiguous Rust paths deliberately
+    // err toward privacy, while unambiguous symbols remain readable.
+    assert_eq!(
+        s.scrub_text(line),
+        "at core::fmt::Write::write_fmt <IP:1> 12:34:56"
+    );
 }
 
 #[test]
@@ -146,13 +151,13 @@ fn identity_literals_respect_word_boundaries() {
 }
 
 #[test]
-fn common_names_are_not_redacted_as_identity() {
+fn configured_common_username_is_still_redacted() {
     let mut s = Scrubber::new(ScrubContext {
         username: Some("root".into()),
         hostname: Some("localhost".into()),
         ..Default::default()
     });
-    assert_eq!(s.scrub_text("root@localhost"), "root@localhost");
+    assert_eq!(s.scrub_text("root@localhost"), "<USER>@<HOST>");
 }
 
 #[test]
@@ -215,15 +220,12 @@ fn event_patterns() {
 }
 
 #[test]
-fn unlisted_event_payload_is_dropped_keeping_only_safe_key_names() {
+fn unlisted_event_payload_drops_key_names_too() {
     let mut s = scrubber();
     let allow = EventAllowlist::new().allow("bread.power.**", &["battery_percent"]);
     let payload = json!({"title": "Inbox", "class": "firefox", "Weird Key": 1, "address": "0xabc"});
     let out = s.scrub_event_payload("bread.window.opened", &payload, &allow);
-    assert_eq!(
-        out,
-        json!({"_dropped": true, "_keys": ["address", "class", "title"]})
-    );
+    assert_eq!(out, json!({"_dropped": true, "_keys": []}));
 }
 
 #[test]
@@ -263,11 +265,78 @@ fn overflow_marker_after_cap() {
 }
 
 #[test]
-fn default_distro_names_are_not_treated_as_identity() {
-    let mut s = Scrubber::new(ScrubContext {
-        hostname: Some("bos".into()),
-        username: Some("arch".into()),
-        ..Default::default()
+fn common_distro_words_are_redacted_when_they_are_configured_identities() {
+    for (username, hostname, input) in [
+        (Some("arch"), Some("bos"), "arch kernel on bos"),
+        (Some("bos"), Some("arch"), "bos kernel on arch"),
+    ] {
+        let mut s = Scrubber::new(ScrubContext {
+            username: username.map(str::to_string),
+            hostname: hostname.map(str::to_string),
+            ..Default::default()
+        });
+        let output = s.scrub_text(input);
+        assert!(!output.contains(username.unwrap()));
+        assert!(!output.contains(hostname.unwrap()));
+        assert!(output.contains("<USER>"), "{output}");
+        assert!(output.contains("<HOST>"), "{output}");
+    }
+}
+
+#[test]
+fn review_privacy_regressions() {
+    let mut scrubber = Scrubber::new(ScrubContext::default());
+    for (input, secret) in [
+        ("connect dead:beef::abcd", "dead:beef::abcd"),
+        ("remote 2001:db8::1: connected", "2001:db8::1"),
+        ("AWS <AKIAIOSFODNN7EXAMPLE>", "AKIAIOSFODNN7EXAMPLE"),
+        (
+            "https://bob:ghp_16C7e42F292c6912E7710c838347Ae178B4a@example.com/x",
+            "bob",
+        ),
+    ] {
+        let result = scrubber.scrub_text(input);
+        assert!(!result.contains(secret), "{input} -> {result}");
+        assert_eq!(scrubber.scrub_text(&result), result);
+    }
+    let mut scrubber = Scrubber::new(ScrubContext {
+        hostname: Some("pi".into()),
+        ..ScrubContext::default()
     });
-    assert_eq!(s.scrub_text("bos-settings on arch"), "bos-settings on arch");
+    assert!(!scrubber.scrub_text("host pi").contains("pi"));
+    let dropped = scrubber.scrub_event_payload(
+        "unknown",
+        &json!({"alicesmith": 1}),
+        &EventAllowlist::default(),
+    );
+    assert!(!dropped.to_string().contains("alicesmith"));
+}
+
+#[test]
+fn ingest_markers_do_not_collide_with_report_notes() {
+    let mut scrubber = Scrubber::new(ScrubContext::default());
+    let result = scrubber.scrub_value(&json!({
+        "notes": "198.51.100.7", "stored": "<IP:1>",
+    }));
+    assert_eq!(result["stored"], "<IP:1>");
+    assert_eq!(result["notes"], "<IP:2>");
+}
+
+#[test]
+fn url_markers_do_not_shield_credentials_or_query_fields() {
+    for input in [
+        "https://bob:<SECRET>@example.com/x?account=alice",
+        "https://example.com/x?ip=<IP:1>&owner=alice",
+    ] {
+        let mut scrubber = Scrubber::new(ScrubContext::default());
+        let result = scrubber.scrub_text(input);
+        assert!(!result.contains("bob"), "{result}");
+        assert!(!result.contains("alice"), "{result}");
+        assert!(result.contains("?<QUERY>"), "{result}");
+        assert_eq!(scrubber.scrub_text(&result), result);
+        assert_eq!(
+            Scrubber::new(ScrubContext::default()).scrub_text(&result),
+            result
+        );
+    }
 }

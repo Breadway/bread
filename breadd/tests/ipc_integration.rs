@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -735,6 +737,54 @@ return M
     Ok(())
 }
 
+#[tokio::test]
+async fn in_process_module_store_supports_read_your_writes_on_startup_and_reload() -> Result<()> {
+    let module_lua = r#"
+local M = bread.module({ name = "store-rw-test", version = "1.0.0" })
+function M.on_load()
+    M.store.set("value", 41)
+    assert(M.store.get("value") == 41, "read your write lost during on_load")
+    M.store.set("value", 42)
+    assert(M.store.get("value") == 42, "repeated write did not replace staged value")
+    M.store.set("other", "isolated")
+    assert(M.store.get("other") == "isolated")
+end
+return M
+"#;
+    let harness = TestHarness::spawn_with_module("store-rw-test", None, module_lua)?;
+    harness.wait_until_ready().await?;
+    harness.wait_for_module_loaded("store-rw-test").await?;
+
+    let modules = harness.send_request("modules.list", json!({})).await?;
+    let entry = modules
+        .as_array()
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("store-rw-test"))
+        })
+        .ok_or_else(|| anyhow!("module missing after startup: {modules}"))?;
+    assert_eq!(entry["status"], "loaded");
+    assert_eq!(entry["store"]["value"], 42);
+    assert_eq!(entry["store"]["other"], "isolated");
+
+    let reload = harness.send_request("modules.reload", json!({})).await?;
+    assert_eq!(reload["ok"], true);
+    let entry = reload["modules"]
+        .as_array()
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|m| m.get("name").and_then(Value::as_str) == Some("store-rw-test"))
+        })
+        .ok_or_else(|| anyhow!("module missing after reload: {reload}"))?;
+    assert_eq!(entry["status"], "loaded");
+    assert_eq!(entry["store"]["value"], 42);
+    assert_eq!(entry["store"]["other"], "isolated");
+    harness.shutdown();
+    Ok(())
+}
+
 /// An explicit `permissions = []` (present but empty) is a deliberate
 /// "baseline only" declaration, distinct from no manifest at all: it must
 /// scope the module down for real (no fs/exec/etc.) but must *not* trip the
@@ -828,7 +878,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // on the emit bus"). The name here is incidental: this test only cares
     // that events flow through the pipeline before and after a reload storm.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.before", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.before", "data": {}}),
+        )
         .await?;
 
     // Hammer reload: each cycle drops and rebuilds the Lua VM, cancels timers,
@@ -849,7 +902,10 @@ async fn daemon_survives_repeated_reloads_and_pipeline_resumes() -> Result<()> {
     // The pipeline must have resumed: an event emitted *after* the reloads
     // still flows through normalization into the replay buffer.
     harness
-        .send_request("emit", json!({"event": "bread.reloadtest.after", "data": {}}))
+        .send_request(
+            "emit",
+            json!({"event": "bread.reloadtest.after", "data": {}}),
+        )
         .await?;
     sleep(Duration::from_millis(100)).await;
 
@@ -1306,6 +1362,7 @@ async fn rules_toml_absent_is_a_no_op() -> Result<()> {
     // `loaded` with nothing registered, not `load_error` or `not_found`.
     let harness = TestHarness::spawn()?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
@@ -1382,6 +1439,7 @@ exec = "touch '{exec_path}'"
         Some(&rules_toml),
     )?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     // rules.toml parsed and registered cleanly: no load_error.
     let health = harness.send_request("health", json!({})).await?;
@@ -1464,6 +1522,7 @@ on = "power.ac.disconnected"
         Some(rules_toml),
     )?;
     harness.wait_until_ready().await?;
+    harness.wait_for_initial_modules().await?;
 
     let health = harness.send_request("health", json!({})).await?;
     let modules = health
@@ -1542,6 +1601,75 @@ async fn poll_workflow_status(
     Err(anyhow!(
         "workflow '{name}' did not reach state '{expected_state}' in time"
     ))
+}
+
+#[tokio::test]
+async fn bug_store_survives_daemon_restart_without_marker_collisions() -> Result<()> {
+    let mut harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request(
+            "bug.log",
+            json!({"app": "clip", "msg": "remote 203.0.113.42"}),
+        )
+        .await?;
+    harness.child.kill()?;
+    harness.child.wait()?;
+    let _ = fs::remove_file(harness.socket_path());
+    harness.child = Command::new(env!("CARGO_BIN_EXE_breadd"))
+        .env("XDG_RUNTIME_DIR", harness._temp.path().join("runtime"))
+        .env("XDG_CONFIG_HOME", harness._temp.path().join("config"))
+        .env("HOME", harness._temp.path().join("home"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request(
+            "bug.log",
+            json!({"app": "clip", "msg": "remote 198.51.100.8"}),
+        )
+        .await?;
+    let snapshot =
+        bread_bug::store::Reader::open(harness.bugstore_root()).snapshot("clip", 10, 0)?;
+    assert_eq!(
+        snapshot
+            .logs
+            .iter()
+            .map(|log| log.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["remote <IP:1>", "remote <IP:2>"]
+    );
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_store_survives_module_reload_and_reports_health() -> Result<()> {
+    let harness = TestHarness::spawn()?;
+    harness.wait_until_ready().await?;
+    harness
+        .send_request("bug.log", json!({"app": "clip", "msg": "before reload"}))
+        .await?;
+    harness.send_request("modules.reload", json!({})).await?;
+    harness
+        .send_request("bug.log", json!({"app": "clip", "msg": "after reload"}))
+        .await?;
+    let health = harness.send_request("health", json!({})).await?;
+    assert_eq!(health["bugstore"]["available"], json!(true));
+    let snapshot =
+        bread_bug::store::Reader::open(harness.bugstore_root()).snapshot("clip", 10, 0)?;
+    assert_eq!(
+        snapshot
+            .logs
+            .iter()
+            .map(|log| log.msg.as_str())
+            .collect::<Vec<_>>(),
+        ["before reload", "after reload"]
+    );
+    harness.shutdown();
+    Ok(())
 }
 
 #[tokio::test]
@@ -1675,7 +1803,9 @@ async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
     let reader = bread_bug::store::Reader::open(harness.bugstore_root());
     assert!(reader.apps().contains(&"clip".to_string()));
 
-    harness.send_request("bug.wipe", json!({ "app": "clip" })).await?;
+    harness
+        .send_request("bug.wipe", json!({ "app": "clip" }))
+        .await?;
     assert!(!reader.apps().contains(&"clip".to_string()));
     assert!(reader.apps().contains(&"pad".to_string()));
 
@@ -1688,10 +1818,7 @@ async fn bug_wipe_clears_one_app_or_everything() -> Result<()> {
 
 #[tokio::test]
 async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Result<()> {
-    let harness = TestHarness::spawn_with_config_file(
-        "breadbug.toml",
-        "freeze_after_ms = 1000\n",
-    )?;
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 1000\n")?;
     harness.wait_until_ready().await?;
 
     let stream = UnixStream::connect(harness.socket_path()).await?;
@@ -1710,8 +1837,10 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
         .await?
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
-    // This test process is alive, so silence means "frozen".
-    let beat = json!({ "app": "clip", "pid": std::process::id(), "interval_ms": 250 });
+    // A live breadclip-named child is the tracked app instance.
+    let mut child = harness.spawn_app_child("clip")?;
+    let pid = child.id();
+    let beat = json!({ "app": "clip", "pid": pid, "interval_ms": 250 });
     harness.send_request("bug.heartbeat", beat.clone()).await?;
 
     let line = timeout(Duration::from_secs(10), reader.next_line())
@@ -1724,7 +1853,7 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
     let marker = bread_bug::store::Reader::open(harness.bugstore_root())
         .last_marker("clip")
         .ok_or_else(|| anyhow!("freeze marker not stored"))?;
-    assert_eq!(marker.pid, Some(std::process::id()));
+    assert_eq!(marker.pid, Some(pid));
 
     harness.send_request("bug.heartbeat", beat).await?;
     let line = timeout(Duration::from_secs(5), reader.next_line())
@@ -1733,21 +1862,21 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
     let evt: Value = serde_json::from_str(&line)?;
     assert_eq!(evt["event"], json!("bread.bug.recovered"));
 
+    child.kill()?;
+    child.wait()?;
     harness.shutdown();
     Ok(())
 }
 
 #[tokio::test]
 async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
-    let harness = TestHarness::spawn_with_config_file(
-        "breadbug.toml",
-        "freeze_after_ms = 1000\n",
-    )?;
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 1000\n")?;
     harness.wait_until_ready().await?;
 
-    // A process that has already exited and been reaped.
-    let mut child = Command::new("true").spawn()?;
+    // A breadclip-named process that has already exited and been reaped.
+    let mut child = harness.spawn_app_child("clip")?;
     let dead_pid = child.id();
+    child.kill()?;
     child.wait()?;
     harness
         .send_request(
@@ -1755,14 +1884,19 @@ async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
             json!({ "app": "clip", "pid": dead_pid, "interval_ms": 250 }),
         )
         .await?;
+    let mut pad = harness.spawn_app_child("pad")?;
+    let pad_pid = pad.id();
     harness
         .send_request(
             "bug.heartbeat",
-            json!({ "app": "pad", "pid": std::process::id(), "interval_ms": 250 }),
+            json!({ "app": "pad", "pid": pad_pid, "interval_ms": 250 }),
         )
         .await?;
     harness
-        .send_request("bug.heartbeat", json!({ "app": "pad", "stopping": true }))
+        .send_request(
+            "bug.heartbeat",
+            json!({ "app": "pad", "pid": pad_pid, "stopping": true }),
+        )
         .await?;
 
     sleep(Duration::from_secs(4)).await;
@@ -1779,6 +1913,131 @@ async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
         .await
         .is_err());
 
+    pad.kill()?;
+    pad.wait()?;
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn heartbeat_from_an_unrelated_executable_is_rejected() -> Result<()> {
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 1000\n")?;
+    harness.wait_until_ready().await?;
+    let mut child = Command::new("sleep").arg("30").spawn()?;
+    let pid = child.id();
+    let result = harness
+        .send_request(
+            "bug.heartbeat",
+            json!({"app":"clip", "pid": pid, "interval_ms":250}),
+        )
+        .await;
+    child.kill()?;
+    child.wait()?;
+    assert!(result.is_err(), "unrelated executable was accepted");
+    assert!(bread_bug::store::Reader::open(harness.bugstore_root())
+        .last_marker("clip")
+        .is_none());
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn configured_excluded_app_never_tracks_or_publishes_a_freeze() -> Result<()> {
+    let harness = TestHarness::spawn_with_config_file(
+        "breadbug.toml",
+        "freeze_after_ms = 1000\nexcluded_apps = [\"clip\"]\n",
+    )?;
+    harness.wait_until_ready().await?;
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe =
+        json!({"id":"sub","method":"events.subscribe","params":{"filter":"bread.bug.*"}});
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+    let mut reader = BufReader::new(read_half).lines();
+    reader.next_line().await?;
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({"app":"clip", "pid":std::process::id(), "interval_ms":250}),
+        )
+        .await?;
+    sleep(Duration::from_secs(3)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.next_line())
+            .await
+            .is_err()
+    );
+    assert!(bread_bug::store::Reader::open(harness.bugstore_root())
+        .last_marker("clip")
+        .is_none());
+    assert!(!harness.bugstore_root().join("apps/clip").exists());
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn frozen_dead_process_is_retired_and_next_instance_is_not_recovery() -> Result<()> {
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 1000\n")?;
+    harness.wait_until_ready().await?;
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe =
+        json!({"id":"sub","method":"events.subscribe","params":{"filter":"bread.bug.*"}});
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+    let mut reader = BufReader::new(read_half).lines();
+    reader.next_line().await?;
+
+    // A real child whose executable matches the bread app.
+    let mut child = harness.spawn_app_child("clip")?;
+    let old_pid = child.id();
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({"app":"clip", "pid":old_pid, "interval_ms":250}),
+        )
+        .await?;
+    let freeze = timeout(Duration::from_secs(8), reader.next_line())
+        .await??
+        .ok_or_else(|| anyhow!("no freeze event"))?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&freeze)?["event"],
+        "bread.bug.freeze"
+    );
+    child.kill()?;
+    child.wait()?;
+
+    // Allow the watchdog tick to observe Gone and store the close marker.
+    sleep(Duration::from_secs(2)).await;
+    let markers = bread_bug::store::Reader::open(harness.bugstore_root())
+        .snapshot("clip", 0, 0)?
+        .markers;
+    assert!(markers
+        .iter()
+        .any(|m| m.kind == bread_bug::store::MarkerKind::Stopped));
+
+    // PID reuse is not required: a different instance is sufficient to prove
+    // that the old frozen instance is not recovered by a replacement.
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({"app":"clip", "pid":old_pid, "interval_ms":250}),
+        )
+        .await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), reader.next_line())
+            .await
+            .is_err()
+    );
+    let markers = bread_bug::store::Reader::open(harness.bugstore_root())
+        .snapshot("clip", 0, 0)?
+        .markers;
+    assert!(!markers
+        .iter()
+        .any(|m| m.kind == bread_bug::store::MarkerKind::Recovered));
     harness.shutdown();
     Ok(())
 }
@@ -1896,6 +2155,7 @@ enabled = false
         manifest_toml: Option<&str>,
         module_init_lua: &str,
     ) -> Result<Self> {
+        let module_host_bin = common::ensure_module_host_built();
         let temp = tempfile::tempdir()?;
         let runtime_dir = temp.path().join("runtime");
         let config_home = temp.path().join("config");
@@ -1952,6 +2212,7 @@ enabled = false
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             .env("XDG_CONFIG_HOME", &config_home)
             .env("HOME", &home)
+            .env(common::BREAD_MODULE_HOST_BIN_ENV, &module_host_bin)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1983,6 +2244,11 @@ enabled = false
         Err(anyhow!("daemon did not become ready in time"))
     }
 
+    async fn wait_for_initial_modules(&self) -> Result<()> {
+        self.send_request("startup.ready", json!({})).await?;
+        Ok(())
+    }
+
     /// Where the daemon keeps breadbug's on-disk store inside the synthetic
     /// `$HOME` (`$HOME/.local/state/bread/bugstore`).
     fn bugstore_root(&self) -> PathBuf {
@@ -1990,6 +2256,20 @@ enabled = false
             .path()
             .join("home")
             .join(".local/state/bread/bugstore")
+    }
+
+    /// A real process whose executable basename belongs to the requested
+    /// bread app, so the daemon's `/proc/<pid>/exe` identity check is exercised
+    /// rather than bypassed with the test runner's pid.
+    fn spawn_app_child(&self, app: &str) -> Result<Child> {
+        let executable = self._temp.path().join(format!("bread{app}"));
+        fs::copy("/usr/bin/sleep", &executable)?;
+        Ok(Command::new(executable)
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?)
     }
 
     async fn send_request(&self, method: &str, params: Value) -> Result<Value> {

@@ -113,9 +113,7 @@ pub fn run(
         let response_line = match lines.next_line().await {
             Ok(Some(line)) => line,
             Ok(None) => {
-                let _ = hello_tx.send(Err(
-                    "connection closed before hello response".to_string(),
-                ));
+                let _ = hello_tx.send(Err("connection closed before hello response".to_string()));
                 return;
             }
             Err(e) => {
@@ -134,9 +132,7 @@ pub fn run(
             let _ = hello_tx.send(Err(err));
             return;
         }
-        let hello: ModuleHostHello = match resp
-            .result
-            .and_then(|v| serde_json::from_value(v).ok())
+        let hello: ModuleHostHello = match resp.result.and_then(|v| serde_json::from_value(v).ok())
         {
             Some(h) => h,
             None => {

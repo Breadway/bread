@@ -28,6 +28,114 @@ use crate::core::types::{
 use crate::module_host::{self, ModuleHostOutcome, ModuleHostRegistry};
 use bread_shared::now_unix_ms;
 
+pub(crate) mod hyprland_compat;
+
+#[cfg(test)]
+mod module_store_tests {
+    use super::*;
+    use crate::core::state_engine::StateCommand;
+
+    #[test]
+    fn store_write_during_on_load_is_not_visible_as_loaded_until_status_arrives() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        module_store_set(
+            &state,
+            "legacy-test",
+            "fs_present".into(),
+            JsonValue::Bool(true),
+        );
+
+        let before = state.try_read().expect("state is unlocked");
+        assert!(
+            before.modules.is_empty(),
+            "in-progress module must not be exposed as loaded"
+        );
+        assert_eq!(
+            before.pending_module_stores["legacy-test"]["fs_present"],
+            JsonValue::Bool(true)
+        );
+        drop(before);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = StateHandle::new(state.clone(), tx);
+        handle.set_module_status_ex(
+            "legacy-test".into(),
+            ModuleLoadState::Loaded,
+            None,
+            false,
+            true,
+        );
+        let cmd = rx.try_recv().expect("status command queued");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut subscriptions = crate::core::subscriptions::SubscriptionTable::default();
+            let mut watches = HashMap::new();
+            let count = Arc::new(AtomicU64::new(0));
+            crate::core::state_engine::handle_command(
+                cmd,
+                &state,
+                &mut subscriptions,
+                &mut watches,
+                &count,
+            )
+            .await;
+        });
+
+        let after = state.try_read().expect("state is unlocked");
+        let module = after
+            .modules
+            .iter()
+            .find(|m| m.name == "legacy-test")
+            .unwrap();
+        assert!(matches!(module.status, ModuleLoadState::Loaded));
+        assert!(module.ungated);
+        assert_eq!(module.store["fs_present"], JsonValue::Bool(true));
+        assert!(after.pending_module_stores.is_empty());
+    }
+
+    #[test]
+    fn flush_module_statuses_reports_closed_channel_and_dropped_ack() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (closed_tx, closed_rx) = mpsc::unbounded_channel();
+        drop(closed_rx);
+        let closed = StateHandle::new(state.clone(), closed_tx);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let closed_err = rt
+            .block_on(closed.flush_module_statuses())
+            .expect_err("closed command channel must fail the barrier");
+        assert!(closed_err
+            .to_string()
+            .contains("state engine command channel closed"));
+
+        let (drop_tx, mut drop_rx) = mpsc::unbounded_channel();
+        let dropped = StateHandle::new(state, drop_tx);
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(dropped.flush_module_statuses());
+            result_tx
+                .send(result.map_err(|err| err.to_string()))
+                .unwrap();
+        });
+        let StateCommand::Barrier { ack } = drop_rx.blocking_recv().unwrap() else {
+            panic!("expected state-engine barrier");
+        };
+        drop(ack);
+        let dropped_err = result_rx
+            .recv()
+            .unwrap()
+            .expect_err("dropped ack must fail");
+        assert!(dropped_err.contains("state engine dropped barrier response"));
+    }
+}
+
 pub enum LuaMessage {
     Event {
         subscription_id: SubscriptionId,
@@ -40,6 +148,9 @@ pub enum LuaMessage {
         id: TimerId,
     },
     Reload {
+        reply: oneshot::Sender<std::result::Result<(), String>>,
+    },
+    StartupComplete {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
     Shutdown,
@@ -72,6 +183,18 @@ impl RuntimeHandle {
             Ok(Ok(())) => Ok(()),
             Ok(Err(err)) => Err(anyhow!(err)),
             Err(_) => Err(anyhow!("lua runtime dropped reload response")),
+        }
+    }
+
+    pub async fn wait_for_startup(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(LuaMessage::StartupComplete { reply: tx })
+            .map_err(|_| anyhow!("lua runtime channel closed"))?;
+        match rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(anyhow!(err)),
+            Err(_) => Err(anyhow!("lua runtime dropped startup response")),
         }
     }
 
@@ -125,9 +248,22 @@ pub fn spawn_runtime(
                     }
                 };
 
-                if let Err(err) = engine.reload_internal() {
+                // The initial load has finished attempting. Individual
+                // module errors remain visible in module status; only a Lua
+                // runtime initialization or state-engine barrier failure is
+                // an error returned by startup.ready.
+                let startup_load_result = engine.reload_internal().map_err(|err| err.to_string());
+                if let Err(err) = &startup_load_result {
                     error!(error = %err, "initial lua load failed");
                 }
+                let initial_barrier = match startup_load_result {
+                    Ok(()) => engine
+                        .state_handle
+                        .flush_module_statuses()
+                        .await
+                        .map_err(|err| err.to_string()),
+                    Err(err) => Err(err),
+                };
 
                 while let Some(msg) = rx.recv().await {
                     match msg {
@@ -148,7 +284,26 @@ pub fn spawn_runtime(
                             }
                         }
                         LuaMessage::Reload { reply } => {
-                            let result = engine.reload_internal().map_err(|e| e.to_string());
+                            let result = engine.reload_internal().map_err(|err| err.to_string());
+                            let result = match result {
+                                Ok(()) => engine
+                                    .state_handle
+                                    .flush_module_statuses()
+                                    .await
+                                    .map_err(|err| err.to_string()),
+                                Err(err) => Err(err),
+                            };
+                            let _ = reply.send(result);
+                        }
+                        LuaMessage::StartupComplete { reply } => {
+                            let result = match initial_barrier.as_ref() {
+                                Ok(()) => engine
+                                    .state_handle
+                                    .flush_module_statuses()
+                                    .await
+                                    .map_err(|err| err.to_string()),
+                                Err(err) => Err(err.clone()),
+                            };
                             let _ = reply.send(result);
                         }
                         LuaMessage::Shutdown => {
@@ -655,7 +810,10 @@ impl LuaEngine {
 
                     let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
-                        let result = std::process::Command::new("sh").arg("-c").arg(&cmd).output();
+                        let result = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&cmd)
+                            .output();
                         let _ = tx.send(result);
                     });
 
@@ -828,68 +986,73 @@ impl LuaEngine {
         bread.set("cancel", cancel_fn)?;
 
         let hyprland_tbl = self.lua.create_table()?;
+        // Both work whether Hyprland is configured with hyprland.conf or
+        // hyprland.lua, and raise a Lua error (rather than returning the
+        // reply text) when Hyprland does not answer `ok`; see
+        // `hyprland_compat`. `args` is optional so a Lua dispatcher
+        // expression can be passed as the only argument.
         let dispatch_fn =
             self.lua
-                .create_function(move |_lua, (cmd, args): (String, String)| {
-                    let resp = hyprland_request(&format!("dispatch {cmd} {args}"))
-                        .map_err(|e| LuaError::external(e.to_string()))?;
-                    Ok(resp)
+                .create_function(move |_lua, (cmd, args): (String, Option<String>)| {
+                    hyprland_compat::dispatch(
+                        hyprland_compat::operation_sender(),
+                        &cmd,
+                        args.as_deref().unwrap_or(""),
+                    )
+                    .map_err(|e| LuaError::external(e.to_string()))?;
+                    Ok("ok".to_string())
                 })?;
         hyprland_tbl.set("dispatch", dispatch_fn)?;
 
         let keyword_fn =
             self.lua
                 .create_function(move |_lua, (key, value): (String, String)| {
-                    let resp = hyprland_request(&format!("keyword {key} {value}"))
+                    hyprland_compat::keyword(hyprland_compat::operation_sender(), &key, &value)
                         .map_err(|e| LuaError::external(e.to_string()))?;
-                    Ok(resp)
+                    Ok("ok".to_string())
                 })?;
         hyprland_tbl.set("keyword", keyword_fn)?;
 
         let eval_fn = self.lua.create_function(move |_lua, expr: String| {
-            let resp = hyprland_request(&format!("eval {expr}"))
+            let resp = hyprland_compat::request(&format!("eval {expr}"))
                 .map_err(|e| LuaError::external(e.to_string()))?;
             Ok(resp)
         })?;
         hyprland_tbl.set("eval", eval_fn)?;
 
         let active_window_fn = self.lua.create_function(move |lua, ()| {
-            let resp = hyprland_request("j/activewindow")
+            let resp = hyprland_compat::request("j/activewindow")
                 .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("active_window", active_window_fn)?;
 
         let monitors_fn = self.lua.create_function(move |lua, ()| {
-            let resp =
-                hyprland_request("j/monitors").map_err(|e| LuaError::external(e.to_string()))?;
+            let resp = hyprland_compat::request("j/monitors")
+                .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("monitors", monitors_fn)?;
 
         let workspaces_fn = self.lua.create_function(move |lua, ()| {
-            let resp =
-                hyprland_request("j/workspaces").map_err(|e| LuaError::external(e.to_string()))?;
+            let resp = hyprland_compat::request("j/workspaces")
+                .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("workspaces", workspaces_fn)?;
 
         let clients_fn = self.lua.create_function(move |lua, ()| {
-            let resp =
-                hyprland_request("j/clients").map_err(|e| LuaError::external(e.to_string()))?;
+            let resp = hyprland_compat::request("j/clients")
+                .map_err(|e| LuaError::external(e.to_string()))?;
             let json: JsonValue =
                 serde_json::from_str(&resp).map_err(|e| LuaError::external(e.to_string()))?;
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         hyprland_tbl.set("clients", clients_fn)?;
 
@@ -1013,7 +1176,9 @@ impl LuaEngine {
                     .map_err(|_| LuaError::external("module context lock poisoned"))?
                     .clone()
                     .ok_or_else(|| {
-                        LuaError::external("bread.widget.register must be called from within a module")
+                        LuaError::external(
+                            "bread.widget.register must be called from within a module",
+                        )
                     })?;
                 let args: WidgetRegisterArgs = match lua.from_value(Value::Table(spec_table)) {
                     Ok(a) => a,
@@ -1039,13 +1204,17 @@ impl LuaEngine {
         let current_module = self.current_module.clone();
         let emit_tx = self.emit_tx.clone();
         let widget_update_fn = self.lua.create_function(
-            move |lua, (local_id, patch): (String, Table)| -> mlua::Result<(bool, Option<String>)> {
+            move |lua,
+                  (local_id, patch): (String, Table)|
+                  -> mlua::Result<(bool, Option<String>)> {
                 let module = current_module
                     .lock()
                     .map_err(|_| LuaError::external("module context lock poisoned"))?
                     .clone()
                     .ok_or_else(|| {
-                        LuaError::external("bread.widget.update must be called from within a module")
+                        LuaError::external(
+                            "bread.widget.update must be called from within a module",
+                        )
                     })?;
                 let args: WidgetUpdateArgs = match lua.from_value(Value::Table(patch)) {
                     Ok(a) => a,
@@ -1103,8 +1272,7 @@ impl LuaEngine {
                     LuaError::external("bread.widget.list must be called from within a module")
                 })?;
             let json = widget_list_json(&state_arc, &module);
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         widget_tbl.set("list", widget_list_fn)?;
 
@@ -1657,7 +1825,10 @@ impl LuaEngine {
         }
 
         let src = fs::read_to_string(path)?;
-        let chunk = self.lua.load(&src).set_name(path.to_string_lossy().as_ref());
+        let chunk = self
+            .lua
+            .load(&src)
+            .set_name(path.to_string_lossy().as_ref());
 
         match permissions {
             None => {
@@ -1742,7 +1913,8 @@ impl LuaEngine {
             }
         }
 
-        if granted.contains(&PermissionKind::StateRead) || granted.contains(&PermissionKind::StateWatch)
+        if granted.contains(&PermissionKind::StateRead)
+            || granted.contains(&PermissionKind::StateWatch)
         {
             let real_state: Table = real_bread.get("state")?;
             let scoped_state = self.lua.create_table()?;
@@ -2081,10 +2253,7 @@ impl LuaEngine {
         self.module_decls
             .lock()
             .ok()
-            .and_then(|map| {
-                map.get(name)
-                    .map(|d| !d.builtin && d.permissions.is_none())
-            })
+            .and_then(|map| map.get(name).map(|d| !d.builtin && d.permissions.is_none()))
             .unwrap_or(false)
     }
 
@@ -2413,7 +2582,9 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let status_fn = self.lua.create_function(move |lua, name: String| {
             match workflow_status_json(&state_arc, &name) {
-                Some(json) => json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string())),
+                Some(json) => {
+                    json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
+                }
                 None => Ok(Value::Nil),
             }
         })?;
@@ -2422,8 +2593,7 @@ impl LuaEngine {
         let state_arc = self.state_handle.state_arc();
         let list_fn = self.lua.create_function(move |lua, ()| {
             let json = workflow_list_json(&state_arc);
-            json_to_lua(lua, &json)
-                .map_err(|e| LuaError::external(e.to_string()))
+            json_to_lua(lua, &json).map_err(|e| LuaError::external(e.to_string()))
         })?;
         bread.set("__workflow_list", list_fn)?;
 
@@ -2830,7 +3000,11 @@ fn widget_list_json(state_arc: &Arc<RwLock<RuntimeState>>, module: &str) -> Json
         std::hint::spin_loop();
         std::thread::yield_now();
     };
-    let mine: Vec<&WidgetSpec> = guard.widgets.iter().filter(|w| w.module == module).collect();
+    let mine: Vec<&WidgetSpec> = guard
+        .widgets
+        .iter()
+        .filter(|w| w.module == module)
+        .collect();
     serde_json::to_value(&mine).unwrap_or_else(|_| JsonValue::Array(vec![]))
 }
 
@@ -3029,8 +3203,18 @@ fn module_store_get(
         std::hint::spin_loop();
         std::thread::yield_now();
     };
-    let entry = guard.modules.iter().find(|m| m.name == module)?;
-    entry.store.get(key).cloned()
+    guard
+        .pending_module_stores
+        .get(module)
+        .and_then(|store| store.get(key))
+        .or_else(|| {
+            guard
+                .modules
+                .iter()
+                .find(|entry| entry.name == module)
+                .and_then(|entry| entry.store.get(key))
+        })
+        .cloned()
 }
 
 fn module_store_set(
@@ -3051,19 +3235,14 @@ fn module_store_set(
         return;
     }
 
-    let mut store = HashMap::new();
-    store.insert(key, value);
-    guard.modules.push(crate::core::types::ModuleStatus {
-        name: module.to_string(),
-        status: ModuleLoadState::Loaded,
-        last_error: None,
-        builtin: false,
-        // Placeholder until the real load-time status (with the correct
-        // ungated value) lands via set_module_status_ex; this fallback only
-        // fires if a module's own store is written before that happens.
-        ungated: false,
-        store,
-    });
+    // `on_load` writes happen before `load_module` sends the final status.
+    // Stage them separately so clients cannot observe a placeholder Loaded
+    // entry; `SetModuleStatus` merges the store atomically with final status.
+    guard
+        .pending_module_stores
+        .entry(module.to_string())
+        .or_default()
+        .insert(key, value);
 }
 
 fn lua_expand_path(path: &str) -> std::path::PathBuf {
@@ -3305,7 +3484,10 @@ function M.apply_assignments()
 
     for _, a in ipairs(assignments) do
         if active[a.monitor] then
-            bread.hyprland.dispatch("moveworkspacetomonitor", a.workspace .. " " .. a.monitor)
+            local ok, err = pcall(bread.hyprland.dispatch, "moveworkspacetomonitor", a.workspace .. " " .. a.monitor)
+            if not ok then
+                bread.warn("bread.workspaces: moving workspace " .. tostring(a.workspace) .. " to " .. tostring(a.monitor) .. " failed: " .. tostring(err))
+            end
         end
     end
 end
@@ -3319,7 +3501,10 @@ function M.on_load()
         for _, rule in ipairs(rules) do
             if event.data and event.data.class and event.data.class:match(rule.app) then
                 local address = event.data.address or ""
-                bread.hyprland.dispatch("movetoworkspacesilent", rule.workspace .. ",address:" .. address)
+                local ok, err = pcall(bread.hyprland.dispatch, "movetoworkspacesilent", rule.workspace .. ",address:" .. address)
+                if not ok then
+                    bread.warn("bread.workspaces: pinning " .. address .. " to workspace " .. tostring(rule.workspace) .. " failed: " .. tostring(err))
+                end
             end
         end
     end)
@@ -3340,10 +3525,16 @@ local active = {}
 local function bind_string(opts)
     local mods = table.concat(opts.mods or {}, " ")
     local args = opts.args or ""
-    if mods ~= "" then
-        return mods .. ", " .. opts.key .. ", " .. opts.dispatch .. ", " .. args
-    end
-    return opts.key .. ", " .. opts.dispatch .. ", " .. args
+    -- Hyprland's bind syntax is "<mods>, <key>, <dispatcher>, <args>" with the
+    -- mods field left empty (a leading comma) when there are none.
+    return mods .. ", " .. opts.key .. ", " .. opts.dispatch .. ", " .. args
+end
+
+-- `unbind` takes only "<mods>, <key>"; the dispatcher and args are not part of
+-- what identifies a bind.
+local function unbind_string(opts)
+    local mods = table.concat(opts.mods or {}, " ")
+    return mods .. ", " .. opts.key
 end
 
 function M.add(opts)
@@ -3358,7 +3549,7 @@ function M.remove(key)
     if not bind then
         return
     end
-    bread.hyprland.keyword("unbind", bind_string(bind))
+    bread.hyprland.keyword("unbind", unbind_string(bind))
     active[key] = nil
 end
 
@@ -3369,7 +3560,10 @@ end
 
 function M.on_unload()
     for key, _ in pairs(active) do
-        M.remove(key)
+        local ok, err = pcall(M.remove, key)
+        if not ok then
+            bread.warn("bread.binds: unbinding " .. tostring(key) .. " failed: " .. tostring(err))
+        end
     end
 end
 
@@ -3473,52 +3667,6 @@ fn builtin_module_decls(disabled: &HashSet<String>) -> Vec<ModuleDecl> {
     }
 
     out
-}
-
-fn hyprland_request_socket() -> Result<PathBuf> {
-    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
-
-    if let Ok(instance) = std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
-        return Ok(PathBuf::from(runtime)
-            .join("hypr")
-            .join(instance)
-            .join(".socket.sock"));
-    }
-
-    let hypr_dir = PathBuf::from(&runtime).join("hypr");
-    let mut sockets: Vec<PathBuf> = std::fs::read_dir(&hypr_dir)
-        .map_err(|_| anyhow!("no Hyprland instance found ({})", hypr_dir.display()))?
-        .flatten()
-        .map(|e| e.path().join(".socket.sock"))
-        .filter(|p| p.exists())
-        .collect();
-
-    match sockets.len() {
-        0 => Err(anyhow!(
-            "no Hyprland instance found in {}",
-            hypr_dir.display()
-        )),
-        1 => Ok(sockets.remove(0)),
-        _ => {
-            warn!(
-                "multiple Hyprland instances found in {}; using the first one",
-                hypr_dir.display()
-            );
-            Ok(sockets.remove(0))
-        }
-    }
-}
-
-fn hyprland_request(request: &str) -> Result<String> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
-    let socket = hyprland_request_socket()?;
-    let mut stream = UnixStream::connect(&socket)?;
-    stream.write_all(request.as_bytes())?;
-    let mut buffer = String::new();
-    stream.read_to_string(&mut buffer)?;
-    Ok(buffer)
 }
 
 fn parse_match_condition(tbl: &mlua::Table) -> MatchCondition {

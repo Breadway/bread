@@ -26,18 +26,21 @@
 //! scenario the sandbox exists for, not this file.
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bread_shared::{glob, ModuleHostHello, ModuleHostPush, ModulePermission, PermissionKind};
 use serde_json::{json, Value};
 use tokio::io::{AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::core::types::ModuleLoadState;
+use crate::lua::hyprland_compat;
 use crate::module_host::ModuleHostOutcome;
 
 use super::{IpcRequest, IpcResponse, Server, API_VERSION};
@@ -117,20 +120,43 @@ impl Server {
 
         info!(module = %module_name, permissions = ?permissions, "module-host authenticated");
 
+        let hyprland = HyprlandSession::new();
+        let (frame_tx, mut frame_rx) = mpsc::channel::<String>(MODULE_HOST_FRAME_QUEUE);
+        let reader_closed = hyprland.closed.clone();
+        let reader_task = tokio::spawn(async move {
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        match frame_tx.try_send(line) {
+                            Ok(()) => {}
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                reader_closed.store(true, Ordering::Relaxed);
+                                break;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        reader_closed.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
         let mut subs: HashMap<String, JoinHandle<()>> = HashMap::new();
         let mut timers: HashMap<String, JoinHandle<()>> = HashMap::new();
 
         loop {
-            let line = match lines.next_line().await {
-                Ok(Some(l)) => l,
-                Ok(None) => break,
-                Err(e) => {
-                    warn!(module = %module_name, error = %e, "module-host connection read error");
-                    break;
-                }
+            let Some(line) = frame_rx.recv().await else {
+                break;
             };
-            if line.trim().is_empty() {
-                continue;
+            // The reader observes EOF even while a previous request is in
+            // flight. Queued requests from a disconnected host are discarded.
+            if hyprland.closed.load(Ordering::Relaxed) {
+                break;
             }
             let req: IpcRequest = match serde_json::from_str(&line) {
                 Ok(r) => r,
@@ -153,6 +179,7 @@ impl Server {
                     &mut subs,
                     &mut timers,
                     &mut outcome_tx,
+                    &hyprland,
                 )
                 .await;
             let resp = match result {
@@ -170,6 +197,8 @@ impl Server {
             send(resp)?;
         }
 
+        drop(hyprland);
+        reader_task.abort();
         for (_, h) in subs.drain() {
             h.abort();
         }
@@ -202,6 +231,7 @@ impl Server {
         subs: &mut HashMap<String, JoinHandle<()>>,
         timers: &mut HashMap<String, JoinHandle<()>>,
         outcome_tx: &mut Option<std::sync::mpsc::Sender<ModuleHostOutcome>>,
+        hyprland: &HyprlandSession,
     ) -> std::result::Result<Value, String> {
         match req.method.as_str() {
             "module_host.on" | "module_host.once" => {
@@ -455,6 +485,9 @@ impl Server {
                     _ => Ok(json!({ "ok": false, "stdout": "" })),
                 }
             }
+            method if method.starts_with(HYPRLAND_METHOD_PREFIX) => {
+                hyprland_bridge(&self.hyprland, hyprland, method, &req.params, permissions).await
+            }
             "module_host.status" => {
                 let state = req
                     .params
@@ -496,6 +529,219 @@ impl Server {
             }
             other => Err(format!("unknown module_host method: {other}")),
         }
+    }
+}
+
+const HYPRLAND_METHOD_PREFIX: &str = "module_host.hyprland_";
+
+/// One deadline for a whole bridge operation: the first request, any eval
+/// fallback and any read-back all draw from it. Below the host's own 10s RPC
+/// timeout, so a wedged compositor surfaces as this error rather than as an
+/// anonymous "timed out" in the module.
+const HYPRLAND_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Bridge operations running at once across all hosts. A stalled compositor
+/// can pin at most this many worker threads, each for at most
+/// [`HYPRLAND_TIMEOUT`].
+const HYPRLAND_MAX_IN_FLIGHT: usize = 8;
+
+/// Largest single string parameter accepted from a module.
+const HYPRLAND_MAX_FIELD_BYTES: usize = 16 * 1024;
+
+/// Bound read-ahead while the handler awaits a slow compositor operation.
+const MODULE_HOST_FRAME_QUEUE: usize = 32;
+
+/// Daemon-wide limits and settings for `module_host.hyprland_*`.
+#[derive(Clone)]
+pub(super) struct HyprlandBridge {
+    global: Arc<Semaphore>,
+    timeout: Duration,
+    /// Fixed socket for tests; `None` selects it from the daemon's own
+    /// environment, never from anything a module sent.
+    socket: Option<PathBuf>,
+}
+
+impl HyprlandBridge {
+    pub(super) fn new() -> Self {
+        Self::with_limits(HYPRLAND_MAX_IN_FLIGHT, HYPRLAND_TIMEOUT, None)
+    }
+
+    fn with_limits(max_in_flight: usize, timeout: Duration, socket: Option<PathBuf>) -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(max_in_flight)),
+            timeout,
+            socket,
+        }
+    }
+}
+
+/// Per host connection: at most one bridge operation in flight, and a flag
+/// that stops it when the host's connection ends (or the handler is dropped).
+pub(super) struct HyprlandSession {
+    host: Arc<Semaphore>,
+    closed: Arc<AtomicBool>,
+}
+
+impl HyprlandSession {
+    pub(super) fn new() -> Self {
+        Self {
+            host: Arc::new(Semaphore::new(1)),
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Drop for HyprlandSession {
+    fn drop(&mut self) {
+        self.closed.store(true, Ordering::Relaxed);
+    }
+}
+
+enum HyprlandOp {
+    Dispatch { cmd: String, args: String },
+    Keyword { key: String, value: String },
+    Eval { expr: String },
+    Query { request: &'static str },
+}
+
+/// Validate a bridge call without touching the compositor. Parameters must
+/// have the documented types and sizes; nothing is coerced.
+fn parse_hyprland_op(method: &str, params: &Value) -> std::result::Result<HyprlandOp, String> {
+    let text = |key: &str| -> std::result::Result<String, String> {
+        let value = params
+            .get(key)
+            .ok_or_else(|| format!("missing {key}"))?
+            .as_str()
+            .ok_or_else(|| format!("{key} must be a string"))?;
+        if value.len() > HYPRLAND_MAX_FIELD_BYTES {
+            return Err(format!(
+                "{key} is {} bytes, over the {HYPRLAND_MAX_FIELD_BYTES} byte limit",
+                value.len()
+            ));
+        }
+        Ok(value.to_string())
+    };
+
+    match &method[HYPRLAND_METHOD_PREFIX.len()..] {
+        "dispatch" => {
+            let cmd = text("cmd")?;
+            let args = if params.get("args").is_some() {
+                text("args")?
+            } else {
+                String::new()
+            };
+            Ok(HyprlandOp::Dispatch { cmd, args })
+        }
+        "keyword" => Ok(HyprlandOp::Keyword {
+            key: text("key")?,
+            value: text("value")?,
+        }),
+        "eval" => Ok(HyprlandOp::Eval {
+            expr: text("expr")?,
+        }),
+        "query" => {
+            let request = match text("kind")?.as_str() {
+                "active_window" => "j/activewindow",
+                "monitors" => "j/monitors",
+                "workspaces" => "j/workspaces",
+                "clients" => "j/clients",
+                other => return Err(format!("unknown hyprland query: {other}")),
+            };
+            Ok(HyprlandOp::Query { request })
+        }
+        _ => Err(format!("unknown module_host method: {method}")),
+    }
+}
+
+fn run_hyprland_op<F>(op: HyprlandOp, mut send: F) -> std::result::Result<Value, String>
+where
+    F: FnMut(&str) -> anyhow::Result<String>,
+{
+    match op {
+        HyprlandOp::Dispatch { cmd, args } => hyprland_compat::dispatch(&mut send, &cmd, &args)
+            .map(|()| json!({ "ok": true }))
+            .map_err(|e| e.to_string()),
+        HyprlandOp::Keyword { key, value } => hyprland_compat::keyword(&mut send, &key, &value)
+            .map(|()| json!({ "ok": true }))
+            .map_err(|e| e.to_string()),
+        HyprlandOp::Eval { expr } => send(&format!("eval {expr}"))
+            .map(|reply| json!({ "reply": reply }))
+            .map_err(|e| e.to_string()),
+        HyprlandOp::Query { request } => {
+            let reply = send(request).map_err(|e| e.to_string())?;
+            serde_json::from_str::<Value>(&reply)
+                .map(|value| json!({ "value": value }))
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Every `module_host.hyprland_*` method. The `hyprland` grant is checked
+/// first and unconditionally, so a host that was not granted it gets the same
+/// refusal for any method name under the prefix, real or invented. The
+/// requests are made here, by the daemon, through the same checked helpers as
+/// the in-process `bread.hyprland`: the child never gets a compositor socket.
+///
+/// The compositor I/O runs on its own thread with explicit socket deadlines
+/// derived from one operation deadline. That thread owns the global permit
+/// until it has finished, so stalled compositors cannot accumulate more than
+/// the permitted number of workers. This function owns the host permit until
+/// it returns, so the next request from the same host cannot start before the
+/// current response is ready. The worker computes its result before reporting
+/// it, so it issues no further compositor request afterwards. The thread is
+/// detached, so it never holds up daemon shutdown.
+async fn hyprland_bridge(
+    bridge: &HyprlandBridge,
+    session: &HyprlandSession,
+    method: &str,
+    params: &Value,
+    permissions: &[ModulePermission],
+) -> std::result::Result<Value, String> {
+    if !permissions
+        .iter()
+        .any(|p| p.kind == PermissionKind::Hyprland)
+    {
+        return Err("hyprland not granted to this module".to_string());
+    }
+
+    let op = parse_hyprland_op(method, params)?;
+
+    let _host_permit = session
+        .host
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "hyprland busy: an earlier request from this module is still running")?;
+    let global_permit = bridge
+        .global
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "hyprland busy: too many requests in flight")?;
+
+    let deadline =
+        hyprland_compat::Deadline::after(bridge.timeout).cancelled_by(session.closed.clone());
+    let socket = bridge.socket.clone();
+    let (tx, rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("hypr-bridge".to_string())
+        .spawn(move || {
+            let _global_permit = global_permit;
+            let result = match socket
+                .map(Ok)
+                .unwrap_or_else(hyprland_compat::request_socket)
+            {
+                Ok(socket) => run_hyprland_op(op, hyprland_compat::sender_until(socket, deadline)),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(result);
+        })
+        .map_err(|e| format!("hyprland request could not start: {e}"))?;
+
+    // The worker stops itself at the deadline; this only bounds how long the
+    // caller waits for it to notice.
+    match tokio::time::timeout(bridge.timeout + Duration::from_secs(1), rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("hyprland request failed".to_string()),
+        Err(_) => Err("hyprland request timed out".to_string()),
     }
 }
 
@@ -644,6 +890,331 @@ mod tests {
             path: None,
             bin: Some(bin.to_string()),
         }]
+    }
+
+    fn hypr_grant() -> Vec<ModulePermission> {
+        vec![ModulePermission {
+            kind: PermissionKind::Hyprland,
+            path: None,
+            bin: None,
+        }]
+    }
+
+    fn test_bridge(
+        socket: &crate::lua::hyprland_compat::fake::FakeSocket,
+        timeout: Duration,
+        max_in_flight: usize,
+    ) -> HyprlandBridge {
+        HyprlandBridge::with_limits(max_in_flight, timeout, Some(socket.path.clone()))
+    }
+
+    #[tokio::test]
+    async fn hyprland_methods_are_refused_without_the_grant_whatever_the_name() {
+        let perms = vec![
+            ModulePermission {
+                kind: PermissionKind::StateRead,
+                path: None,
+                bin: None,
+            },
+            ModulePermission {
+                kind: PermissionKind::Exec,
+                path: None,
+                bin: None,
+            },
+        ];
+        let bridge = HyprlandBridge::new();
+        let session = HyprlandSession::new();
+        for method in [
+            "module_host.hyprland_dispatch",
+            "module_host.hyprland_keyword",
+            "module_host.hyprland_eval",
+            "module_host.hyprland_query",
+            "module_host.hyprland_made_up",
+            "module_host.hyprland_",
+        ] {
+            let err = hyprland_bridge(&bridge, &session, method, &json!({}), &perms)
+                .await
+                .unwrap_err();
+            assert_eq!(err, "hyprland not granted to this module", "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hyprland_granted_still_rejects_unknown_methods_and_missing_params() {
+        let perms = hypr_grant();
+        let bridge = HyprlandBridge::new();
+        let session = HyprlandSession::new();
+        let call = |method: &'static str, params: Value| {
+            let (bridge, session, perms) = (&bridge, &session, &perms);
+            async move {
+                hyprland_bridge(bridge, session, method, &params, perms)
+                    .await
+                    .unwrap_err()
+            }
+        };
+        let err = call("module_host.hyprland_made_up", json!({})).await;
+        assert!(err.contains("unknown module_host method"), "{err}");
+        let err = call("module_host.hyprland_dispatch", json!({})).await;
+        assert_eq!(err, "missing cmd");
+        let err = call("module_host.hyprland_query", json!({ "kind": "keybinds" })).await;
+        assert!(err.contains("unknown hyprland query"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hyprland_params_with_the_wrong_type_or_size_are_refused_before_the_compositor() {
+        use crate::lua::hyprland_compat::fake::FakeSocket;
+        let sock = FakeSocket::start(Arc::new(|_, _, _| {}));
+        let bridge = test_bridge(&sock, Duration::from_secs(2), 4);
+        let session = HyprlandSession::new();
+        let perms = hypr_grant();
+        let huge = "x".repeat(HYPRLAND_MAX_FIELD_BYTES + 1);
+        let cases: Vec<(&str, Value, &str)> = vec![
+            (
+                "module_host.hyprland_dispatch",
+                json!({ "cmd": "workspace", "args": 3 }),
+                "args must be a string",
+            ),
+            (
+                "module_host.hyprland_dispatch",
+                json!({ "cmd": "workspace", "args": null }),
+                "args must be a string",
+            ),
+            (
+                "module_host.hyprland_dispatch",
+                json!({ "cmd": ["workspace"] }),
+                "cmd must be a string",
+            ),
+            (
+                "module_host.hyprland_keyword",
+                json!({ "key": "a:b", "value": 5 }),
+                "value must be a string",
+            ),
+            (
+                "module_host.hyprland_eval",
+                json!({ "expr": huge }),
+                "byte limit",
+            ),
+            (
+                "module_host.hyprland_query",
+                json!({ "kind": 7 }),
+                "kind must be a string",
+            ),
+        ];
+        for (method, params, want) in cases {
+            let err = hyprland_bridge(&bridge, &session, method, &params, &perms)
+                .await
+                .unwrap_err();
+            assert!(err.contains(want), "{method} {params}: {err}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(sock.connections.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn stalled_dispatch_times_out_and_no_fallback_is_sent_afterwards() {
+        use crate::lua::hyprland_compat::fake::FakeSocket;
+        // Reject the legacy form only after the operation budget is spent,
+        // like the compositor in the BREAD-47 probe. The eval fallback must
+        // never arrive, not even later.
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            std::thread::sleep(Duration::from_millis(1500));
+            let _ = std::io::Write::write_all(conn, b"Invalid dispatcher");
+        }));
+        let bridge = test_bridge(&sock, Duration::from_millis(500), 4);
+        let session = HyprlandSession::new();
+        let started = std::time::Instant::now();
+        let err = hyprland_bridge(
+            &bridge,
+            &session,
+            "module_host.hyprland_dispatch",
+            &json!({ "cmd": "workspace", "args": "9" }),
+            &hypr_grant(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(
+            sock.requests(),
+            vec!["dispatch workspace 9"],
+            "nothing may be sent after the caller was told it failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_reply_is_an_error_and_is_not_followed_by_a_fallback() {
+        use crate::lua::hyprland_compat::fake::FakeSocket;
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            std::thread::sleep(Duration::from_millis(900));
+            let _ = std::io::Write::write_all(conn, b"ok");
+        }));
+        let bridge = test_bridge(&sock, Duration::from_millis(400), 4);
+        let session = HyprlandSession::new();
+        let err = hyprland_bridge(
+            &bridge,
+            &session,
+            "module_host.hyprland_dispatch",
+            &json!({ "cmd": "workspace", "args": "3" }),
+            &hypr_grant(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(sock.requests(), vec!["dispatch workspace 3"]);
+    }
+
+    #[tokio::test]
+    async fn oversized_reply_is_an_error() {
+        use crate::lua::hyprland_compat::{fake::FakeSocket, MAX_REPLY_BYTES};
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..(MAX_REPLY_BYTES / chunk.len() + 2) {
+                if std::io::Write::write_all(conn, &chunk).is_err() {
+                    return;
+                }
+            }
+        }));
+        let bridge = test_bridge(&sock, Duration::from_secs(5), 4);
+        let session = HyprlandSession::new();
+        let err = hyprland_bridge(
+            &bridge,
+            &session,
+            "module_host.hyprland_eval",
+            &json!({ "expr": "hl.get_windows()" }),
+            &hypr_grant(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("byte limit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn compositor_that_never_accepts_times_out_and_releases_its_permits() {
+        use crate::lua::hyprland_compat::fake::FullBacklog;
+        let sock = FullBacklog::new();
+        let bridge =
+            HyprlandBridge::with_limits(2, Duration::from_millis(400), Some(sock.path.clone()));
+        let session = HyprlandSession::new();
+        let started = std::time::Instant::now();
+        let err = hyprland_bridge(
+            &bridge,
+            &session,
+            "module_host.hyprland_query",
+            &json!({ "kind": "monitors" }),
+            &hypr_grant(),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        // The worker has stopped, so both limits are free again.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(bridge.global.available_permits(), 2);
+        assert_eq!(session.host.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn in_flight_bridge_operations_are_bounded_per_host_and_globally() {
+        use crate::lua::hyprland_compat::fake::FakeSocket;
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            std::thread::sleep(Duration::from_millis(800));
+            let _ = std::io::Write::write_all(conn, b"[]");
+        }));
+        let bridge = test_bridge(&sock, Duration::from_secs(5), 2);
+        let perms = hypr_grant();
+        let (host_a, host_b, host_c) = (
+            HyprlandSession::new(),
+            HyprlandSession::new(),
+            HyprlandSession::new(),
+        );
+        let query = json!({ "kind": "monitors" });
+        async fn call(
+            bridge: &HyprlandBridge,
+            session: &HyprlandSession,
+            query: &Value,
+            perms: &[ModulePermission],
+        ) -> std::result::Result<Value, String> {
+            hyprland_bridge(bridge, session, "module_host.hyprland_query", query, perms).await
+        }
+
+        let first = call(&bridge, &host_a, &query, &perms);
+        let second = call(&bridge, &host_b, &query, &perms);
+        let (a, b, again, over) = tokio::join!(
+            first,
+            second,
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                call(&bridge, &host_a, &query, &perms).await
+            },
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                call(&bridge, &host_c, &query, &perms).await
+            },
+        );
+        a.unwrap();
+        b.unwrap();
+        assert!(again.unwrap_err().contains("busy"), "per-host bound");
+        assert!(over.unwrap_err().contains("too many"), "global bound");
+        assert_eq!(
+            sock.requests().len(),
+            2,
+            "refused calls never reach the compositor"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_host_session_stops_an_in_flight_operation() {
+        use crate::lua::hyprland_compat::fake::FakeSocket;
+        let sock = FakeSocket::start(Arc::new(|_, _, conn| {
+            std::thread::sleep(Duration::from_secs(3));
+            let _ = std::io::Write::write_all(conn, b"Invalid dispatcher");
+        }));
+        let bridge = test_bridge(&sock, Duration::from_secs(20), 2);
+        let session = HyprlandSession::new();
+        let host = session.host.clone();
+        let perms = hypr_grant();
+        let params = json!({ "cmd": "workspace", "args": "9" });
+        let op = hyprland_bridge(
+            &bridge,
+            &session,
+            "module_host.hyprland_dispatch",
+            &params,
+            &perms,
+        );
+        // The host connection goes away (daemon shutdown or module exit)
+        // while the compositor is stalled.
+        let result = tokio::select! {
+            r = op => Some(r),
+            _ = tokio::time::sleep(Duration::from_millis(300)) => None,
+        };
+        assert!(result.is_none());
+        drop(session);
+        let waited = std::time::Instant::now();
+        while host.available_permits() == 0 && waited.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            host.available_permits(),
+            1,
+            "worker must stop, not run to the 20s deadline"
+        );
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        assert_eq!(
+            sock.requests(),
+            vec!["dispatch workspace 9"],
+            "no fallback after close"
+        );
     }
 
     #[test]

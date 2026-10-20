@@ -131,19 +131,26 @@ return M
 
 Source inspiration: `~/.config/hypr/scripts/display/monitors.lua`.
 
-This uses Bread events and Hyprland keywords to update monitor layout when external displays change.
+This uses Bread events and `bread.hyprland.keyword("monitor", ...)`, which works under both `hyprland.conf` (legacy `monitor` keyword) and `hyprland.lua` (translated to `hl.monitor` through eval). Refusals are raised as Lua errors, so the `pcall` below turns them into a visible warning instead of silent success.
 
 ```lua
 -- ~/.config/bread/modules/monitors.lua
 local M = bread.module({ name = "monitors", version = "1.0.0" })
 
+local function set_monitor(spec)
+    local ok, err = pcall(bread.hyprland.keyword, "monitor", spec)
+    if not ok then
+        bread.warn("monitors: could not apply '" .. spec .. "': " .. tostring(err))
+    end
+end
+
 local function apply_internal_mode(has_external)
     local mode = has_external and "1920x1080@60" or "1920x1200@60"
-    bread.hyprland.keyword("monitor", "eDP-1, " .. mode .. ", 0x0, 1")
+    set_monitor("eDP-1," .. mode .. ",0x0,1")
 end
 
 local function apply_external()
-    bread.hyprland.keyword("monitor", "DP-3, 1920x1080@60, auto, 1, mirror, eDP-1")
+    set_monitor("DP-3,1920x1080@60,auto,1,mirror,eDP-1")
 end
 
 local externals = 0
@@ -191,7 +198,9 @@ local M = bread.module({ name = "dock-workflow", version = "1.0.0" })
 
 bread.workflow.define("dock-connected", function()
     bread.workflow.step("applying layout")
-    bread.hyprland.keyword("monitor", "HDMI-A-1, preferred, 1920x0, 1")
+    -- keyword falls back to the hl.monitor eval form under hyprland.lua and
+    -- raises an error when Hyprland refuses it, which fails the workflow step.
+    bread.hyprland.keyword("monitor", "HDMI-A-1,preferred,1920x0,1")
 
     bread.workflow.step("waiting for monitor")
     -- wait_any resolves on whichever of these patterns fires first, or
@@ -299,7 +308,7 @@ Walking through what each piece buys you:
 
 - **`root` is a small typed tree, not markup.** `box`/`label`/`icon`/`progress` map directly onto GTK primitives, so any renderer can draw it without interpreting a DSL; see [Widgets](Documentation.md#widgets-since-v13) for the full node reference and the size/depth caps.
 - **`bread.widget.update(id, { root = ... })` replaces the whole tree.** There's no node-level patching: for something this small, rebuilding the tree on every tick (here, every 5s) is simpler than diffing, and it's cheap enough that it doesn't matter.
-- **`style` is a bounded, typed vocabulary, not a style string.** `color = "red"` here maps to one fixed CSS class the rendering app defines, resolved from the real pywal-derived palette; see [Widgets §style](Documentation.md#style-since-v14) for the full field list. There's also a freeform `class` escape hatch, but a module can't inject arbitrary CSS through either path.
+- **`style` is a bounded, typed vocabulary, not a style string.** `color = "red"` here maps to one fixed CSS class the rendering app defines, resolved from the real bread-theme-extracted palette; see [Widgets §style](Documentation.md#style-since-v14) for the full field list. There's also a freeform `class` escape hatch, but a module can't inject arbitrary CSS through either path.
 - **Clicks come back as events, not callbacks.** A node's `on_click` value isn't invoked directly: the rendering app emits `bread.bar.widget_clicked` with `{ widget_id, action }`, and your module reacts with a normal `bread.on` handler. See `examples/modules/bluetooth-toggle-widget.lua` for a widget that uses this to drive a real action (`bread.bluetooth.power`) instead of just displaying something, or `examples/modules/focus-mode-widget.lua` for one that drives `bread.profile.activate` and stays in sync when the profile changes from somewhere else entirely (the CLI, another module), not just from its own click.
 - **Placement is one of five fixed slots** (`tray`, `left_of_clock`, `right_of_clock`, `right_of_workspaces`, `left_of_stats`). See `examples/modules/active-window-widget.lua` for `right_of_workspaces` driven by `bread.state.watch` instead of a timer.
 - **A widget doesn't have to read hardware.** `examples/modules/workflow-status-widget.lua` polls `bread.workflow.list()` instead (the same engine from Example 4) and sets `visible = false` to disappear entirely when there's nothing to report, rather than showing a stale or empty readout.
