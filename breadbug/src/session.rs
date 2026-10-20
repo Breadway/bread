@@ -8,10 +8,9 @@
 use anyhow::{bail, Result};
 use bread_bug::config::BugConfig;
 use bread_bug::report::{build, AppEntry, BuildOptions, Prepared, ReportType};
-use bread_bug::store::{Frame, MarkerKind, Reader};
 use bread_bug::upload::{install_id, Client, History, HistoryEntry, HistoryKind, Queue, SendError};
 
-use crate::Env;
+use crate::{live_target, Env};
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -119,16 +118,7 @@ pub fn send(env: &Env, p: &Prepared) -> Result<SendOutcome> {
 /// The pid of a frozen, still-running bread process for `app`, if there is
 /// one a stack could be taken from (with the user's consent).
 pub fn live_stack_pid(env: &Env, app: &str) -> Option<u32> {
-    Reader::open(&env.store_root)
-        .snapshot(app, 0, 0)
-        .ok()?
-        .markers
-        .into_iter()
-        .rev()
-        .find(|m| m.kind != MarkerKind::Recovered)
-        .filter(|m| m.kind == MarkerKind::Freeze)
-        .and_then(|m| m.pid)
-        .filter(|p| (env.pid_ok)(*p))
+    live_target(env, app).ok().map(|(pid, _)| pid)
 }
 
 /// Build the report for the previewed choices. Slow (it runs helper
@@ -147,7 +137,11 @@ pub fn build_report(
     o.include_journal = env.include_journal;
     o.notes = notes.filter(|n| !n.trim().is_empty());
     if let Some(pid) = live_stack_pid {
-        o.live_stack = (env.live_capture)(pid).unwrap_or_else(Vec::<Frame>::new);
+        if let Ok((current, identity)) = live_target(env, app) {
+            if current == pid {
+                o.live_stack = (env.live_capture)(app, pid, &identity).unwrap_or_default();
+            }
+        }
     }
     build(&o)
 }

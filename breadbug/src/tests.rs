@@ -904,10 +904,18 @@ mod session_build {
     fn build_report_applies_notes_and_only_captures_a_stack_when_asked() {
         let dir = tempfile::tempdir().unwrap();
         let e = freeze_env(dir.path(), 4242);
-        let none = session::build_report(&e, "pad", ReportType::Freeze, Some("  ".into()), None).unwrap();
+        let none =
+            session::build_report(&e, "pad", ReportType::Freeze, Some("  ".into()), None).unwrap();
         assert!(none.report.notes.is_none(), "blank notes are dropped");
         assert!(none.report.live_stack.is_empty());
-        let with = session::build_report(&e, "pad", ReportType::Freeze, Some("it hung".into()), Some(4242)).unwrap();
+        let with = session::build_report(
+            &e,
+            "pad",
+            ReportType::Freeze,
+            Some("it hung".into()),
+            Some(4242),
+        )
+        .unwrap();
         assert_eq!(with.report.notes.as_deref(), Some("it hung"));
         assert_eq!(with.report.live_stack.len(), 1);
     }
@@ -917,7 +925,11 @@ mod session_build {
         let dir = tempfile::tempdir().unwrap();
         let e = freeze_env(dir.path(), 4242);
         assert_eq!(session::live_stack_pid(&e, "pad"), Some(4242));
-        assert_eq!(session::live_stack_pid(&e, "clip"), None, "a panic is not a freeze");
+        assert_eq!(
+            session::live_stack_pid(&e, "clip"),
+            None,
+            "a panic is not a freeze"
+        );
         let gone = freeze_env(tempfile::tempdir().unwrap().path(), 9999);
         assert_eq!(session::live_stack_pid(&gone, "pad"), None, "pid not alive");
     }

@@ -261,7 +261,7 @@ pub fn run(
 /// exit, death or replacement) or later crash marker closes the freeze, so an
 /// old freeze is never walked back to. The marker's recorded process identity
 /// (pid, start time, executable) must still match the live process.
-fn live_target(env: &Env, app: &str) -> Result<(u32, ProcessIdentity), Refusal> {
+pub(crate) fn live_target(env: &Env, app: &str) -> Result<(u32, ProcessIdentity), Refusal> {
     let marker = Reader::open(&env.store_root)
         .snapshot(app, 0, 0)
         .ok()
