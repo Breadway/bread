@@ -15,6 +15,10 @@ pub struct RuntimeState {
     pub power: PowerState,
     pub profile: ProfileState,
     pub modules: Vec<ModuleStatus>,
+    /// Module store values written during `on_load`, before the state engine
+    /// applies that module's final status. Kept out of serialized IPC state.
+    #[serde(skip)]
+    pub pending_module_stores: HashMap<String, HashMap<String, Value>>,
     pub workflows: Vec<WorkflowStatus>,
     /// Widgets registered via `bread.widget.register` from any Lua module,
     /// keyed implicitly by `WidgetSpec.id` (fully-qualified `<module>.<local_id>`).

@@ -84,7 +84,11 @@ mod tests {
     fn push_event_tag_is_distinguishable_from_a_response_envelope() {
         let push = ModuleHostPush::Event {
             subscription_id: "sub-1".to_string(),
-            event: BreadEvent::new("bread.test.tick", AdapterSource::Manual, serde_json::json!({})),
+            event: BreadEvent::new(
+                "bread.test.tick",
+                AdapterSource::Manual,
+                serde_json::json!({}),
+            ),
         };
         let value = serde_json::to_value(&push).unwrap();
         assert_eq!(value.get("push").and_then(|v| v.as_str()), Some("event"));

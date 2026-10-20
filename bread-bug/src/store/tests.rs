@@ -2,6 +2,29 @@ use super::*;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn reopened_store_reserves_markers_across_apps_and_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = open(dir.path(), StoreLimits::default(), &[]);
+        store
+            .append_log("clip", "info", "remote 203.0.113.42", 10)
+            .unwrap();
+        store
+            .append_log(DAEMON_APP, "warn", "remote 198.51.100.8", 11)
+            .unwrap();
+    }
+    let clip = dir.path().join("apps/clip");
+    fs::rename(clip.join(LOG_FILE), clip.join(format!("{LOG_FILE}.1"))).unwrap();
+    let store = open(dir.path(), StoreLimits::default(), &[]);
+    store
+        .append_log("clip", "info", "remote 192.0.2.9", 12)
+        .unwrap();
+    let snapshot = Reader::open(dir.path()).snapshot("clip", 10, 0).unwrap();
+    assert_eq!(snapshot.logs[0].msg, "remote <IP:1>");
+    assert_eq!(snapshot.logs[1].msg, "remote <IP:3>");
+}
+
 fn ctx() -> ScrubContext {
     ScrubContext {
         home: Some("/home/alicesmith".into()),
@@ -122,6 +145,97 @@ fn snapshot_tail_limits() {
 }
 
 #[test]
+fn unreadable_app_fails_closed_and_usage_reports_error() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(
+        dir.path(),
+        StoreLimits {
+            max_bytes_per_file: 100_000,
+            max_total_bytes: 1000,
+            ..StoreLimits::default()
+        },
+        &[],
+    );
+    s.append_log("pad", "info", &"boring message ".repeat(30), 1)
+        .unwrap();
+    s.append_log("clip", "info", "seed", 2).unwrap();
+    let app = dir.path().join("apps/pad");
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o000)).unwrap();
+    // Permission probes must run unprivileged, never silently pass as root.
+    let unreadable = fs::read_dir(&app).is_err();
+    let usage = s.usage();
+    let first = s.append_log("clip", "info", &"boring message ".repeat(30), 3);
+    let second = s.append_log("clip", "info", &"boring message ".repeat(30), 4);
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        unreadable,
+        "permission regression requires an unprivileged test runner"
+    );
+    assert!(usage.is_err());
+    assert!(first.is_err());
+    assert!(second.is_err());
+    assert!(s.usage().unwrap().total_bytes <= 1000);
+    assert_eq!(
+        Reader::open(dir.path())
+            .snapshot("clip", 10, 0)
+            .unwrap()
+            .logs
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn failed_eviction_does_not_allow_append() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(
+        dir.path(),
+        StoreLimits {
+            max_bytes_per_file: 100_000,
+            max_total_bytes: 600,
+            ..StoreLimits::default()
+        },
+        &[],
+    );
+    s.append_log("pad", "info", &"boring message ".repeat(30), 1)
+        .unwrap();
+    s.append_log("clip", "info", "seed", 2).unwrap();
+    let app = dir.path().join("apps/pad");
+    // Filesystem timestamp resolution can tie consecutive writes. Establish
+    // the unwritable pad file as the oldest victim, without relying on sleep.
+    let pad_file = app.join("log.jsonl");
+    fs::File::open(&pad_file)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH))
+        .unwrap();
+    assert!(
+        fs::metadata(&pad_file).unwrap().modified().unwrap()
+            < fs::metadata(dir.path().join("apps/clip/log.jsonl"))
+                .unwrap()
+                .modified()
+                .unwrap()
+    );
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o500)).unwrap();
+    let result = s.append_log("clip", "info", &"boring message ".repeat(30), 3);
+    fs::set_permissions(&app, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        result.is_err(),
+        "eviction failure must propagate (requires unprivileged runner)"
+    );
+    assert!(s.usage().unwrap().total_bytes <= 600);
+    assert_eq!(
+        Reader::open(dir.path())
+            .snapshot("clip", 10, 0)
+            .unwrap()
+            .logs
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn total_cap_drops_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
     let limits = StoreLimits {
@@ -134,9 +248,110 @@ fn total_cap_drops_oldest_first() {
         let app = ["clip", "pad", "bar"][(i % 3) as usize];
         s.append_log(app, "info", &format!("payload line {i} xxxxxxxxxxxx"), i)
             .unwrap();
+        assert!(s.usage().unwrap().total_bytes <= 1500);
     }
     let total = s.usage().unwrap().total_bytes;
-    assert!(total <= 1500 + 3 * 400, "total {total}");
+    assert!(total <= 1500, "total {total}");
+}
+
+#[test]
+fn total_cap_is_enforced_without_rotation_and_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = StoreLimits {
+        max_bytes_per_file: 100_000,
+        max_total_bytes: 1000,
+        ..StoreLimits::default()
+    };
+    {
+        let s = open(dir.path(), limits.clone(), &[]);
+        for i in 0..50 {
+            assert!(s
+                .append_log("clip", "info", &"boring message ".repeat(30), i)
+                .unwrap());
+            assert!(s.usage().unwrap().total_bytes <= 1000);
+        }
+        assert!(!Reader::open(dir.path())
+            .snapshot("clip", 100, 0)
+            .unwrap()
+            .logs
+            .is_empty());
+    }
+    let smaller = StoreLimits {
+        max_total_bytes: 100,
+        ..limits
+    };
+    let s = open(dir.path(), smaller, &[]);
+    assert!(s.usage().unwrap().total_bytes <= 100);
+}
+
+#[test]
+fn oversized_serialized_records_are_dropped_without_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = StoreLimits {
+        max_bytes_per_file: 100,
+        max_total_bytes: 100,
+        ..StoreLimits::default()
+    };
+    let s = open(dir.path(), limits, &[]);
+    // Escaping, not just the input length, counts towards the limit.
+    assert!(!s.append_log("clip", "info", &"\"".repeat(90), 1).unwrap());
+    assert!(!s
+        .append_event("clip", &"x".repeat(128), &json!({}), 2)
+        .unwrap());
+    let mut marker = Marker::new(MarkerKind::Crash, 2);
+    marker.message = Some("x".repeat(100));
+    assert!(!s.record_marker("clip", marker).unwrap());
+    assert_eq!(s.usage().unwrap().total_bytes, 0);
+    assert!(s.append_log("clip", "info", "small", 3).unwrap());
+    assert!(s.usage().unwrap().total_bytes <= 100);
+}
+
+#[test]
+fn mixed_records_and_lowered_file_caps_stay_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let limits = StoreLimits {
+        max_bytes_per_file: 500,
+        max_total_bytes: 900,
+        ..StoreLimits::default()
+    };
+    {
+        let s = open(dir.path(), limits.clone(), &[]);
+        for i in 0..100 {
+            let app = ["clip", "pad", "bar"][(i % 3) as usize];
+            s.append_log(app, "info", "message", i).unwrap();
+            assert!(s.usage().unwrap().total_bytes <= 900);
+            s.append_event(
+                app,
+                "bread.power.ac.connected",
+                &json!({"ac_connected": true}),
+                i,
+            )
+            .unwrap();
+            assert!(s.usage().unwrap().total_bytes <= 900);
+            s.record_marker(app, Marker::new(MarkerKind::Crash, i))
+                .unwrap();
+            assert!(s.usage().unwrap().total_bytes <= 900);
+            for app in fs::read_dir(dir.path().join("apps")).unwrap() {
+                for file in fs::read_dir(app.unwrap().path()).unwrap() {
+                    assert!(file.unwrap().metadata().unwrap().len() <= 500);
+                }
+            }
+        }
+    }
+    let s = open(
+        dir.path(),
+        StoreLimits {
+            max_bytes_per_file: 20,
+            ..limits
+        },
+        &[],
+    );
+    for app in fs::read_dir(dir.path().join("apps")).unwrap() {
+        for file in fs::read_dir(app.unwrap().path()).unwrap() {
+            assert!(file.unwrap().metadata().unwrap().len() <= 20);
+        }
+    }
+    assert!(s.usage().unwrap().total_bytes <= 900);
 }
 
 #[test]
@@ -241,6 +456,40 @@ fn frames_are_capped() {
     s.record_marker("clip", m).unwrap();
     let got = Reader::open(dir.path()).last_marker("clip").unwrap();
     assert_eq!(got.frames.len(), MAX_FRAMES);
+}
+
+#[test]
+fn process_identity_is_preserved_locally_but_removed_from_reports() {
+    use crate::report::{self, BuildOptions, ReportType};
+    use serde_json::Value;
+
+    let dir = tempfile::tempdir().unwrap();
+    let s = open(dir.path(), StoreLimits::default(), &[]);
+    let mut marker = Marker::new(MarkerKind::Freeze, 10);
+    marker.pid = Some(4242);
+    marker.process = Some(ProcessIdentity {
+        start_ticks: 123456,
+        exe: "/usr/bin/breadpad".into(),
+        boot_id: Some("boot-id-for-local-matching".into()),
+    });
+    s.record_marker("pad", marker).unwrap();
+
+    let local = Reader::open(dir.path()).last_marker("pad").unwrap();
+    assert_eq!(local.pid, Some(4242));
+    assert_eq!(local.process.as_ref().unwrap().start_ticks, 123456);
+    assert_eq!(local.process.as_ref().unwrap().exe, "/usr/bin/breadpad");
+
+    let mut opts = BuildOptions::new("pad", ReportType::Freeze);
+    opts.store_root = dir.path().to_path_buf();
+    opts.include_journal = false;
+    opts.now_unix = 20;
+    let prepared = report::build(&opts).unwrap();
+    let json: Value = serde_json::from_slice(&prepared.bytes).unwrap();
+    let marker = &json["markers"][0];
+    assert!(marker.get("pid").is_none());
+    assert!(marker.get("process").is_none());
+    assert!(!prepared.bytes.windows(12).any(|w| w == b"start_ticks"));
+    assert!(!prepared.bytes.windows(7).any(|w| w == b"boot-id"));
 }
 
 #[test]

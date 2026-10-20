@@ -285,7 +285,7 @@ That module's `bread` table has `bread.exec`, `bread.state` (read
 functions only; no `bread.state.watch`), and `bread.fs` (read functions
 only; no `bread.fs.write`), plus the full baseline. `bread.hyprland`,
 `bread.bluetooth`, `bread.notify`, `bread.machine`, and `bread.widget` are
-all `nil`.
+all `nil`. This holds in process and out of process.
 
 An explicit empty list (`permissions = []`) is a deliberate "baseline only"
 declaration: different from omitting the key entirely. It scopes the
@@ -547,11 +547,19 @@ same event broadcast every other IPC subscriber reads from.
 `.active_workspace`/`.active_window`/`.devices`/`.power`/`.network`/
 `.profile` shorthands, `bread.state.watch`, `bread.fs.exists`/`.readlink`/
 `.expand`, `bread.profile.activate`, `bread.notify`, `bread.machine.*`,
-`bread.hyprland.*`, `bread.widget.*`, `bread.bluetooth.*`,
+`bread.hyprland.on_raw` (subscribe with `bread.on("bread.hyprland.*", ...)`
+instead), `bread.widget.*`, `bread.bluetooth.*`,
 `bread.wait_any`/`.wait_all`/`bread.workflow.*`. These namespaces are
 simply absent (`nil`) from an out-of-process module's `bread` table
 regardless of what the manifest grants: a real coverage gap versus the
 in-process mechanism, not a permission-check bug.
+
+**`bread.hyprland` is bridged** for modules granted `hyprland`:
+`dispatch`, `keyword`, `eval`, `active_window`, `monitors`, `workspaces` and
+`clients` go over the `module_host.hyprland_*` methods below, with the same
+checked-reply behavior as in-process (a refused `dispatch`/`keyword` raises a
+Lua error). Without the grant `bread.hyprland` is `nil` and the daemon refuses
+the methods regardless.
 
 **`bread.module().store` is process-local**, not synced back to `breadd`'s
 `RuntimeState`: a real, known limitation versus the in-process mechanism
@@ -623,7 +631,7 @@ for the full list alongside the pre-existing methods.
 - The remaining `bread.*` namespaces over RPC: `bread.state.watch` and the
   `.monitors`/`.active_workspace`/etc. shorthands, `bread.fs.exists`/
   `.readlink`/`.expand`, `bread.profile.activate`, `bread.notify`,
-  `bread.machine.*`, `bread.hyprland.*`, `bread.widget.*`,
+  `bread.machine.*`, `bread.hyprland.on_raw`, `bread.widget.*`,
   `bread.bluetooth.*`, `bread.wait_any`/`.wait_all`/`bread.workflow.*`:
   mechanically the same pattern as the ones already bridged.
 
@@ -838,7 +846,7 @@ bread.widget.register({
 | `radius` | string | `none`, `sm`, `md`, `full` (pill) |
 | `padding` | string | `none`, `xs`, `sm`, `md` |
 
-Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when pywal's palette changes instead of drifting out of sync.
+Every field is optional and independent: set only what you need. Colors, font sizes, radii, and padding all reuse the exact same palette, font, and spacing scale every other `bread*` GUI (breadbar, bos-settings, breadpad, ...) is themed from, so a widget recolors with the rest of the desktop when bread-theme's palette changes instead of drifting out of sync.
 
 ```lua
 { type = "label", text = "LOW BATTERY", style = { color = "yellow", weight = "bold" } }
@@ -1024,17 +1032,53 @@ CLI (e.g. `kitty @ ls`).
 
 The `bread.hyprland` namespace provides compositor bindings.
 
-```lua
--- Dispatch a Hyprland command
-bread.hyprland.dispatch("workspace", "2")
-bread.hyprland.dispatch("exec", "kitty")
+Hyprland is configured either with `hyprland.conf` or with `hyprland.lua`
+(BOS uses `hyprland.lua`). The IPC socket accepts different request shapes in
+the two modes, so prefer the Lua forms below, which work with `hyprland.lua`.
 
--- Set a keyword
+`dispatch` and `keyword` raise a Lua error when Hyprland answers anything
+other than `ok`, so wrap a call in `pcall` if a failure should not abort your
+handler. Both first try the classic request (so a plain `hyprland.conf` keeps
+working). If Hyprland refuses it, bread translates the common legacy commands
+into the Lua call and retries through `eval`:
+
+- `dispatch`: `workspace`, `focusworkspaceoncurrentmonitor`, `movetoworkspace`,
+  `movetoworkspacesilent`, `moveworkspacetomonitor`, `focusmonitor`,
+  `focuswindow`, `movefocus`, `movewindow`, `dpms`, `exec`, `killactive`,
+  `togglefloating`, `pseudo`, `fullscreen`, `togglespecialworkspace`, `submap`,
+  `layoutmsg`, `exit`.
+- `keyword`: `monitor`, `bind`/`binde`/`bindl`, `unbind`, and `section:option`
+  config values such as `general:gaps_in`.
+
+Anything else raises an error that names the unsupported command; use the Lua
+form or `eval` for it.
+
+`keyword "bind"`, `"binde"`, `"bindl"` and `"unbind"` read `binds -j` back after
+Hyprland accepts the change and raise an error if the bind is not listed (or,
+for `unbind`, is still listed). `keyword "monitor"` checks `monitors all -j`
+first and raises an error, without changing anything, when the named output
+does not exist.
+
+```lua
+-- Dispatch: pass a Lua dispatcher expression as the only argument.
+bread.hyprland.dispatch("hl.dsp.focus({ workspace = '2' })")
+bread.hyprland.dispatch("hl.dsp.exec_cmd('kitty')")
+bread.hyprland.dispatch("hl.dsp.dpms({ action = 'off', monitor = 'DP-1' })")
+
+-- The classic two-argument form still works and is translated when needed.
+bread.hyprland.dispatch("workspace", "2")
+
+-- Configure through eval with the hl.* API (hyprland.lua).
+bread.hyprland.eval("hl.monitor({ output = 'HDMI-A-1', mode = '2560x1440', position = '0x0', scale = '1' })")
+bread.hyprland.eval("hl.config({ general = { gaps_in = 5 } })")
+bread.hyprland.eval("hl.bind('SUPER + F9', hl.dsp.exec_cmd('kitty'))")
+
+-- keyword takes the classic key/value pair and is translated when needed.
 bread.hyprland.keyword("monitor", "HDMI-A-1, 2560x1440, 0x0, 1")
 
--- Send a raw request to the Hyprland socket, e.g. to evaluate a config-file
--- expression the way `hyprctl eval <expr>` does; returns the raw response string
-local result = bread.hyprland.eval("some expression")
+-- Send a raw request through eval, the way `hyprctl eval <expr>` does.
+-- Returns the raw response string: "ok" on success, otherwise the error text.
+local result = bread.hyprland.eval("hl.config({ cursor = { zoom_factor = 2 } })")
 
 -- Query compositor state (returns deserialized Lua tables)
 local win        = bread.hyprland.active_window()
@@ -1405,7 +1449,7 @@ Events are delivered as a `BreadEvent`:
 |-------|------|
 | `bread.system.startup` | `{}` |
 | `bread.module.crashed` *(Since: v1.6)* | `{ module, pid, reason, exit_code, signal }`: an out-of-process `bread-module-host` child exited (crash, panic, `kill -9`, ...). `exit_code`/`signal` are mutually exclusive (whichever applies); see [Out-of-process module sandboxing](#out-of-process-module-sandboxing-since-v16). |
-| `bread.bug.panic` / `.crash` / `.freeze` / `.recovered` *(Since: v1.8)* | `{ app, kind, t }`: breadbug recorded a Rust panic, native crash, freeze, or recovery for a sibling app (see `bug.marker` in the IPC table). Published only by the daemon; the `bug` domain is reserved. |
+| `bread.bug.panic` / `.crash` / `.freeze` / `.recovered` *(Since: v1.8)* | `{ app, kind, t, stored? }`: breadbug recorded a Rust panic, native crash, freeze, or recovery for a sibling app (see `bug.marker` in the IPC table). A watchdog event has `stored: false` if the marker could not be persisted; it is still published so consumers can notify the user. Published only by the daemon; the `bug` domain is reserved. The watchdog uses this existing `bread.bug.*` family rather than the issue's shorthand `bread.app.frozen` / `bread.app.recovered`, keeping one canonical event contract. |
 
 #### Devices (udev / Bluetooth)
 
@@ -1720,6 +1764,7 @@ Available methods:
 | Method | Params | Description |
 |--------|--------|-------------|
 | `ping` | none | Connectivity check |
+| `startup.ready` | none | Wait until initial Lua loading has completed and its queued state updates have been acknowledged by the state engine. Module load errors are reported in module status and do not fail readiness; Lua initialization or state-engine acknowledgement failures return an IPC error. `ping` remains connectivity-only. |
 | `health` | none | Version, uptime, PID, adapter status, `api_version`, and the breadbug store status under `bugstore` |
 | `state.get` | `key` (dotted path) | Read a value from `RuntimeState` |
 | `state.dump` | none | Return the full `RuntimeState` as JSON |
@@ -1734,11 +1779,28 @@ Available methods:
 | `widgets.list` | none | List all registered widgets across every module *(Since: v1.3)* |
 | `bug.log` | `app`, `msg`, optional `level`, `t` | Append one log line to breadbug's on-disk store, scrubbed on ingest. `app` must be a registered app id or `breadd`. Excluded apps store nothing and reply `{ stored: false }`. *(Since: v1.8)* |
 | `bug.logs` | `app`, `lines` (`[{msg, level?, t?}]`, at most 1000) | Batch form of `bug.log`. *(Since: v1.8)* |
-| `bug.marker` | `app`, `marker` (`kind` = `panic`/`crash`/`freeze`/`recovered`, optional `t`, `app_version`, `build_id`, `message`, `location`, `signal`, `frames`) | Record a crash or freeze marker (frames carry module, offset and build-id only, never memory). On success the daemon publishes `bread.bug.<kind>`. *(Since: v1.8)* |
-| `bug.heartbeat` | `app`, `pid`, optional `interval_ms`, `stopping` | Liveness signal from an app's main loop for freeze detection. If heartbeats stop while the process is alive (for longer than `freeze_after_ms`, default 15s, and four of the app's own intervals), breadd records a `freeze` marker and publishes `bread.bug.freeze`; a heartbeat afterwards publishes `bread.bug.recovered`. `stopping: true` announces a clean exit. Detection pauses for ten seconds after power or monitor events and after a stalled daemon tick (suspend/resume). *(Since: v1.8)* |
+| `bug.marker` | `app`, `marker` (`kind` = `panic`/`crash`/`freeze`/`recovered`, optional `t`, `app_version`, `build_id`, `message`, `location`, `signal`, `frames`) | Record a crash or freeze marker (frames carry module, module-relative offset and GNU build-id only, never memory). Process identity fields are set only by breadd, not trusted from a client; identity and pid are removed from the report payload. On success the daemon publishes `bread.bug.<kind>`. *(Since: v1.8)* |
+| `bug.heartbeat` | `app`, `pid`, optional `interval_ms`, `stopping` | Liveness signal from an app's main loop for freeze detection. If heartbeats stop while the same process instance is alive (for longer than `freeze_after_ms`, default 15s, and four of the app's own intervals), breadd records a `freeze` marker and publishes `bread.bug.freeze`; a heartbeat from that same instance afterwards publishes `bread.bug.recovered`. A different process instance is never reported as recovery. `stopping: true` must include the announcing `pid` and only stops that same instance. Dead/replaced frozen instances close with a store-only `stopped` marker and do not publish recovery. Excluded apps are never tracked or published. If the store cannot persist a freeze, the event still publishes with `stored: false`. Detection pauses for ten seconds after power or monitor events and after a stalled daemon tick (suspend/resume), even if the bug store is unavailable. *(Since: v1.8)* |
 | `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
 | `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
 | `bug.reload` | none | Re-read `~/.config/bread/breadbug.toml` and apply its `excluded_apps` now; newly excluded apps have their stored data wiped. *(Since: v1.8)* |
+
+The breadbug store lives at `$XDG_STATE_HOME/bread/bugstore` (or
+`~/.local/state/bread/bugstore` when unset). Records are scrubbed before
+writing; files are private JSONL and remain readable with breadd stopped.
+Storage caps count serialized bytes including JSON escaping and newlines.
+Oversized records are dropped intact, and the oldest retained files are
+evicted before every append to reserve space. Lowered limits apply on reopen.
+
+breadd also follows journal entries from registered app user units using
+`journalctl --user --follow --lines=0 --output=json`. The explicit unit map
+includes `breadclipd.service`, `breadclip.service`, `breadcastd.service`,
+`breadcrumbs.service`, `bakery.service`, and `bread<app>.service` for the
+remaining registered apps. Only new entries are followed: existing journal
+history is not imported again after restart. Messages pass through the same
+scrub-on-ingest and exclusion rules as IPC logs. Journal JSON lines larger
+than 64 KiB are discarded in memory. If journalctl is missing or exits, the
+feeder retries after five seconds without preventing daemon startup.
 
 *Since: v1.6*: `module_host.*`, the RPC bridge an out-of-process
 `bread-module-host` child uses in place of direct in-process `bread.*`
@@ -1750,23 +1812,56 @@ direct use by other clients.
 | Method | Params | Description |
 |--------|--------|-------------|
 | `module_host.hello` | `token` | One-time handshake. Consumes the token, replies with `{ module, permissions, api_version }` or an error for an unknown/expired token. Takes over the rest of the connection's lifetime as a bidirectional RPC bridge, same as `events.subscribe` does for a plain event stream. |
-| `module_host.on` / `.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
+| `module_host.on` / `module_host.once` | `pattern` | Subscribe; replies `{ subscription_id }`. Matches are pushed asynchronously as `{"push":"event", subscription_id, event}` lines interleaved with ordinary responses. |
 | `module_host.off` | `id` | Cancel a subscription. |
-| `module_host.after` / `.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
+| `module_host.after` / `module_host.every` | `delay_ms` / `interval_ms` | Server-managed timer; replies `{ timer_id }`. Fires are pushed as `{"push":"timer", timer_id}`. |
 | `module_host.cancel` | `id` | Cancel a timer. |
 | `module_host.emit` | `event`, `data` | Same manual-emit semantics (and reserved-domain guard) as the top-level `emit` method. |
-| `module_host.log` / `.warn` / `.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
+| `module_host.log` / `module_host.warn` / `module_host.error` | `message` | Forwarded to `breadd`'s own tracing log, prefixed with the module name. |
 | `module_host.fs_read` | `path` | Requires `fs.read` granted; path-prefix-checked against the manifest's `path` hint if one was declared. Replies `{ content }` (`null` if unreadable). |
 | `module_host.fs_write` | `path`, `content` | Requires `fs.write`, same scoping check. |
 | `module_host.exec` | `cmd` | Requires `exec`; `bin`-hint-checked (by leading command word) if declared. Fire-and-forget, matching `bread.exec`'s own semantics. |
 | `module_host.exec_capture` | `cmd`, `timeout_ms` | Requires `exec`. Replies `{ ok, stdout }`. |
 | `module_host.state_get` | `key` | Requires `state.read`. Replies `{ value }`. |
+| `module_host.hyprland_dispatch` | `cmd`, `args` | Requires `hyprland`. Same checked-reply semantics as `bread.hyprland.dispatch`: an error unless Hyprland answered `ok` (legacy form, then the `hl.*` eval fallback). Replies `{ ok }`. |
+| `module_host.hyprland_keyword` | `key`, `value` | Requires `hyprland`. Same as `bread.hyprland.keyword`, including the bind/unbind/monitor read-back. Replies `{ ok }`. |
+| `module_host.hyprland_eval` | `expr` | Requires `hyprland`. Replies `{ reply }`, the raw Hyprland reply (`ok` or the error text). |
+| `module_host.hyprland_query` | `kind` (`active_window`\|`monitors`\|`workspaces`\|`clients`) | Requires `hyprland`. Replies `{ value }`. |
 | `module_host.status` | `state` (`"loaded"`\|`"load_error"`), `error` | The module-host reports its own load outcome after running `init.lua`; updates `modules.list` status and unblocks `breadd`'s spawn-side wait. |
 
 Every gated method above checks the module's granted `PermissionKind`s
 (learned at hello-time) before attempting the call: belt-and-suspenders
 alongside the Landlock sandbox enforced at the OS level on the
 module-host process itself, not a replacement for it.
+
+The `hyprland` grant is checked for every method name under the
+`module_host.hyprland_` prefix before the name is even matched, so a host
+without the grant gets `hyprland not granted to this module` for any such
+method, real or invented. The compositor request is made by `breadd`, never by
+the child, which is sandboxed and holds no Hyprland socket.
+
+Each `module_host.hyprland_*` call is one bounded operation:
+
+- **One deadline.** The first request, any `hyprland.lua` `eval` fallback and
+  any bind/unbind/monitor read-back all share a single 8 second budget, and
+  socket connect, write and read each stop at it. When the budget expires or
+  the host connection closes, the worker sends no further compositor request,
+  including fallbacks and read-backs. A request that was already transmitted
+  may still have reached the compositor, so its effects cannot be revoked;
+  the guarantee is no additional request after cancellation or expiry.
+- **Size caps.** A request line over 32 KiB, a string parameter over 16 KiB, or
+  a compositor reply over 1 MiB is refused with an error mentioning the byte
+  limit. Parameters must have the documented types: `args` must be a string
+  when present, and a non-string value is an error rather than being treated as
+  empty.
+- **Bounded concurrency.** A module has at most one such call in flight (a
+  second is refused with `hyprland busy`) and the daemon at most 8 across all
+  modules (`hyprland busy: too many requests in flight`). Refused calls never
+  reach the compositor, and a stalled compositor cannot hold more than 8
+  short-lived workers or delay daemon shutdown.
+
+The in-process `bread.hyprland.*` functions share the socket deadline and size
+caps, with a 5 second budget per call.
 
 The `health` response's `api_version` field lets a client (the CLI, a Lua module via `bread.exec`, or a `bread-client`-linked sibling app) assert compatibility with this document's versioned schema at connect time (see [API Stability & Versioning](#api-stability--versioning)).
 

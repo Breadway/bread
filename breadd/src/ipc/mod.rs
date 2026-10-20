@@ -64,6 +64,8 @@ pub struct Server {
     /// `crate::module_host` and `module_host_bridge` (this module's
     /// `module_host.*` method handling).
     module_host_registry: ModuleHostRegistry,
+    /// In-flight limits and deadline for `module_host.hyprland_*`.
+    hyprland: module_host_bridge::HyprlandBridge,
     /// breadbug's on-disk log/event store (`bug.*` methods). `None` when it
     /// could not be opened; the methods then report it as unavailable.
     bug_store: Option<Arc<bread_bug::store::Store>>,
@@ -115,6 +117,7 @@ impl Server {
             raw_tx,
             adapter_status,
             module_host_registry,
+            hyprland: module_host_bridge::HyprlandBridge::new(),
             bug_store,
             bug_watchdog,
             subscription_count,
@@ -124,18 +127,27 @@ impl Server {
         }
     }
 
-    pub async fn serve(&self, mut shutdown_rx: watch::Receiver<bool>) -> Result<()> {
-        if let Some(parent) = self.socket_path.parent() {
+    /// Bind before starting the Lua runtime: module hosts connect immediately
+    /// during initial module loading and must never race socket creation.
+    pub fn bind(socket_path: &std::path::Path) -> Result<UnixListener> {
+        if let Some(parent) = socket_path.parent() {
             fs::create_dir_all(parent)?;
         }
 
-        if self.socket_path.exists() {
-            fs::remove_file(&self.socket_path)?;
+        if socket_path.exists() {
+            fs::remove_file(socket_path)?;
         }
 
-        let listener = UnixListener::bind(&self.socket_path)?;
-        fs::set_permissions(&self.socket_path, fs::Permissions::from_mode(0o600))?;
+        let listener = UnixListener::bind(socket_path)?;
+        fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+        Ok(listener)
+    }
 
+    pub async fn serve(
+        &self,
+        listener: UnixListener,
+        mut shutdown_rx: watch::Receiver<bool>,
+    ) -> Result<()> {
         info!(socket = %self.socket_path.display(), "ipc server listening");
 
         // Emit the startup event after the socket is bound so that clients
@@ -251,6 +263,13 @@ impl Server {
         let id = req.id.clone();
         let result = match req.method.as_str() {
             "ping" => Ok(json!({ "ok": true })),
+            "startup.ready" => {
+                self.lua_runtime
+                    .wait_for_startup()
+                    .await
+                    .map_err(|err| (id.clone(), err.to_string()))?;
+                Ok(json!({ "ok": true }))
+            }
             "state.get" => {
                 let key = req.params.get("key").and_then(Value::as_str).unwrap_or("");
                 let value = self
@@ -444,7 +463,7 @@ impl Server {
             "bug.marker" => bugstore::ipc_marker(self.bug_store.as_deref(), &req.params).map(
                 |(app, marker, stored)| {
                     if stored {
-                        bugstore::publish_marker(&self.emit_tx, &app, &marker);
+                        bugstore::publish_marker(&self.emit_tx, &app, &marker, true);
                     }
                     json!({ "stored": stored })
                 },
@@ -521,3 +540,24 @@ impl Server {
 // drift out of sync despite the docs claiming parity. Both now delegate to
 // the single implementation in `bread_shared::glob::matches_pattern`; see
 // that module for the pattern-matching test suite.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn clients_can_connect_before_server_starts_serving() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/breadd.sock");
+        let listener = Server::bind(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Initial module hosts must be able to queue their connection even
+        // before the daemon begins polling the accept loop.
+        let client = UnixStream::connect(&path).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        drop((client, server));
+    }
+}
