@@ -1,9 +1,9 @@
 # breadbug
 
 breadbug lets a user prepare a report about a bread app crash, freeze or
-misbehavior. The local capture, scrub, preview and file export are implemented;
-network upload and the intake service are not available in this build. Tracker:
-ECO-EP1 (design spec ECO-66).
+misbehavior. The local capture, scrub, preview, file export and opt-in upload
+client are implemented. The server-side intake service is not part of this
+repo. Tracker: ECO-EP1 (design spec ECO-66).
 
 ## What a user sees
 
@@ -16,12 +16,11 @@ ECO-EP1 (design spec ECO-66).
    scrubber replaced, a SHA-256 of the report, and the full text on request.
 5. They choose **save to file**, **send**, or **cancel**. Sending requires both
    `upload_enabled = true` and a separate explicit Send action. The setting is
-   false by default. In this build Send reports that upload is unavailable and
-   sends nothing; the design below describes the intended future upload.
+   false by default. When sending is off, nothing touches the network.
 
-The report is built once, serialized once and hashed; the preview and file
-export use those bytes. The current send guard verifies the hash but has no
-transport. Local `--save` writes mode 0600.
+The report is built once, serialized once and hashed; the preview, file export
+and upload all use those bytes. The client re-verifies the hash immediately
+before sending. Local `--save` writes mode 0600.
 
 ## Where data comes from
 
@@ -95,9 +94,11 @@ daemon tick, so suspend/resume and display hotplug do not look like freezes.
 An exited process is forgotten, not reported. Nothing is ever killed.
 
 For a frozen app that is still running, `breadbug` can include a stack trace
-(function names and offsets only) if the user agrees (`--live-stack` or the
-prompt). The pid comes from the freeze marker and is re-checked to be a live
-`bread*` process before anything attaches.
+(module names, module-relative offsets and build ids only) if the user agrees
+(`--live-stack` or the prompt, plus a separate confirmation in the GUI). The
+pid and process identity come from the freeze marker and are re-checked
+immediately before attaching. Frames never include memory, registers,
+environment variables or a core dump.
 
 ## Scrubbing
 
@@ -153,13 +154,11 @@ Other v1 fields are explicitly limited to these shapes:
 * `journal`: strings from at most 150 `journalctl --user` lines for the selected
   app process names; each line is cut at 2048 bytes. Journal data is optional
   in the builder and is trimmed first to fit the report cap.
-* `live_stack`: array of frame records with the same frame shape as markers.
-  It is empty in the current CLI path: no live-process sampler or consent UI
-  supplies frames. Future capture may include only module, module-relative
-  offset, build-id and optional symbol, and only after a distinct, informed,
-  per-report user consent. It must never serialize process memory, registers,
-  environment variables, or a core dump. This is a design constraint, not a
-  currently implemented capture feature.
+* `live_stack`: array of frame records with the same frame shape as markers,
+  supplied only after a distinct, informed, per-report user consent. It may
+  include only module, module-relative offset, build-id and optional symbol.
+  It never serializes process memory, registers, environment variables or a
+  core dump.
 * `notes`: optional scrubbed string, truncated at 8 KiB UTF-8 bytes.
 * `redactions`: map from scrub category string to unsigned count.
 
@@ -214,13 +213,14 @@ without retaining IPs in report records, global abuse/flood limits, request and
 concurrency caps, and a quarantine path for malformed/suspicious reports. A
 rotating identifier is not authentication and can be reset or spoofed; it must
 not be treated as proof of a unique person or device. These are launch
-requirements: this repo currently implements none of the network, edge, rate
-limit, install-id, isolated-store or symbol-store controls.
+requirements. This repo implements the client-side anonymous install-id and
+client receipt/deletion-token storage, not the network intake, edge, rate
+limit, isolated-store or symbol-store controls.
 
 Proposed retention is raw reports for 90 days with cluster metadata retained.
 Deletion by receipt must be designed to cover raw report copies and backups;
 state explicitly what cannot be removed, including derived cluster metadata.
-No deletion endpoint, receipt, retention enforcement, server validation,
+No server-side deletion endpoint, retention enforcement, server validation,
 server-side rescrubbing or triage UI is implemented in this repo.
 
 Threats to design for include oversize/decompression bombs, flooding, malformed
