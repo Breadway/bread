@@ -718,6 +718,19 @@ pub fn ipc_status(store: Option<&Store>) -> Value {
     })
 }
 
+/// `bug.reload`: re-read `breadbug.toml` and apply the exclusion list now
+/// (newly excluded apps are wiped and dropped from freeze tracking). Other
+/// keys are read at startup.
+pub fn ipc_reload(store: Option<&Store>, watchdog: &Watchdog) -> Result<Value, String> {
+    let store = store.ok_or_else(unavailable)?;
+    let cfg = BugConfig::load().map_err(|e| format!("{e:#}"))?;
+    store
+        .set_excluded(&cfg.excluded_apps)
+        .map_err(|e| e.to_string())?;
+    watchdog.set_excluded(&cfg.excluded_apps);
+    Ok(json!({ "excluded": cfg.excluded_apps }))
+}
+
 /// `bug.wipe`: `{app?}`; no app wipes the whole store.
 pub fn ipc_wipe(store: Option<&Store>, params: &Value) -> Result<Value, String> {
     let store = store.ok_or_else(unavailable)?;

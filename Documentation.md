@@ -1783,6 +1783,7 @@ Available methods:
 | `bug.heartbeat` | `app`, `pid`, optional `interval_ms`, `stopping` | Liveness signal from an app's main loop for freeze detection. If heartbeats stop while the same process instance is alive (for longer than `freeze_after_ms`, default 15s, and four of the app's own intervals), breadd records a `freeze` marker and publishes `bread.bug.freeze`; a heartbeat from that same instance afterwards publishes `bread.bug.recovered`. A different process instance is never reported as recovery. `stopping: true` must include the announcing `pid` and only stops that same instance. Dead/replaced frozen instances close with a store-only `stopped` marker and do not publish recovery. Excluded apps are never tracked or published. If the store cannot persist a freeze, the event still publishes with `stored: false`. Detection pauses for ten seconds after power or monitor events and after a stalled daemon tick (suspend/resume), even if the bug store is unavailable. *(Since: v1.8)* |
 | `bug.status` | none | Whether the breadbug store is available, its disk usage, and per-app last marker. *(Since: v1.8)* |
 | `bug.wipe` | optional `app` | Delete one app's stored data, or the whole store when `app` is omitted. *(Since: v1.8)* |
+| `bug.reload` | none | Re-read `~/.config/bread/breadbug.toml` and apply its `excluded_apps` now; newly excluded apps have their stored data wiped. *(Since: v1.8)* |
 
 The breadbug store lives at `$XDG_STATE_HOME/bread/bugstore` (or
 `~/.local/state/bread/bugstore` when unset). Records are scrubbed before
