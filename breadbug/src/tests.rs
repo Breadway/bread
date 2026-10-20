@@ -54,6 +54,7 @@ fn env(dir: &std::path::Path) -> Env {
         store_root: dir.join("store"),
         socket: dir.join("none.sock"),
         config_path: dir.join("breadbug.toml"),
+        state_dir: dir.join("state"),
         scrub: ctx,
         installed: Some(Some(vec![
             InstalledApp {
@@ -415,4 +416,197 @@ fn identity_is_checked_again_after_consent() {
         "{out}"
     );
     assert!(out.contains("live stack frames      0"), "{out}");
+}
+
+// ---- sending, history, queue -------------------------------------------
+
+use std::io::Read as _;
+use std::net::TcpListener;
+
+/// Answers each connection with the next canned `(status, body)`.
+fn serve(responses: Vec<(u16, &'static str)>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for (status, body) in responses {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end().to_ascii_lowercase();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some(v) = line.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut buf = vec![0u8; len];
+            reader.read_exact(&mut buf).unwrap();
+            let resp = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let mut s = stream;
+            let _ = std::io::Write::write_all(&mut s, resp.as_bytes());
+        }
+    });
+    url
+}
+
+const RECEIPT: &str = "0123456789abcdef0123456789abcdef";
+
+fn enable_upload(e: &Env, endpoint: &str) {
+    let cfg = BugConfig {
+        upload_enabled: true,
+        endpoint: endpoint.to_string(),
+        ..BugConfig::default()
+    };
+    cfg.save_to(&e.config_path).unwrap();
+}
+
+#[test]
+fn send_records_receipt_and_history_then_delete_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    let url = serve(vec![
+        (
+            201,
+            r#"{"receipt":"0123456789abcdef0123456789abcdef","deletion_token":"tok","status":"received"}"#,
+        ),
+        (204, ""),
+    ]);
+    enable_upload(&e, &url);
+    let (r, out) = go(&["--app", "clip", "--send"], &e, "", false);
+    r.unwrap();
+    assert!(out.contains(&format!("Your receipt: {RECEIPT}")), "{out}");
+    let (_, out) = go(&["history"], &e, "", false);
+    assert!(out.contains(RECEIPT), "{out}");
+    let (r, out) = go(&["delete", RECEIPT], &e, "", false);
+    r.unwrap();
+    assert!(out.contains("Deleted from the server"), "{out}");
+    let (_, out) = go(&["history"], &e, "", false);
+    assert!(!out.contains(RECEIPT));
+    // deleting something unknown is an error
+    assert!(go(&["delete", RECEIPT], &e, "", false).0.is_err());
+}
+
+#[test]
+fn unreachable_server_queues_and_flush_delivers_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    // closed port
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let dead = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    enable_upload(&e, &dead);
+    let (r, out) = go(&["--app", "clip", "--send"], &e, "", false);
+    r.unwrap();
+    assert!(out.contains("queued"), "{out}");
+    let (_, out) = go(&["queue"], &e, "", false);
+    assert!(out.contains("clip"), "{out}");
+
+    let url = serve(vec![(
+        201,
+        r#"{"receipt":"0123456789abcdef0123456789abcdef","deletion_token":"tok"}"#,
+    )]);
+    enable_upload(&e, &url);
+    let (r, out) = go(&["queue", "flush"], &e, "", false);
+    r.unwrap();
+    assert!(out.contains("Sent 1"), "{out}");
+    assert!(go(&["queue"], &e, "", false)
+        .1
+        .contains("Nothing is waiting"));
+    assert!(go(&["history"], &e, "", false).1.contains(RECEIPT));
+}
+
+#[test]
+fn rejected_report_is_not_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    enable_upload(&e, &serve(vec![(400, r#"{"error":"invalid report"}"#)]));
+    let (r, out) = go(&["--app", "clip", "--send"], &e, "", false);
+    r.unwrap();
+    assert!(out.contains("rejected"), "{out}");
+    assert!(go(&["queue"], &e, "", false)
+        .1
+        .contains("Nothing is waiting"));
+}
+
+#[test]
+fn queue_clear_and_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    enable_upload(&e, &format!("http://{}", closed.local_addr().unwrap()));
+    drop(closed);
+    go(&["--app", "clip", "--send"], &e, "", false).0.unwrap();
+    let (_, listing) = go(&["queue"], &e, "", false);
+    let id = listing.split_whitespace().next().unwrap().to_string();
+    assert!(go(&["queue", "cancel", "zz"], &e, "", false).0.is_err());
+    assert!(go(&["queue", "cancel", &id], &e, "", false)
+        .1
+        .contains("Dropped"));
+    go(
+        &["--app", "clip", "--notes", "again", "--send"],
+        &e,
+        "",
+        false,
+    )
+    .0
+    .unwrap();
+    assert!(go(&["queue", "clear"], &e, "", false)
+        .1
+        .contains("Dropped 1"));
+}
+
+#[test]
+fn nothing_touches_the_network_while_upload_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    // A server that would fail the test by being contacted: it answers 500 and
+    // we assert nothing was queued or recorded.
+    let url = serve(vec![(500, "{}")]);
+    let cfg = BugConfig {
+        upload_enabled: false,
+        endpoint: url,
+        ..BugConfig::default()
+    };
+    cfg.save_to(&e.config_path).unwrap();
+    for args in [
+        vec!["--app", "clip", "--send"],
+        vec!["queue", "flush"],
+        vec!["history", "--refresh"],
+    ] {
+        let (r, out) = go(&args, &e, "", false);
+        r.unwrap();
+        assert!(
+            !out.contains("queued") && !out.contains("Sent"),
+            "{args:?}: {out}"
+        );
+    }
+    assert!(go(&["queue"], &e, "", false)
+        .1
+        .contains("Nothing is waiting"));
+}
+
+#[test]
+fn saved_files_appear_in_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    let path = dir.path().join("r.json");
+    go(
+        &["--app", "clip", "--save", path.to_str().unwrap()],
+        &e,
+        "",
+        false,
+    )
+    .0
+    .unwrap();
+    let (_, out) = go(&["history"], &e, "", false);
+    assert!(out.contains("saved") && out.contains("r.json"), "{out}");
 }

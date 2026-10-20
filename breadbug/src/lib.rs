@@ -13,6 +13,9 @@ use bread_bug::livestack::{self, Refusal};
 use bread_bug::report::{self, AppEntry, BuildOptions, Prepared, ReportType};
 use bread_bug::store::{Frame, MarkerKind, ProcessIdentity, Reader};
 use bread_bug::system::{installed_apps, InstalledApp};
+use bread_bug::upload::{
+    install_id, state_dir, Client, History, HistoryEntry, HistoryKind, Queue, SendError,
+};
 use bread_scrub::ScrubContext;
 use clap::{Parser, Subcommand};
 
@@ -61,11 +64,33 @@ pub struct Cli {
 pub enum Command {
     /// List the apps you can report on.
     List,
+    /// Reports you have sent or saved. `--refresh` asks the server for their status.
+    History {
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Delete a report you sent from the server (needs the receipt id).
+    Delete { receipt: String },
+    /// Reports waiting to be sent because the server was unreachable.
+    Queue {
+        #[command(subcommand)]
+        action: Option<QueueCmd>,
+    },
     /// Turn sending reports on or off.
     Config {
         #[command(subcommand)]
         what: ConfigCmd,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QueueCmd {
+    /// Try to send everything in the queue now.
+    Flush,
+    /// Drop one queued report (by the id `queue` shows).
+    Cancel { id: String },
+    /// Drop everything in the queue.
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
@@ -86,6 +111,8 @@ pub struct Env {
     pub store_root: PathBuf,
     pub socket: PathBuf,
     pub config_path: PathBuf,
+    /// Install id, history and the offline queue live here.
+    pub state_dir: PathBuf,
     pub scrub: ScrubContext,
     /// `None` reads bakery's real state.
     pub installed: Option<Option<Vec<InstalledApp>>>,
@@ -109,6 +136,7 @@ impl Env {
             store_root: config::store_root(),
             socket: bread_bug::ipc::default_socket_path(),
             config_path: config::config_path(),
+            state_dir: state_dir(),
             scrub: ScrubContext::from_environment(),
             installed: None,
             include_journal: true,
@@ -134,6 +162,9 @@ pub fn run(
 ) -> Result<()> {
     match &cli.command {
         Some(Command::List) => return list(env, out),
+        Some(Command::History { refresh }) => return history(env, *refresh, out),
+        Some(Command::Delete { receipt }) => return delete(env, receipt, out),
+        Some(Command::Queue { action }) => return queue(env, action.as_ref(), out),
         Some(Command::Config {
             what: ConfigCmd::Upload { state },
         }) => return set_upload(env, *state == Toggle::On, out),
@@ -184,13 +215,7 @@ pub fn run(
     }
 
     if let Some(path) = &cli.save {
-        prepared.save(path)?;
-        writeln!(
-            out,
-            "Saved to {} (sha256 {}). Nothing was sent.",
-            path.display(),
-            prepared.sha256
-        )?;
+        save(&prepared, path, env, out)?;
         return Ok(());
     }
 
@@ -460,8 +485,7 @@ fn review_loop(
                     return Ok(());
                 };
                 let path = PathBuf::from(if path.is_empty() { default } else { path });
-                p.save(&path)?;
-                writeln!(out, "Saved to {}. Nothing was sent.", path.display())?;
+                save(p, &path, env, out)?;
                 return Ok(());
             }
             "s" | "send" => return send(p, env, out),
@@ -474,22 +498,221 @@ fn review_loop(
     }
 }
 
-fn send(p: &Prepared, env: &Env, out: &mut dyn Write) -> Result<()> {
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn save(p: &Prepared, path: &std::path::Path, env: &Env, out: &mut dyn Write) -> Result<()> {
+    p.save(path)?;
+    // Remembering that a file was saved is a convenience; never fail on it.
+    if let Ok(h) = History::open(&env.state_dir) {
+        let _ = h.append(&HistoryEntry {
+            t: now(),
+            kind: HistoryKind::Saved,
+            app: p.report.app.id.clone(),
+            sha256: p.sha256.clone(),
+            receipt: None,
+            deletion_token: None,
+            path: Some(path.display().to_string()),
+            status: None,
+        });
+    }
+    writeln!(
+        out,
+        "Saved to {} (sha256 {}). Nothing was sent.",
+        path.display(),
+        p.sha256
+    )?;
+    Ok(())
+}
+
+/// Network use needs the user's opt-in; returns the client if allowed.
+fn client_if_enabled(env: &Env, out: &mut dyn Write) -> Result<Option<Client>> {
     let cfg = BugConfig::load_from(&env.config_path)?;
     if !cfg.upload_enabled {
         writeln!(
             out,
             "Sending is turned off. Enable it in bos-settings (Bug reports) or run\n  breadbug config upload on\nYou can still save the report to a file."
         )?;
-        return Ok(());
+        return Ok(None);
     }
+    Ok(Some(Client::new(&cfg.endpoint)?))
+}
+
+fn send(p: &Prepared, env: &Env, out: &mut dyn Write) -> Result<()> {
+    let Some(client) = client_if_enabled(env, out)? else {
+        return Ok(());
+    };
     if !p.verify() {
         bail!("report bytes no longer match their hash; refusing to send");
     }
-    writeln!(
-        out,
-        "Sending is not available in this build yet. Nothing was sent."
-    )?;
+    let t = now();
+    let install = install_id(&env.state_dir, t)?;
+    let history = History::open(&env.state_dir)?;
+    match client.send(p, &install) {
+        Ok(acc) => {
+            history.append(&HistoryEntry {
+                t,
+                kind: HistoryKind::Sent,
+                app: p.report.app.id.clone(),
+                sha256: p.sha256.clone(),
+                receipt: Some(acc.receipt.clone()),
+                deletion_token: acc.deletion_token.clone(),
+                path: None,
+                status: Some("received".into()),
+            })?;
+            writeln!(out, "\nSent. Thank you. Your receipt: {}", acc.receipt)?;
+            if acc.deletion_token.is_some() {
+                writeln!(
+                    out,
+                    "To delete it from the server later: breadbug delete {}",
+                    acc.receipt
+                )?;
+            }
+        }
+        Err(SendError::Retriable(why)) => {
+            let queue = Queue::open(&env.state_dir)?;
+            if queue.enqueue(p, t)? {
+                writeln!(
+                    out,
+                    "\nCould not reach the server ({why}). The report is queued and will be retried; see `breadbug queue`."
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "\nCould not reach the server ({why}) and the queue is full. Save the report to a file instead."
+                )?;
+            }
+        }
+        Err(e @ SendError::Rejected(_)) => {
+            writeln!(
+                out,
+                "\n{e}. Nothing more will be tried; you can save the report to a file instead."
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn history(env: &Env, refresh: bool, out: &mut dyn Write) -> Result<()> {
+    let h = History::open(&env.state_dir)?;
+    if refresh {
+        if let Some(client) = client_if_enabled(env, out)? {
+            for e in h.list() {
+                let Some(r) = e.receipt.as_deref() else {
+                    continue;
+                };
+                match client.status(r) {
+                    Ok(Some(status)) => h.set_status(r, &status)?,
+                    Ok(None) => h.set_status(r, "unknown to the server")?,
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+    let all = h.list();
+    if all.is_empty() {
+        writeln!(out, "No reports sent or saved yet.")?;
+    }
+    for e in all {
+        match e.kind {
+            HistoryKind::Sent => writeln!(
+                out,
+                "sent   {}  {}  receipt {}  {}",
+                e.t,
+                e.app,
+                e.receipt.as_deref().unwrap_or("?"),
+                e.status.as_deref().unwrap_or("")
+            )?,
+            HistoryKind::Saved => writeln!(
+                out,
+                "saved  {}  {}  {}",
+                e.t,
+                e.app,
+                e.path.as_deref().unwrap_or("?")
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn delete(env: &Env, receipt: &str, out: &mut dyn Write) -> Result<()> {
+    let h = History::open(&env.state_dir)?;
+    let Some(entry) = h.find(receipt) else {
+        bail!("no report with receipt {receipt} in your history");
+    };
+    let Some(token) = entry.deletion_token else {
+        bail!("this report has no deletion token on this machine (it was recognised as an earlier send)");
+    };
+    let Some(client) = client_if_enabled(env, out)? else {
+        return Ok(());
+    };
+    match client.delete(receipt, &token) {
+        Ok(found) => {
+            h.remove(receipt)?;
+            writeln!(
+                out,
+                "{}",
+                if found {
+                    "Deleted from the server."
+                } else {
+                    "The server no longer had it (already deleted or expired). Removed from your history."
+                }
+            )?;
+            Ok(())
+        }
+        Err(e) => bail!("{e}"),
+    }
+}
+
+fn queue(env: &Env, action: Option<&QueueCmd>, out: &mut dyn Write) -> Result<()> {
+    let q = Queue::open(&env.state_dir)?;
+    match action {
+        None => {
+            let items = q.list();
+            if items.is_empty() {
+                writeln!(out, "Nothing is waiting to be sent.")?;
+            }
+            for m in items {
+                writeln!(
+                    out,
+                    "{}  {}  queued {}  attempts {}",
+                    &m.sha256[..12],
+                    m.app,
+                    m.queued_at,
+                    m.attempts
+                )?;
+            }
+        }
+        Some(QueueCmd::Clear) => {
+            writeln!(out, "Dropped {} queued report(s).", q.clear())?;
+        }
+        Some(QueueCmd::Cancel { id }) => {
+            let full = q
+                .list()
+                .into_iter()
+                .find(|m| m.sha256.starts_with(id.as_str()));
+            match full {
+                Some(m) if id.len() >= 6 && q.cancel(&m.sha256) => writeln!(out, "Dropped.")?,
+                _ => bail!("no queued report matches '{id}'"),
+            }
+        }
+        Some(QueueCmd::Flush) => {
+            let Some(client) = client_if_enabled(env, out)? else {
+                return Ok(());
+            };
+            let t = now();
+            let install = install_id(&env.state_dir, t)?;
+            let history = History::open(&env.state_dir)?;
+            let (sent, left, dropped) = q.flush(&client, &history, &install, t, true)?;
+            writeln!(
+                out,
+                "Sent {sent}, {left} still queued, {dropped} rejected and dropped."
+            )?;
+        }
+    }
     Ok(())
 }
 
