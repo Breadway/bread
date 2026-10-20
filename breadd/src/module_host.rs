@@ -73,8 +73,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use bread_shared::{AdapterSource, BreadEvent, ModulePermission, PermissionKind};
 use landlock::{
-    make_bitflags, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr,
-    RulesetCreatedAttr, RulesetStatus, ABI,
+    make_bitflags, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, ABI,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{error, info, warn};
@@ -277,11 +277,11 @@ pub fn spawn_module_host(
                 &sandbox_socket_path,
                 &sandbox_permissions,
             )
-                .map_err(|e| {
-                    std::io::Error::other(format!(
-                        "landlock sandbox setup failed for module '{sandbox_module_name}': {e}"
-                    ))
-                })
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "landlock sandbox setup failed for module '{sandbox_module_name}': {e}"
+                ))
+            })
         });
     }
 
@@ -368,18 +368,53 @@ fn describe_exit(
     }
 }
 
-/// Resolve the `bread-module-host` binary's path: prefer the sibling of
-/// `breadd`'s own executable (the layout `cargo build --workspace` and this
-/// repo's packaging both produce: all workspace binaries land in the same
-/// `target/{debug,release}` or install bindir), falling back to a bare
-/// `PATH` lookup for layouts where `current_exe()` resolution is
-/// unreliable.
+/// The env var an explicit override is read from, checked before any of
+/// [`resolve_module_host_binary`]'s normal resolution. `breadd`'s own
+/// integration tests (`breadd/tests/common/mod.rs`'s
+/// `ensure_module_host_built`) set this to the exact path `cargo build
+/// -p bread-module-host --message-format=json` just produced, so a test run
+/// always spawns the binary it just built and verified, never one guessed
+/// from `current_exe()`'s location and never a bare `PATH` lookup that could
+/// silently pick up an unrelated, separately **installed**
+/// `~/.local/bin/bread-module-host`. Must match the literal string
+/// `ensure_module_host_built` uses; there's no shared symbol for it since
+/// `breadd` is a binary-only crate with no `[lib]` target integration tests
+/// can import from.
+pub const MODULE_HOST_BIN_ENV: &str = "BREAD_MODULE_HOST_BIN";
+
+/// Resolve the `bread-module-host` binary's path: first, an explicit
+/// [`MODULE_HOST_BIN_ENV`] override, then the sibling of `breadd`'s own
+/// executable (the layout `cargo build --workspace` and this repo's
+/// packaging both produce: all workspace binaries land in the same
+/// `target/{debug,release}` or install bindir). Test and bench binaries are
+/// built one level deeper, into `target/{debug,release}/deps/`, so when
+/// `current_exe()` resolves there (running under `cargo test`), also check
+/// that directory's parent, where the real workspace binaries actually
+/// live; production `breadd` never runs from a `deps/` directory, so this
+/// adds a fallback without changing where a real install resolves. Falls
+/// back to a bare `PATH` lookup for layouts where neither resolves.
 pub fn resolve_module_host_binary() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("bread-module-host");
-            if candidate.exists() {
-                return candidate;
+    if let Ok(path) = std::env::var(MODULE_HOST_BIN_ENV) {
+        return PathBuf::from(path);
+    }
+    resolve_module_host_binary_from(std::env::current_exe().ok().as_deref())
+}
+
+/// The testable half of [`resolve_module_host_binary`]: everything past
+/// getting the current executable's path, which `std::env::current_exe()`
+/// makes otherwise unmockable.
+fn resolve_module_host_binary_from(exe: Option<&Path>) -> PathBuf {
+    if let Some(dir) = exe.and_then(Path::parent) {
+        let candidate = dir.join("bread-module-host");
+        if candidate.exists() {
+            return candidate;
+        }
+        if dir.file_name() == Some(std::ffi::OsStr::new("deps")) {
+            if let Some(parent) = dir.parent() {
+                let candidate = parent.join("bread-module-host");
+                if candidate.exists() {
+                    return candidate;
+                }
             }
         }
     }
@@ -513,7 +548,10 @@ fn apply_sandbox(
             ruleset = ruleset
                 .add_rule(PathBeneath::new(fd, read_only))
                 .map_err(|e| {
-                    anyhow!("landlock rule for module directory {}: {e}", module_dir.display())
+                    anyhow!(
+                        "landlock rule for module directory {}: {e}",
+                        module_dir.display()
+                    )
                 })?;
         }
     }
@@ -539,12 +577,7 @@ fn apply_sandbox(
         if let Ok(fd) = PathFd::new(socket_path) {
             ruleset = ruleset
                 .add_rule(PathBeneath::new(fd, read_file_only))
-                .map_err(|e| {
-                    anyhow!(
-                        "landlock rule for socket {}: {e}",
-                        socket_path.display()
-                    )
-                })?;
+                .map_err(|e| anyhow!("landlock rule for socket {}: {e}", socket_path.display()))?;
         }
     }
 
@@ -554,11 +587,12 @@ fn apply_sandbox(
                 if let Some(path) = &perm.path {
                     let expanded = bread_shared::expand_path(path);
                     if let Ok(fd) = PathFd::new(&expanded) {
-                        ruleset = ruleset
-                            .add_rule(PathBeneath::new(fd, read_only))
-                            .map_err(|e| {
-                                anyhow!("landlock fs.read rule for {}: {e}", expanded.display())
-                            })?;
+                        ruleset =
+                            ruleset
+                                .add_rule(PathBeneath::new(fd, read_only))
+                                .map_err(|e| {
+                                    anyhow!("landlock fs.read rule for {}: {e}", expanded.display())
+                                })?;
                     }
                 }
             }
@@ -633,6 +667,113 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// `cargo test` builds test binaries one level deeper than the real
+    /// workspace binaries (`target/debug/deps/<test>-<hash>` vs
+    /// `target/debug/breadd`), so a naive sibling-of-`current_exe()` lookup
+    /// never finds `bread-module-host` when running under a test harness,
+    /// even though `cargo test --workspace` (this repo's documented
+    /// verification command) builds it right alongside `breadd`. This is
+    /// exactly what broke `breadd/tests/ipc_integration.rs`.
+    #[test]
+    fn resolves_next_to_deps_dir_when_running_under_a_test_binary() {
+        let root = std::env::temp_dir().join(format!(
+            "bread-module-host-resolve-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let debug_dir = root.join("target/debug");
+        let deps_dir = debug_dir.join("deps");
+        std::fs::create_dir_all(&deps_dir).unwrap();
+        std::fs::write(debug_dir.join("bread-module-host"), b"").unwrap();
+        let fake_test_binary = deps_dir.join("ipc_integration-abc123");
+        std::fs::write(&fake_test_binary, b"").unwrap();
+
+        let resolved = resolve_module_host_binary_from(Some(&fake_test_binary));
+        assert_eq!(resolved, debug_dir.join("bread-module-host"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The normal (non-test) case is unaffected: a real `breadd` binary
+    /// resolves the sibling in its own directory without ever touching the
+    /// `deps/` fallback.
+    #[test]
+    fn resolves_next_to_the_binary_itself_outside_deps() {
+        let root = std::env::temp_dir().join(format!(
+            "bread-module-host-resolve-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                + 1
+        ));
+        let debug_dir = root.join("target/debug");
+        std::fs::create_dir_all(&debug_dir).unwrap();
+        std::fs::write(debug_dir.join("bread-module-host"), b"").unwrap();
+        let fake_breadd_binary = debug_dir.join("breadd");
+        std::fs::write(&fake_breadd_binary, b"").unwrap();
+
+        let resolved = resolve_module_host_binary_from(Some(&fake_breadd_binary));
+        assert_eq!(resolved, debug_dir.join("bread-module-host"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Neither the binary itself nor a `deps/`-parent fallback exists:
+    /// falls back to a bare `PATH` lookup name, same as before this fix.
+    #[test]
+    fn falls_back_to_bare_name_when_nothing_resolves() {
+        let root = std::env::temp_dir().join(format!(
+            "bread-module-host-resolve-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                + 2
+        ));
+        let deps_dir = root.join("target/debug/deps");
+        std::fs::create_dir_all(&deps_dir).unwrap();
+        let fake_test_binary = deps_dir.join("some_test-def456");
+        std::fs::write(&fake_test_binary, b"").unwrap();
+
+        let resolved = resolve_module_host_binary_from(Some(&fake_test_binary));
+        assert_eq!(resolved, PathBuf::from("bread-module-host"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Guards [`MODULE_HOST_BIN_ENV`] mutation: it's a process-global env
+    /// var, and `cargo test` runs this file's tests concurrently within one
+    /// process, so two tests setting/clearing it at once would race.
+    static MODULE_HOST_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The override [`breadd/tests/common/mod.rs`'s `ensure_module_host_built`]
+    /// relies on: when set, it must win outright, without even trying the
+    /// normal `current_exe()`-relative resolution first (this is what lets a
+    /// test always spawn the exact binary it just built, never a guess or a
+    /// bare `PATH` lookup that could hit a stale installed copy).
+    #[test]
+    fn resolve_module_host_binary_prefers_the_explicit_override() {
+        let _lock = MODULE_HOST_BIN_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(MODULE_HOST_BIN_ENV).ok();
+
+        std::env::set_var(MODULE_HOST_BIN_ENV, "/does/not/exist/bread-module-host");
+        let resolved = resolve_module_host_binary();
+        match previous {
+            Some(v) => std::env::set_var(MODULE_HOST_BIN_ENV, v),
+            None => std::env::remove_var(MODULE_HOST_BIN_ENV),
+        }
+
+        assert_eq!(resolved, PathBuf::from("/does/not/exist/bread-module-host"));
+    }
+
     /// The single most important test in this whole workstream (see the
     /// task's P0 item 4 and `Documentation.md`'s "Workstream G" section):
     /// a real spawned child, restricted only by `apply_sandbox` for a
@@ -696,7 +837,7 @@ mod tests {
                     Path::new("/nonexistent/dummy/breadd.sock"),
                     &permissions,
                 )
-                    .map_err(|e| std::io::Error::other(e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
             });
         }
 
@@ -733,7 +874,7 @@ mod tests {
             &script_path,
             std::os::unix::fs::PermissionsExt::from_mode(0o755),
         )
-            .unwrap();
+        .unwrap();
 
         // No permissions granted at all: the sandboxed process should not
         // be able to execute ANYTHING, including a script sitting right
@@ -756,7 +897,7 @@ mod tests {
                     Path::new("/nonexistent/dummy/breadd.sock"),
                     &permissions,
                 )
-                    .map_err(|e| std::io::Error::other(e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
             });
         }
 

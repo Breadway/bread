@@ -37,8 +37,15 @@ pub enum StateCommand {
         id: SubscriptionId,
     },
     ClearSubscriptions,
-    ClearModules,
-    ClearWidgets,
+    ClearModules {
+        ack: std::sync::mpsc::Sender<()>,
+    },
+    ClearWidgets {
+        ack: std::sync::mpsc::Sender<()>,
+    },
+    Barrier {
+        ack: tokio::sync::oneshot::Sender<()>,
+    },
     SetModuleStatus {
         name: String,
         status: ModuleLoadState,
@@ -115,12 +122,39 @@ impl StateHandle {
         let _ = self.command_tx.send(StateCommand::ClearSubscriptions);
     }
 
-    pub fn clear_modules(&self) {
-        let _ = self.command_tx.send(StateCommand::ClearModules);
+    /// Wait until all previously queued state-engine commands have been applied.
+    pub async fn flush_module_statuses(&self) -> Result<()> {
+        let (ack, done) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(StateCommand::Barrier { ack })
+            .map_err(|_| anyhow::anyhow!("state engine command channel closed"))?;
+        done.await
+            .map_err(|_| anyhow::anyhow!("state engine dropped barrier response"))
     }
 
+    /// Wipe the module registry and block until the state engine has applied
+    /// it. Call from the non-async Lua runtime thread only.
+    pub fn clear_modules(&self) {
+        let (ack, done) = std::sync::mpsc::channel();
+        if self
+            .command_tx
+            .send(StateCommand::ClearModules { ack })
+            .is_ok()
+        {
+            let _ = done.recv();
+        }
+    }
+
+    /// Same contract as [`clear_modules`](Self::clear_modules), for widgets.
     pub fn clear_widgets(&self) {
-        let _ = self.command_tx.send(StateCommand::ClearWidgets);
+        let (ack, done) = std::sync::mpsc::channel();
+        if self
+            .command_tx
+            .send(StateCommand::ClearWidgets { ack })
+            .is_ok()
+        {
+            let _ = done.recv();
+        }
     }
 
     pub fn set_module_status(
@@ -284,7 +318,7 @@ pub async fn run_state_engine(
     warn!("state engine loop exited");
 }
 
-async fn handle_command(
+pub(crate) async fn handle_command(
     cmd: StateCommand,
     state: &Arc<RwLock<RuntimeState>>,
     subscriptions: &mut SubscriptionTable,
@@ -312,11 +346,19 @@ async fn handle_command(
             watches.clear();
             subscription_count.store(0, Ordering::Relaxed);
         }
-        StateCommand::ClearModules => {
-            state.write().await.modules.clear();
+        StateCommand::ClearModules { ack } => {
+            let mut guard = state.write().await;
+            guard.modules.clear();
+            guard.pending_module_stores.clear();
+            drop(guard);
+            let _ = ack.send(());
         }
-        StateCommand::ClearWidgets => {
+        StateCommand::ClearWidgets { ack } => {
             state.write().await.widgets.clear();
+            let _ = ack.send(());
+        }
+        StateCommand::Barrier { ack } => {
+            let _ = ack.send(());
         }
         StateCommand::SetModuleStatus {
             name,
@@ -326,11 +368,15 @@ async fn handle_command(
             ungated,
         } => {
             let mut guard = state.write().await;
+            let pending = guard.pending_module_stores.remove(&name);
             if let Some(existing) = guard.modules.iter_mut().find(|m| m.name == name) {
                 existing.status = status;
                 existing.last_error = last_error;
                 existing.builtin = builtin;
                 existing.ungated = ungated;
+                if let Some(pending) = pending {
+                    existing.store.extend(pending);
+                }
             } else {
                 guard.modules.push(crate::core::types::ModuleStatus {
                     name,
@@ -338,7 +384,7 @@ async fn handle_command(
                     last_error,
                     builtin,
                     ungated,
-                    store: HashMap::new(),
+                    store: pending.unwrap_or_default(),
                 });
             }
         }
@@ -809,6 +855,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clear_modules_blocks_until_the_engine_has_applied_it() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let handle = StateHandle::new(state.clone(), cmd_tx);
+
+        let (returned_tx, returned_rx) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            handle.clear_modules();
+            returned_tx.send(()).unwrap();
+        });
+
+        let cmd = cmd_rx.blocking_recv().expect("clear command is sent");
+        assert!(
+            returned_rx.try_recv().is_err(),
+            "clear_modules returned before the state engine applied the clear"
+        );
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut subs = SubscriptionTable::default();
+            let mut watches = HashMap::new();
+            let count = Arc::new(AtomicU64::new(0));
+            handle_command(cmd, &state, &mut subs, &mut watches, &count).await;
+        });
+
+        returned_rx
+            .recv()
+            .expect("clear_modules returns after the ack");
+        caller.join().unwrap();
+    }
+
+    #[test]
+    fn flush_module_statuses_acknowledges_only_after_prior_commands() {
+        let state = Arc::new(RwLock::new(RuntimeState::default()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = StateHandle::new(state.clone(), tx);
+        handle.set_module_status_ex("ordered".into(), ModuleLoadState::Loaded, None, false, true);
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(handle.flush_module_statuses());
+            done_tx.send(result.map_err(|err| err.to_string())).unwrap();
+        });
+
+        let status = rx.blocking_recv().expect("status command is queued first");
+        let barrier = rx.blocking_recv().expect("barrier command follows status");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mut subscriptions = SubscriptionTable::default();
+            let mut watches = HashMap::new();
+            let count = Arc::new(AtomicU64::new(0));
+            handle_command(status, &state, &mut subscriptions, &mut watches, &count).await;
+            assert!(
+                done_rx.try_recv().is_err(),
+                "barrier returned before its ack"
+            );
+            handle_command(barrier, &state, &mut subscriptions, &mut watches, &count).await;
+        });
+        done_rx
+            .recv()
+            .unwrap()
+            .expect("acknowledged state-engine barrier succeeds");
+        assert_eq!(state.blocking_read().modules.len(), 1);
+    }
+
     // ─── value_at_path ────────────────────────────────────────────────────
 
     #[test]
@@ -935,7 +1055,10 @@ mod tests {
         );
         apply_event_to_state(
             &mut state,
-            &ev("bread.hyprland.workspace.created", json!({"workspace": "9"})),
+            &ev(
+                "bread.hyprland.workspace.created",
+                json!({"workspace": "9"}),
+            ),
         );
         assert_eq!(state.monitors.len(), 1);
         assert_eq!(state.monitors[0].name, "HDMI-A-1");

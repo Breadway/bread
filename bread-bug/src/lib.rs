@@ -3,6 +3,7 @@
 pub mod config;
 pub mod ipc;
 pub mod livestack;
+pub mod procid;
 pub mod report;
 pub mod runcmd;
 pub mod store;

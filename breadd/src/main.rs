@@ -50,6 +50,10 @@ async fn main() -> Result<()> {
     let state_handle = StateHandle::new(state.clone(), state_cmd_tx);
     let module_host_registry = module_host::ModuleHostRegistry::new();
 
+    // Hosts spawned by initial Lua module loading connect only once. Bind
+    // first so their connections can queue until the IPC server is polled.
+    let ipc_listener = ipc::Server::bind(&config.socket_path())?;
+
     let lua_runtime = lua::spawn_runtime(
         config.clone(),
         state_handle.clone(),
@@ -105,13 +109,17 @@ async fn main() -> Result<()> {
 
     let adapter_status = adapter_manager.status_handle();
 
-    let bug_watchdog = Arc::new(watchdog::Watchdog::new(std::time::Duration::from_millis(
-        bug_config.freeze_after_ms,
-    )));
+    let bug_watchdog = Arc::new(watchdog::Watchdog::with_excluded(
+        std::time::Duration::from_millis(bug_config.freeze_after_ms),
+        &bug_config.excluded_apps,
+    ));
     if let Some(store) = bug_store.clone() {
-        bugstore::spawn_event_recorder(store, bug_watchdog.clone(), event_stream_tx.subscribe());
+        bugstore::spawn_journal_recorder(store.clone(), shutdown_rx.clone());
+        bugstore::spawn_event_recorder(store, event_stream_tx.subscribe());
     }
     if bug_config.watchdog_enabled {
+        // The watchdog and its grace window do not need the store.
+        bugstore::spawn_grace_listener(bug_watchdog.clone(), event_stream_tx.subscribe());
         bugstore::spawn_watchdog(
             bug_store.clone(),
             bug_watchdog.clone(),
@@ -157,7 +165,7 @@ async fn main() -> Result<()> {
 
     info!("breadd fully started");
     tokio::select! {
-        result = ipc_server.serve(shutdown_rx.clone()) => {
+        result = ipc_server.serve(ipc_listener, shutdown_rx.clone()) => {
             if let Err(err) = result {
                 error!(error = %err, "ipc server failed");
             }

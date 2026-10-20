@@ -8,13 +8,14 @@ local monitors = require("bread.monitors")
 local M = bread.module({ name = "dock-monitors", version = "1.0.0" })
 
 -- Named layouts ----------------------------------------------------------------
+-- keyword selects the legacy or Lua config form and surfaces failures.
 monitors.layout("docked", function()
-    bread.hyprland.keyword("monitor", "eDP-1, 1920x1200@60, 0x0, 1")
-    bread.hyprland.keyword("monitor", "HDMI-A-1, preferred, 1920x0, 1")
+    bread.hyprland.keyword("monitor", "eDP-1,1920x1200@60,0x0,1")
+    bread.hyprland.keyword("monitor", "HDMI-A-1,preferred,1920x0,1")
 end)
 
 monitors.layout("solo", function()
-    bread.hyprland.keyword("monitor", "eDP-1, preferred, 0x0, 1")
+    bread.hyprland.keyword("monitor", "eDP-1,preferred,0x0,1")
 end)
 
 -- React to the external display ------------------------------------------------

@@ -4,6 +4,36 @@ use crate::store::Store;
 
 const BID: &str = "3f2a9c1de4b5a6978081726354453423a1b2c3d4";
 
+#[test]
+fn reopened_store_markers_and_report_notes_remain_distinct() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), &BugConfig::default(), ctx()).unwrap();
+        store
+            .append_log("clip", "info", "remote 203.0.113.42", 10)
+            .unwrap();
+    }
+    {
+        let store = Store::open(dir.path(), &BugConfig::default(), ctx()).unwrap();
+        store
+            .append_log("clip", "info", "remote 198.51.100.8", 11)
+            .unwrap();
+    }
+    let mut options = opts(dir.path());
+    options.notes =
+        Some("remote 192.0.2.9 https://bob:<SECRET>@example.com/x?account=alice".into());
+    let prepared = build(&options).unwrap();
+    assert_eq!(prepared.report.logs.len(), 2);
+    assert_eq!(prepared.report.logs[0].msg, "remote <IP:1>");
+    assert_eq!(prepared.report.logs[1].msg, "remote <IP:2>");
+    let notes = prepared.report.notes.as_ref().unwrap();
+    assert_eq!(notes, "remote <IP:3> https://<CRED>@example.com/x?<QUERY>");
+    for secret in ["203.0.113.42", "198.51.100.8", "192.0.2.9", "bob", "alice"] {
+        assert!(!String::from_utf8_lossy(&prepared.bytes).contains(secret));
+    }
+    assert!(prepared.verify());
+}
+
 fn ctx() -> ScrubContext {
     ScrubContext {
         home: Some("/home/alicesmith".into()),
@@ -221,26 +251,68 @@ fn picker_orders_problem_apps_first_and_limits_to_installed() {
 }
 
 #[test]
-fn machine_facts_are_not_eaten_by_identity_literals() {
-    // On a default install the hostname equals the OS id; the OS id must
-    // survive while a hostname in the free-text sections is still redacted.
+fn only_os_id_is_exempt_from_identity_scrubbing() {
     let dir = tempfile::tempdir().unwrap();
     let s = Store::open(dir.path(), &BugConfig::default(), ScrubContext::default()).unwrap();
-    s.append_log("clip", "info", "running on mybox-7 now", 1)
+    s.append_log("clip", "info", "mybox-7 arch bos kernel v3.14", 1)
         .unwrap();
     let mut o = opts(dir.path());
     o.scrub = ScrubContext {
         hostname: Some("mybox-7".into()),
+        username: Some("arch".into()),
         ..ScrubContext::default()
     };
     let p = build(&o).unwrap();
     assert!(
-        p.report.logs[0].msg.contains("<HOST>"),
+        !p.report.logs[0].msg.contains("mybox-7"),
         "{:?}",
         p.report.logs
     );
     let mut report = p.report.clone();
-    report.system.os_id = Some("mybox-7".into());
+    report.system.arch = "x86_64".into();
+    report.system.os_id = Some("bos".into());
+    report.system.kernel = Some("mybox-7 arch".into());
+    report.system.os_version = Some("mybox-7".into());
+    report
+        .runtime
+        .adapters
+        .insert("adapter".into(), "arch".into());
     super::scrub_report(&mut report, &o.scrub).unwrap();
-    assert_eq!(report.system.os_id.as_deref(), Some("mybox-7"));
+    assert_eq!(report.system.os_id.as_deref(), Some("bos"));
+    assert!(!report.system.kernel.as_deref().unwrap().contains("mybox-7"));
+    assert!(!report.system.kernel.as_deref().unwrap().contains("arch"));
+    assert!(!report
+        .system
+        .os_version
+        .as_deref()
+        .unwrap()
+        .contains("mybox-7"));
+    let runtime = serde_json::to_string(&report.runtime).unwrap();
+    assert!(!runtime.contains("arch"));
+}
+
+#[test]
+fn os_id_cannot_exempt_a_matching_real_username_or_hostname() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = opts(dir.path());
+    opts.scrub = ScrubContext {
+        username: Some("arch".into()),
+        hostname: Some("bos".into()),
+        ..ScrubContext::default()
+    };
+    let mut report = build(&opts).unwrap().report;
+    report.system.os_id = Some("arch".into());
+    report.system.arch = "x86_64".into();
+    report.notes = Some("arch logged in on bos".into());
+    super::scrub_report(&mut report, &opts.scrub).unwrap();
+    assert_ne!(report.system.os_id.as_deref(), Some("arch"));
+    assert!(!report.notes.as_deref().unwrap().contains("arch"));
+    assert!(!report.notes.as_deref().unwrap().contains("bos"));
+    assert_eq!(report.system.arch, "x86_64");
+
+    let mut report = build(&opts).unwrap().report;
+    report.system.os_id = Some("bos".into());
+    report.system.arch = "x86_64".into();
+    super::scrub_report(&mut report, &opts.scrub).unwrap();
+    assert_ne!(report.system.os_id.as_deref(), Some("bos"));
 }

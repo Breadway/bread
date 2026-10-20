@@ -18,3 +18,4 @@ hex = "0.4"
 
 [dev-dependencies]
 tempfile.workspace = true
+libc = "0.2"
