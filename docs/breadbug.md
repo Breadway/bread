@@ -181,9 +181,10 @@ bos-settings and breadhelp reuse the same constant. In short:
 > Send, and sending is off by default. You can save the report to a file
 > instead.
 
-The endpoint and retention text above are ECO-66 design requirements, not a
-claim that an upload service exists. The present binary's configured default
-endpoint is `https://bugs.breadway.dev`, but it does not send data.
+The configured default endpoint is `https://bugs.breadway.dev`. Nothing is
+sent unless upload is enabled and the user chooses Send for that report, and
+`breadbug status` only polls receipts the user holds. The intake service and
+its retention controls are not part of this repo.
 
 ## Server trust boundaries and threat model (requirements, not current controls)
 
