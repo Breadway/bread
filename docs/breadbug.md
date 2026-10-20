@@ -1,24 +1,27 @@
 # breadbug
 
-breadbug lets a user report a crash, freeze or misbehavior of a bread app.
-It is opt-in, previewable and scrubbed. Tracker: ECO-EP1 (spec ECO-66).
+breadbug lets a user prepare a report about a bread app crash, freeze or
+misbehavior. The local capture, scrub, preview and file export are implemented;
+network upload and the intake service are not available in this build. Tracker:
+ECO-EP1 (design spec ECO-66).
 
 ## What a user sees
 
 1. An app crashes or freezes, or the user notices a problem.
 2. They run `breadbug` (a keybind in BOS, the Bug reports page in
    bos-settings, or the "Review report" action on the crash notification).
-3. They pick the app from the installed bread apps (recent problems first),
+3. They pick an app from the installed bread apps (recent problems first),
    pick crash, freeze or behavior, and may add notes.
 4. breadbug shows exactly what would be reported: counts per section, what the
    scrubber replaced, a SHA-256 of the report, and the full text on request.
-5. They choose **save to file**, **send**, or **cancel**. Nothing is sent
-   unless they choose send, and sending must also be enabled in settings
-   (`breadbug config upload on`). The default is off.
+5. They choose **save to file**, **send**, or **cancel**. Sending requires both
+   `upload_enabled = true` and a separate explicit Send action. The setting is
+   false by default. In this build Send reports that upload is unavailable and
+   sends nothing; the design below describes the intended future upload.
 
-The bytes that were previewed are the bytes that are saved or sent. The report
-is built once, serialized once and hashed; the upload path refuses to send if
-the hash no longer matches.
+The report is built once, serialized once and hashed; the preview and file
+export use those bytes. The current send guard verifies the hash but has no
+transport. Local `--save` writes mode 0600.
 
 ## Where data comes from
 
@@ -29,19 +32,25 @@ to be queried:
 ~/.local/state/bread/bugstore/apps/<app>/{log,events,markers}.jsonl  (+ .1)
 ```
 
-Dirs are 0700, files 0600. Each file rotates at a size cap keeping one
-previous generation; a global cap drops the oldest data first; there is a cap
-on the number of apps. `breadbug` reads the same files directly, so it works
-when breadd is down.
+Current defaults in `bread-bug/src/config.rs`: each file generation is capped
+at 256 KiB, total store at 32 MiB, 64 app directories and 4096 bytes per stored
+line. At rotation only one previous generation is kept; oldest data is dropped
+at the global cap. Directories are 0700 and files 0600. These are configurable
+through `[store]` in `~/.config/bread/breadbug.toml`. `breadbug` reads the files
+directly and can build a report when breadd is down.
 
-Feeders: apps push logs and markers over the `bug.log`, `bug.logs` and
-`bug.marker` IPC methods (see Documentation.md); breadd records bus events
-(names plus allowlisted fields) and its own tracing output.
+Feeders send logs and markers over IPC; breadd records event names plus the
+field allowlist below and its own tracing output. The app exclusion list is
+`excluded_apps`; excluded apps store nothing and are omitted from reports.
+The code supports exclusions but does not ship a hard-coded sensitive-app
+policy. The design requires sensitive apps such as breadclip (clipboard
+contents) and breadsearch (queries) to be excluded by default, with a clear,
+user-controlled way to retain an exclusion. That default policy is not yet
+implemented. No clipboard contents or search queries are allowed report fields.
 
 Configuration lives in `~/.config/bread/breadbug.toml` (`upload_enabled`,
 `excluded_apps`, `endpoint`, `watchdog_enabled`, `freeze_after_ms`, `[store]`
-limits). Excluded apps store nothing
-and appear in no report.
+limits).
 
 ## Sending
 
@@ -92,49 +101,73 @@ prompt). The pid comes from the freeze marker and is re-checked to be a live
 
 ## Scrubbing
 
-`bread-scrub` runs twice: on ingest into the store (so raw personal data never
-reaches disk) and again over the whole report with a fresh scrubber.
+`bread-scrub` runs on ingest into the store and again over a report. Structured
+event payloads use an allowlist, not a denylist. For v1, the allowed event
+fields and JSON types are:
 
-* **Structured data is allowlisted.** Event payloads are dropped unless the
-  allowlist names a field (power: `ac_connected`, `battery_percent`; network:
-  `online`; device: `subsystem`, `vendor_id`, `product_id`; bluetooth:
-  `subsystem`). A dropped payload leaves only the event name and plain key
-  names.
-* **Free text is pattern-redacted:** emails, IPv4/IPv6, MACs, UUIDs, long hex,
-  known token formats, `key=value` secrets, URL credentials and query strings,
-  home paths, user and host names, SSIDs, serials, window titles and
-  high-entropy strings.
-* **Crash data is frames only:** module, offset, build-id and an optional
-  symbol. No memory, registers or environment.
-* Build-ids are exempt from the hex rule; the server needs them to symbolicate.
-* User notes are scrubbed too, and the prompt warns not to paste secrets.
+| Event pattern | Allowed field | Type / bound |
+|---------------|---------------|--------------|
+| `bread.power.**` | `ac_connected` | boolean |
+| `bread.power.**` | `battery_percent` | integer, 0-100 |
+| `bread.network.*` | `online` | boolean |
+| `bread.device.*` | `subsystem` | string, scrubbed and limited by the configured 4096-byte stored-line cap |
+| `bread.device.*` | `vendor_id`, `product_id` | identifier strings, scrubbed and limited by the configured 4096-byte stored-line cap |
+| `bread.bluetooth.**` | `subsystem` | string, scrubbed and limited by the configured 4096-byte stored-line cap |
 
-Free-text scrubbing is best effort (it cannot know an arbitrary word is a
-name). That is why the preview exists and why structured fields are allowlisted.
+Only the named fields from matching event names survive. Unknown event names,
+fields and payload shapes are dropped; event name and timestamp remain. The
+current generic event-field implementation does not enforce the table's
+semantic JSON types/ranges. Enforcing these types and bounds at ingestion and
+server validation is a design requirement, not an implemented guarantee.
 
-## Report schema (version 1)
+Other v1 fields are explicitly limited to these shapes:
 
-| Field | Content |
-|-------|---------|
-| `schema` | `1`; bumped for shape changes the server must know about |
-| `report_type` | `crash`, `freeze` or `behavior` |
-| `created_unix` | seconds since the epoch |
-| `app` | `{ id, version, build_id }` |
-| `system` | OS id/version/build, kernel, arch, GPU drivers with PCI ids, compositor version, bakery track, breadd and API versions |
-| `installed_apps` | `[{ id, version }]` |
-| `runtime` | daemon running, uptime, adapter statuses, module counts |
-| `markers` | up to 5 recent crash/freeze markers with frames |
-| `logs`, `daemon_logs` | scrubbed app log lines; daemon warnings and errors |
-| `events` | event names with allowlisted fields |
-| `journal` | scrubbed `journalctl --user` lines for the app's processes |
-| `live_stack` | frames of the live process, only if the user consented |
-| `notes` | the user's own text, scrubbed, at most 8 KiB |
-| `redactions` | count of replaced values per category |
+* `system`: optional OS id/version/build, kernel, compositor, bakery track,
+  breadd/API versions; architecture string; GPU driver plus PCI vendor/device
+  identifiers. No machine name, user, network address, serial or arbitrary
+  hardware inventory. Values are scrubbed strings; no field-specific byte caps
+  beyond the 1 MiB report cap are enforced today.
+* `installed_apps`: array of `{id, version}` for recognized installed bread
+  apps in bakery state. Does not enumerate unrelated software. The array has no
+  separate count cap; the report cap is 1 MiB.
+* `runtime`: `daemon_running` boolean; optional `uptime_s` unsigned integer;
+  adapter-name to status-string map; optional unsigned `modules_total` and
+  `modules_with_errors`. This is a coarse health summary, not module config or
+  arbitrary process state. Map counts and string sizes have no separate cap
+  today.
+* `markers`: at most the newest 5 markers per report. Each includes timestamp,
+  kind (`panic`, `crash`, `freeze`, `recovered`; local-only `stopped` markers
+  close a retired freeze and are not problems), optional app version, build-id,
+  message, location, signal and at most 128 frames per stored marker. The
+  freeze marker's pid and process identity (executable, boot id and kernel
+  start ticks) are local bookkeeping used only to verify a consented live
+  capture; they are removed before report serialization. A frame
+  contains optional module and symbol strings, unsigned module-relative offset,
+  and build-id. Message/location/module/symbol are scrubbed strings; the 4096
+  byte store-line limit applies on ingest. Report-level trimming can still fail
+  if the remaining non-trimmable data exceeds 1 MiB.
+* `logs` and `daemon_logs`: arrays of `{t, level, msg}` scrubbed records. The
+  builder requests at most 300 lines per app and selects only WARN/ERROR daemon
+  logs. Per-file/store limits above apply; report builder trims old app and
+  daemon logs after journal/events as necessary.
+* `journal`: strings from at most 150 `journalctl --user` lines for the selected
+  app process names; each line is cut at 2048 bytes. Journal data is optional
+  in the builder and is trimmed first to fit the report cap.
+* `live_stack`: array of frame records with the same frame shape as markers.
+  It is empty in the current CLI path: no live-process sampler or consent UI
+  supplies frames. Future capture may include only module, module-relative
+  offset, build-id and optional symbol, and only after a distinct, informed,
+  per-report user consent. It must never serialize process memory, registers,
+  environment variables, or a core dump. This is a design constraint, not a
+  currently implemented capture feature.
+* `notes`: optional scrubbed string, truncated at 8 KiB UTF-8 bytes.
+* `redactions`: map from scrub category string to unsigned count.
 
-The payload is capped at 1 MiB; the builder trims the journal, then the oldest
-events and logs, to fit.
+Free-text scrubbing is best effort: it cannot know an arbitrary word is a
+name. Build-ids are exempt from long-hex redaction for symbolication. The
+preview exists so users can inspect the exact payload.
 
-## Consent copy (single source for CLI, GUI, settings, help)
+## Consent copy (intended user-facing copy)
 
 The text is `bread_bug::consent::CONSENT_TEXT`. It is shown once, before the
 first interactive `breadbug` session (Enter acknowledges and records it; `q`
@@ -149,17 +182,49 @@ bos-settings and breadhelp reuse the same constant. In short:
 > Send, and sending is off by default. You can save the report to a file
 > instead.
 
-## Server and threat model (summary; details in breadbug-server)
+The endpoint and retention text above are ECO-66 design requirements, not a
+claim that an upload service exists. The present binary's configured default
+endpoint is `https://bugs.breadway.dev`, but it does not send data.
 
-* The intake endpoint is public and unauthenticated: treat all input as
-  hostile. Strict versioned schema validation, unknown fields rejected, hard
-  size cap, rate limits per anonymous install-id, IPs never stored.
-* The server re-scrubs everything (never trusts the client) and quarantines
-  payloads that still look personal.
-* Report text is never interpolated into shell, SQL or templates, is escaped
-  wherever rendered, and is data (never instructions) to any LLM step.
-* The deletion token is returned once and stored only as a hash. Raw reports
-  are deleted after 90 days; cluster metadata is kept.
-* Threats considered: oversize and decompression bombs, flooding, malformed
-  JSON, log and markdown injection, XSS in the triage UI, prompt injection,
-  scraping of other users' reports, and re-identification via free text.
+## Server trust boundaries and threat model (requirements, not current controls)
+
+The public upload service is a separate trust boundary. Before launch, route
+public traffic through Aegis Caddy to an isolated intake service on Hestia; do
+not expose the application listener directly. Validate TLS/host and request
+size at the edge and again in the service. Use strict versioned-schema
+validation, reject unknown fields, cap decompressed and serialized sizes, and
+never trust client-side scrubbing. Treat report contents as hostile: parameterize
+database access, escape rendered text, prevent log/markdown injection, and
+pass text to any future LLM as untrusted data, never instructions. Do not send
+data to third-party model APIs.
+
+The intake service must have no shared credentials with Forgejo, bread services
+or other containers. Store raw reports separately from derived cluster
+metadata. Symbol files must live in a dedicated, read-only-to-symbolicator
+store, keyed by build-id, isolated from intake and public web paths. Only the
+symbolication worker may read symbols; intake, triage UI, unrelated services
+and public users must not have filesystem or API read access. CI publication,
+retention and access auditing for symbols must be defined before launch.
+
+For abuse controls, use a rotating, random anonymous install-id that contains
+no account or hardware identity. Bind it to a server-issued token or keyed
+server-side representation; rotate it on a documented schedule and avoid
+storing raw IP addresses. Apply per-install and per-IP short-window rate limits
+without retaining IPs in report records, global abuse/flood limits, request and
+concurrency caps, and a quarantine path for malformed/suspicious reports. A
+rotating identifier is not authentication and can be reset or spoofed; it must
+not be treated as proof of a unique person or device. These are launch
+requirements: this repo currently implements none of the network, edge, rate
+limit, install-id, isolated-store or symbol-store controls.
+
+Proposed retention is raw reports for 90 days with cluster metadata retained.
+Deletion by receipt must be designed to cover raw report copies and backups;
+state explicitly what cannot be removed, including derived cluster metadata.
+No deletion endpoint, receipt, retention enforcement, server validation,
+server-side rescrubbing or triage UI is implemented in this repo.
+
+Threats to design for include oversize/decompression bombs, flooding, malformed
+JSON, log and markdown injection, XSS in triage, prompt injection, cross-user
+report access and re-identification from free text. A human should promote
+clusters to breadboard issues; automated issue creation is out of scope until
+clustering is proven safe.

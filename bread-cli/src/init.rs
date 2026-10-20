@@ -361,7 +361,8 @@ fn scan_dir_for_conflict(dir: &Path, depth: usize) -> Result<Option<PathBuf>> {
         Err(_) => return Ok(None), // an unreadable subdir shouldn't abort the whole command
     };
     for entry in entries {
-        let entry = entry.context("reading directory entry while scanning for compositor conflicts")?;
+        let entry =
+            entry.context("reading directory entry while scanning for compositor conflicts")?;
         let path = entry.path();
         let file_type = entry.file_type()?;
 
@@ -480,7 +481,10 @@ fn plan_undo(content: &str) -> Option<String> {
         // Remove the one separator blank line `plan_install` would have
         // added, if it's still the line immediately preceding the block.
         let idx_in_new = start - 1;
-        if new_lines.get(idx_in_new).is_some_and(|l| l.trim().is_empty()) {
+        if new_lines
+            .get(idx_in_new)
+            .is_some_and(|l| l.trim().is_empty())
+        {
             new_lines.remove(idx_in_new);
         }
     }
@@ -527,7 +531,10 @@ fn read_layerrules_json(hypr_dir: &Path) -> Option<Result<LayerRulesFile, String
         Err(e) => Some(Err(format!("could not read {}: {e}", path.display()))),
         Ok(raw) => match serde_json::from_str::<LayerRulesFile>(&raw) {
             Ok(v) => Some(Ok(v)),
-            Err(e) => Some(Err(format!("could not parse {} as JSON: {e}", path.display()))),
+            Err(e) => Some(Err(format!(
+                "could not parse {} as JSON: {e}",
+                path.display()
+            ))),
         },
     }
 }
@@ -618,10 +625,13 @@ fn print_proposed_change(path: &Path, original: &str, new_content: &str, change:
             println!("  (already installed: no change needed)");
         }
         ChangeKind::Appended => {
-            let (start, end) =
-                find_managed_block(new_content).expect("block was just appended");
+            let (start, end) = find_managed_block(new_content).expect("block was just appended");
             let new_lines: Vec<&str> = new_content.lines().collect();
-            println!("  appended at end of file (new lines {}-{}):", start + 1, end + 1);
+            println!(
+                "  appended at end of file (new lines {}-{}):",
+                start + 1,
+                end + 1
+            );
             println!();
             for (i, line) in new_lines[start..=end].iter().enumerate() {
                 println!("  + {:>4}  {}", start + 1 + i, line);
@@ -638,8 +648,7 @@ fn print_proposed_change(path: &Path, original: &str, new_content: &str, change:
             for (i, line) in old_lines[*start..=*end].iter().enumerate() {
                 println!("  - {:>4}  {}", start + 1 + i, line);
             }
-            let (nstart, nend) =
-                find_managed_block(new_content).expect("block was just replaced");
+            let (nstart, nend) = find_managed_block(new_content).expect("block was just replaced");
             let new_lines: Vec<&str> = new_content.lines().collect();
             for (i, line) in new_lines[nstart..=nend].iter().enumerate() {
                 println!("  + {:>4}  {}", nstart + 1 + i, line);
@@ -699,7 +708,9 @@ fn print_manual_snippet(hypr_dir: &Path, reason: ManualReason) {
         ManualReason::ConfOnly(_) | ManualReason::Unrecognized => {
             match read_layerrules_json(hypr_dir) {
                 Some(Ok(rules)) if !rules.is_empty() => {
-                    println!("Paste this into hyprland.conf to get the same blur/opacity behavior:");
+                    println!(
+                        "Paste this into hyprland.conf to get the same blur/opacity behavior:"
+                    );
                     println!();
                     print!("{}", render_conf_snippet(&rules));
                 }
@@ -810,7 +821,11 @@ fn run_install(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
     let bread_lua_path = write_bread_lua(hypr_dir)?;
     let backup = unique_backup_path(&lua_path);
     fs::copy(&lua_path, &backup).with_context(|| {
-        format!("failed to back up {} to {}", lua_path.display(), backup.display())
+        format!(
+            "failed to back up {} to {}",
+            lua_path.display(),
+            backup.display()
+        )
     })?;
     fs::write(&lua_path, &new_content)
         .with_context(|| format!("failed to write {}", lua_path.display()))?;
@@ -849,7 +864,11 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
 
     println!("Proposed change to {}:", lua_path.display());
     println!();
-    println!("  bread block at lines {}-{} will be removed:", start + 1, end + 1);
+    println!(
+        "  bread block at lines {}-{} will be removed:",
+        start + 1,
+        end + 1
+    );
     println!();
     let old_lines: Vec<&str> = original.lines().collect();
     for (i, line) in old_lines[start..=end].iter().enumerate() {
@@ -876,7 +895,11 @@ fn run_undo(hypr_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
 
     let backup = unique_backup_path(&lua_path);
     fs::copy(&lua_path, &backup).with_context(|| {
-        format!("failed to back up {} to {}", lua_path.display(), backup.display())
+        format!(
+            "failed to back up {} to {}",
+            lua_path.display(),
+            backup.display()
+        )
     })?;
     fs::write(&lua_path, &new_content)
         .with_context(|| format!("failed to write {}", lua_path.display()))?;
@@ -1081,7 +1104,11 @@ mod tests {
     fn detect_layout_prefers_lua_when_present() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("hyprland.lua"), "-- lua config\n").unwrap();
-        fs::write(dir.path().join("hyprland.conf"), "monitor=,preferred,auto,1\n").unwrap();
+        fs::write(
+            dir.path().join("hyprland.conf"),
+            "monitor=,preferred,auto,1\n",
+        )
+        .unwrap();
         match detect_layout(dir.path()) {
             ConfigLayout::Lua(p) => assert_eq!(p, dir.path().join("hyprland.lua")),
             other => panic!("expected Lua layout, got {other:?}"),
@@ -1091,7 +1118,11 @@ mod tests {
     #[test]
     fn detect_layout_falls_back_to_conf_only() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("hyprland.conf"), "monitor=,preferred,auto,1\n").unwrap();
+        fs::write(
+            dir.path().join("hyprland.conf"),
+            "monitor=,preferred,auto,1\n",
+        )
+        .unwrap();
         match detect_layout(dir.path()) {
             ConfigLayout::ConfOnly(p) => assert_eq!(p, dir.path().join("hyprland.conf")),
             other => panic!("expected ConfOnly layout, got {other:?}"),
@@ -1143,8 +1174,11 @@ mod tests {
     #[test]
     fn no_conflict_on_unrelated_content() {
         let dir = TempDir::new().unwrap();
-        fs::write(dir.path().join("hyprland.lua"), "hl.window_rule({ class = \"kitty\" })\n")
-            .unwrap();
+        fs::write(
+            dir.path().join("hyprland.lua"),
+            "hl.window_rule({ class = \"kitty\" })\n",
+        )
+        .unwrap();
         assert_eq!(find_breadbar_conflict(dir.path()).unwrap(), None);
     }
 

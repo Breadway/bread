@@ -106,15 +106,16 @@ async fn hyprland_request_json(request: &str) -> Result<serde_json::Value> {
     stream.shutdown().await?;
     let mut buf = String::new();
     stream.read_to_string(&mut buf).await?;
-    serde_json::from_str(&buf)
-        .map_err(|e| anyhow!("hyprland {request} JSON: {e}"))
+    serde_json::from_str(&buf).map_err(|e| anyhow!("hyprland {request} JSON: {e}"))
 }
 
 /// Query current monitors / workspaces / focus and emit one
 /// `hyprland.snapshot` RawEvent. The normalizer turns that into
 /// `bread.hyprland.snapshot`; the state engine replaces topology from it.
 async fn emit_topology_snapshot(tx: &mpsc::Sender<RawEvent>) -> Result<()> {
-    let monitors = hyprland_request_json("j/monitors").await.unwrap_or(json!([]));
+    let monitors = hyprland_request_json("j/monitors")
+        .await
+        .unwrap_or(json!([]));
     let workspaces = hyprland_request_json("j/workspaces")
         .await
         .unwrap_or(json!([]));

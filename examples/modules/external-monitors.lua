@@ -98,8 +98,9 @@ local function connected()
     return internal or "eDP-1", externals
 end
 
--- BOS Hyprland talks Lua (`hl.monitor`). Stock Hyprland uses the
--- `monitor=` keyword. Try eval first, then keyword.
+-- Hyprland configured with hyprland.lua (as on BOS) takes `hl.monitor` through
+-- eval. Hyprland configured with hyprland.conf uses the `monitor` keyword. Try
+-- eval first (it answers "ok" on success), then the keyword.
 local function apply_monitor(opts)
     local extra = ""
     if opts.mirror and opts.mirror ~= "" then
@@ -114,7 +115,7 @@ local function apply_monitor(opts)
         extra
     )
     local resp = bread.hyprland.eval(expr)
-    if type(resp) == "string" and resp:match("error") then
+    if not (type(resp) == "string" and resp:match("^%s*ok")) then
         local spec = string.format(
             "%s, %s, %s, %s",
             opts.output,
@@ -125,7 +126,10 @@ local function apply_monitor(opts)
         if opts.mirror and opts.mirror ~= "" then
             spec = spec .. ", mirror, " .. opts.mirror
         end
-        bread.hyprland.keyword("monitor", spec)
+        local ok, err = pcall(bread.hyprland.keyword, "monitor", spec)
+        if not ok then
+            bread.warn("external-monitors: could not configure " .. opts.output .. ": " .. tostring(err))
+        end
     end
 end
 
