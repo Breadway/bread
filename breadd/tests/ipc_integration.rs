@@ -2059,7 +2059,10 @@ async fn bug_reload_applies_exclusions_and_wipes_newly_excluded_apps() -> Result
     )?;
     let res = harness.send_request("bug.reload", json!({})).await?;
     assert_eq!(res["excluded"], json!(["clip"]));
-    assert!(!reader.apps().contains(&"clip".to_string()), "excluded app's data must be wiped");
+    assert!(
+        !reader.apps().contains(&"clip".to_string()),
+        "excluded app's data must be wiped"
+    );
     let after = harness
         .send_request("bug.log", json!({ "app": "clip", "msg": "after" }))
         .await?;
@@ -2070,6 +2073,72 @@ async fn bug_reload_applies_exclusions_and_wipes_newly_excluded_apps() -> Result
         .await?;
     assert_eq!(other["stored"], json!(true));
 
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_reload_drops_an_excluded_app_from_freeze_tracking() -> Result<()> {
+    let harness = TestHarness::spawn_with_config_file("breadbug.toml", "freeze_after_ms = 200\n")?;
+    harness.wait_until_ready().await?;
+    let stream = UnixStream::connect(harness.socket_path()).await?;
+    let (read_half, mut write_half) = stream.into_split();
+    let subscribe =
+        json!({"id":"sub","method":"events.subscribe","params":{"filter":"bread.bug.*"}});
+    write_half
+        .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
+        .await?;
+    let mut reader = BufReader::new(read_half).lines();
+    reader.next_line().await?;
+
+    let mut child = harness.spawn_app_child("clip")?;
+    let pid = child.id();
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({"app":"clip", "pid":pid, "interval_ms":50}),
+        )
+        .await?;
+    let freeze = timeout(Duration::from_secs(8), reader.next_line())
+        .await??
+        .ok_or_else(|| anyhow!("no freeze event"))?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&freeze)?["event"],
+        json!("bread.bug.freeze")
+    );
+
+    // Exclude, then un-exclude. Reload must drop the tracked instance, so the
+    // next heartbeat starts fresh instead of reporting a recovery of a freeze
+    // the user just opted out of.
+    fs::write(
+        harness.config_home().join("bread/breadbug.toml"),
+        "excluded_apps = [\"clip\"]\nfreeze_after_ms = 200\n",
+    )?;
+    let res = harness.send_request("bug.reload", json!({})).await?;
+    assert_eq!(res["excluded"], json!(["clip"]));
+    fs::write(
+        harness.config_home().join("bread/breadbug.toml"),
+        "excluded_apps = []\nfreeze_after_ms = 200\n",
+    )?;
+    harness.send_request("bug.reload", json!({})).await?;
+
+    harness
+        .send_request(
+            "bug.heartbeat",
+            json!({"app":"clip", "pid":pid, "interval_ms":50}),
+        )
+        .await?;
+    let next = timeout(Duration::from_secs(8), reader.next_line())
+        .await??
+        .ok_or_else(|| anyhow!("no event after the post-reload heartbeat"))?;
+    assert_eq!(
+        serde_json::from_str::<Value>(&next)?["event"],
+        json!("bread.bug.freeze"),
+        "a reload-excluded app must start fresh, not recover: {next}"
+    );
+
+    child.kill()?;
+    child.wait()?;
     harness.shutdown();
     Ok(())
 }
