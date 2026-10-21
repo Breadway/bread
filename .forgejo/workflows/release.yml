@@ -31,6 +31,17 @@ jobs:
               exit 1
           fi
 
+      - name: check promotion through beta
+        run: |
+          set -euo pipefail
+          SRC_DIR="${BREAD_CI_JOB_DIR}/src"
+          COMMIT="$(git -C "${SRC_DIR}" rev-parse HEAD)"
+          ECO_DIR="$(mktemp -d /tmp/bread-promotion-XXXXXX)"
+          trap 'rm -rf -- "${ECO_DIR}"' EXIT
+          git clone --depth 1 https://git.breadway.dev/Breadway/bread-ecosystem.git "${ECO_DIR}"
+          bash "${ECO_DIR}/scripts/check-promotion.sh" \
+            "${GITHUB_REPOSITORY}" "bread" "${GITHUB_REF_NAME}" "${COMMIT}"
+
       - name: build
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo build --release --locked
 
