@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "bread-bug"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bread-scrub",
@@ -318,7 +318,7 @@ dependencies = [
 
 [[package]]
 name = "bread-cli"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bread-shared",
@@ -336,7 +336,7 @@ dependencies = [
 
 [[package]]
 name = "bread-emit"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "bread-shared",
  "serde_json",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "bread-module-host"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bread-shared",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "bread-scrub"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "bread-shared"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "dirs",
  "serde",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "breadbug"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bread-bug",
@@ -391,7 +391,7 @@ dependencies = [
 
 [[package]]
 name = "breadd"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
