@@ -1606,7 +1606,7 @@ Only units named in `[adapters.systemd] units = [...]` are watched: subscribing 
 
 #### Podman (containers)
 
-Degrades to simply not emitting if the `podman` binary isn't installed: no daemon startup dependency on it.
+Optional. When the `podman` binary is not on `PATH` the adapter is disabled once with a single informational log line and reported as `unavailable` by `bread doctor`, instead of failing and retrying on a backoff loop. A `podman` that exists but then fails (for example a stopped podman socket) still takes the normal error-and-retry path.
 
 | Event | Data |
 |-------|------|

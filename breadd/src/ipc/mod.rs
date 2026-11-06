@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::adapters::AdapterStatus;
 use crate::bugstore;
@@ -25,6 +25,9 @@ use crate::core::state_engine::StateHandle;
 use crate::lua::RuntimeHandle;
 use crate::module_host::ModuleHostRegistry;
 
+use connection_log::{ConnectionFailureLog, FailureLogDecision, PeerId};
+
+mod connection_log;
 mod module_host_bridge;
 
 /// The Bread Automation API version (Lua API surface + IPC methods + event
@@ -71,6 +74,25 @@ pub struct Server {
     bug_store: Option<Arc<bread_bug::store::Store>>,
     /// Freeze watchdog fed by `bug.heartbeat`.
     bug_watchdog: Arc<crate::watchdog::Watchdog>,
+    /// Per-peer rate limiter for connection-level failures (a client that
+    /// connects and drops every couple of seconds must not warn every time).
+    connection_failures: Arc<std::sync::Mutex<ConnectionFailureLog>>,
+}
+
+/// Map `SO_PEERCRED` to a rate-limit key. A failure to read credentials is
+/// not fatal: the connection still serves normally, just under an unlabelled
+/// key.
+fn peer_id(cred: std::io::Result<tokio::net::unix::UCred>) -> PeerId {
+    match cred {
+        Ok(cred) => match cred.pid() {
+            Some(pid) => PeerId::Pid(pid),
+            None => PeerId::Uid {
+                uid: cred.uid(),
+                gid: cred.gid(),
+            },
+        },
+        Err(_) => PeerId::Unknown,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +142,7 @@ impl Server {
             hyprland: module_host_bridge::HyprlandBridge::new(),
             bug_store,
             bug_watchdog,
+            connection_failures: Arc::new(std::sync::Mutex::new(ConnectionFailureLog::default())),
             subscription_count,
             event_buffer,
             started_at: Instant::now(),
@@ -167,10 +190,13 @@ impl Server {
                 }
                 accept = listener.accept() => {
                     let (stream, _) = accept?;
+                    // Cheap peer identity for the failure log: SO_PEERCRED is
+                    // already available on the accepted socket.
+                    let peer = peer_id(stream.peer_cred());
                     let server = self.clone();
                     tokio::spawn(async move {
                         if let Err(err) = server.handle_connection(stream).await {
-                            warn!(error = %err, "ipc connection failed");
+                            server.log_connection_failure(peer, &err);
                         }
                     });
                 }
@@ -178,6 +204,39 @@ impl Server {
         }
 
         Ok(())
+    }
+
+    /// Log a connection-level failure, rate-limited per peer and error.
+    ///
+    /// The first failure always warns. An identical repeat from the same peer
+    /// within the interval goes to DEBUG with a running count, and the next
+    /// warning after the interval carries that count. Nothing is suppressed
+    /// for a different peer or a different error.
+    fn log_connection_failure(&self, peer: PeerId, err: &anyhow::Error) {
+        let decision = {
+            let mut log = self
+                .connection_failures
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            log.record(peer, &err.to_string(), Instant::now())
+        };
+
+        match decision {
+            FailureLogDecision::Warn { suppressed: 0 } => {
+                warn!(peer = %peer, error = %err, "ipc connection failed");
+            }
+            FailureLogDecision::Warn { suppressed } => {
+                warn!(
+                    peer = %peer,
+                    suppressed,
+                    error = %err,
+                    "ipc connection failed"
+                );
+            }
+            FailureLogDecision::Suppressed => {
+                debug!(peer = %peer, error = %err, "ipc connection failed (repeat suppressed)");
+            }
+        }
     }
 
     async fn handle_connection(&self, stream: UnixStream) -> Result<()> {
