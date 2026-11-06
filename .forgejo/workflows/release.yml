@@ -34,6 +34,12 @@ jobs:
       - name: build
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo build --release --locked
 
+      # The GTK front end is its own workspace so the daemon build stays free
+      # of GTK headers. It is built with the same shared CI image, which has
+      # the GTK4 development packages, and lands in the same target cache.
+      - name: build breadbug GUI and launcher
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo build --release --locked --manifest-path breadbug-gui/Cargo.toml
+
       - name: test
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --release --locked --workspace
 
@@ -44,7 +50,8 @@ jobs:
           cd "$BREAD_CI_JOB_DIR/src"
           bash ci/publish-symbols.sh \
             target/release/breadd target/release/bread target/release/bread-emit \
-            target/release/bread-module-host target/release/breadbug
+            target/release/bread-module-host target/release/breadbug \
+            target/release/breadbug-gui target/release/breadbug-launch
 
       - name: prepare artifacts
         run: |
@@ -52,7 +59,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           PKG_DIR="/srv/breadway-dl/bread/${VERSION}"
           mkdir -p "${PKG_DIR}"
-          for bin in breadd bread bread-emit bread-module-host breadbug; do
+          for bin in breadd bread bread-emit bread-module-host breadbug breadbug-gui breadbug-launch; do
             cp "$BREAD_CI_JOB_DIR/src/target/release/${bin}" "${PKG_DIR}/${bin}-x86_64"
             strip "${PKG_DIR}/${bin}-x86_64"
             sha256sum "${PKG_DIR}/${bin}-x86_64" | awk '{print $1}' \
@@ -96,11 +103,15 @@ jobs:
             "${PKG_DIR}/bread-emit-x86_64" \
             "${PKG_DIR}/bread-module-host-x86_64" \
             "${PKG_DIR}/breadbug-x86_64" \
+            "${PKG_DIR}/breadbug-gui-x86_64" \
+            "${PKG_DIR}/breadbug-launch-x86_64" \
             "${PKG_DIR}/breadd-x86_64.sha256" \
             "${PKG_DIR}/bread-x86_64.sha256" \
             "${PKG_DIR}/bread-emit-x86_64.sha256" \
             "${PKG_DIR}/bread-module-host-x86_64.sha256" \
             "${PKG_DIR}/breadbug-x86_64.sha256" \
+            "${PKG_DIR}/breadbug-gui-x86_64.sha256" \
+            "${PKG_DIR}/breadbug-launch-x86_64.sha256" \
             --clobber
 
       # Runs last so no earlier step loses its tree. Removes only this job's

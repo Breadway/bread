@@ -108,6 +108,7 @@ dependencies = [
  "sha2",
  "toml 0.8.23",
  "ureq",
+ "url",
 ]
 
 [[package]]

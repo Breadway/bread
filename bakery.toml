@@ -1,7 +1,7 @@
 name = "bread"
 description = "Reactive automation daemon and CLI for Linux desktops"
-binaries = ["breadd", "bread", "bread-emit", "bread-module-host", "breadbug"]
-system_deps = ["systemd-libs", "openssl", "zlib"]
+binaries = ["breadd", "bread", "bread-emit", "bread-module-host", "breadbug", "breadbug-gui", "breadbug-launch"]
+system_deps = ["systemd-libs", "openssl", "zlib", "gtk4"]
 optional_system_deps = ["bluez", "hyprland"]
 bread_deps = []
 license_file = "LICENSE"

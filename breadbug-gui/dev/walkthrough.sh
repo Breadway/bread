@@ -13,6 +13,11 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done; rm -rf "$T"; }
 trap cleanup EXIT
 
+# Sending on is the default for the walkthrough so the done page (queued when
+# the endpoint is unreachable) is part of every run. Pass SENDING= to leave it
+# off and capture only the first four pages.
+SENDING="${SENDING-http://127.0.0.1:9/}"
+
 cargo build -q --manifest-path "$HERE/Cargo.toml" --example walkthrough
 BIN="$(cargo metadata --manifest-path "$HERE/Cargo.toml" --format-version 1 --no-deps | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/debug/examples/walkthrough"
 S="$T/state/bread/bugstore/apps"
@@ -25,11 +30,22 @@ echo '{"track":"stable","packages":{"breadclip":{"version":"0.3.1","name":"bread
 [ -n "${SENDING:-}" ] && printf 'upload_enabled = true\nendpoint = "%s"\n' "$SENDING" > "$T/cfg/bread/breadbug.toml"
 [ -n "${SKIP_CONSENT:-}" ] && { mkdir -p "$T/state/bread/breadbug"; echo 1 > "$T/state/bread/breadbug/consent-shown"; }
 
-XDG_RUNTIME_DIR="$T/runtime" gtk4-broadwayd --address 127.0.0.1 --port "$((8080 + N))" ":$N" >/dev/null 2>&1 &
+XDG_RUNTIME_DIR="$T/runtime" GDK_BACKEND=broadway gtk4-broadwayd --address 127.0.0.1 --port "$((8080 + N))" ":$N" >/dev/null 2>&1 &
 PIDS+=($!)
 sleep 1
+# No dbus-run-session: GTK_USE_PORTAL=0 and an isolated HOME are enough, and a
+# session bus that cannot be reached was the source of a shutdown bus error.
 env -u WAYLAND_DISPLAY -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
     GDK_BACKEND=broadway BROADWAY_DISPLAY=":$N" GTK_USE_PORTAL=0 \
     HOME="$T/home" XDG_STATE_HOME="$T/state" XDG_CONFIG_HOME="$T/cfg" XDG_RUNTIME_DIR="$T/runtime" \
-    dbus-run-session -- "$BIN" "$OUT" 2>&1 \
+    "$BIN" "$OUT" 2>&1 \
     | grep -v "portal\|dbus-daemon\|xdph\|^$"
+
+pages="2-pick 2-selected 3-details 4-preview 4-compact"
+[ -n "${SKIP_CONSENT:-}" ] || pages="1-consent $pages"
+[ -n "$SENDING" ] && pages="$pages 5-done"
+for page in $pages; do
+    file="$OUT/$page.png"
+    [ -s "$file" ] || { echo "walkthrough: $file was not written" >&2; exit 1; }
+done
+echo "walkthrough: all pages rendered"

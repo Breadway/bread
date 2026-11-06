@@ -6,7 +6,9 @@
 //! is only layout and wiring. Slow work (building a report runs helper
 //! commands; sending touches the network) runs off the UI thread.
 
+pub mod launch;
 pub mod preview;
+mod style;
 pub mod text;
 
 use std::cell::RefCell;
@@ -115,6 +117,7 @@ pub struct Ui {
 /// Build and show the window.
 pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> Ui {
     bread_theme::gtk::apply_shared();
+    style::apply_global();
 
     let apps = session::apps(&env);
     let first_run = !consent::seen(&env.state_dir);
@@ -132,7 +135,8 @@ pub fn build_window(app: &Application, env: Env, preselect: Option<String>) -> U
         .default_width(780)
         .default_height(660)
         .build();
-    bread_theme::gtk::bind_window_auto_with_app_css(&window, |_| String::new());
+    window.add_css_class("breadbug");
+    bread_theme::gtk::bind_window_auto_with_app_css(&window, |_| style::CSS.to_string());
 
     let stack = Stack::new();
     stack.set_vexpand(true);

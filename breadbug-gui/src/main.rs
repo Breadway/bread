@@ -1,25 +1,38 @@
 use breadbug::Env;
+use breadbug_gui::launch::{self, Frontend};
 use gtk4::prelude::*;
 
+const USAGE: &str = "usage: breadbug-gui [--app APP] [--tty]\n\
+                     \n\
+                     Opens the windowed reporter when a display is available.\n\
+                     With --tty, or with neither WAYLAND_DISPLAY nor DISPLAY set,\n\
+                     it hands off to the breadbug terminal client instead.";
+
 fn main() -> gtk4::glib::ExitCode {
-    // `breadbug-gui [--app ID]`: preselect an app (the crash notification
-    // passes the app that crashed).
-    let mut args = std::env::args().skip(1);
-    let mut preselect = None;
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--app" => preselect = args.next(),
-            "--help" | "-h" => {
-                println!("usage: breadbug-gui [--app APP]");
-                return gtk4::glib::ExitCode::SUCCESS;
-            }
-            other => {
-                eprintln!("breadbug-gui: unknown argument {other}");
-                return gtk4::glib::ExitCode::FAILURE;
-            }
+    let args = match launch::parse(std::env::args().skip(1)) {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("{err}");
+            return gtk4::glib::ExitCode::FAILURE;
         }
+    };
+    if args.help {
+        println!("{USAGE}");
+        return gtk4::glib::ExitCode::SUCCESS;
     }
 
+    if launch::choose(args.tty, launch::display_available()) == Frontend::Tty {
+        // No display: the same invocation belongs to the terminal client.
+        let cli = launch::sibling("breadbug");
+        let err = launch::exec(&cli, &args.forwarded());
+        eprintln!(
+            "breadbug-gui: could not start {}: {err}\n{USAGE}",
+            cli.display()
+        );
+        return gtk4::glib::ExitCode::FAILURE;
+    }
+
+    let preselect = args.app.clone();
     let app = gtk4::Application::builder()
         .application_id("com.breadway.breadbug")
         .build();

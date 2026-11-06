@@ -255,6 +255,8 @@ exactly what would be sent first. See [docs/breadbug.md](docs/breadbug.md).
 
 ```bash
 breadbug                          # pick an app, review the report, save or send
+breadbug-launch                   # the same, in the GTK4 window when a display exists
+breadbug-launch --tty --app clip  # force the terminal client
 breadbug list                     # installed bread apps, recent problems first
 breadbug --app clip --dry-run     # print the exact report
 breadbug --app clip --save r.json # save it to a file; nothing is sent
