@@ -2,6 +2,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bread_shared::{now_unix_ms, AdapterSource, RawEvent};
 use serde_json::{json, Value};
+use std::ffi::OsStr;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -9,6 +11,33 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use crate::adapters::Adapter;
+
+/// Whether the optional `podman` CLI is present on `PATH`.
+///
+/// The manager probes this once before spawning the adapter. Podman is an
+/// optional integration: a machine without it should report the adapter as
+/// unavailable and stay quiet, not fail, restart with backoff and log an
+/// error forever. A binary that exists but cannot run still takes the normal
+/// spawn-and-retry path, so real failures remain visible.
+pub fn binary_available() -> bool {
+    match std::env::var_os("PATH") {
+        Some(path) => binary_available_in("podman", &path),
+        None => false,
+    }
+}
+
+/// Testable core of [`binary_available`]: look for an executable regular file
+/// named `program` in each directory of `path`, the same way the OS resolves
+/// `Command::new(program)`.
+fn binary_available_in(program: &str, path: &OsStr) -> bool {
+    std::env::split_paths(path).any(|dir| {
+        let candidate = dir.join(program);
+        match std::fs::metadata(&candidate) {
+            Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+            Err(_) => false,
+        }
+    })
+}
 
 /// Watches `podman events --format json` for container lifecycle changes and
 /// forwards them as [`RawEvent`]s.
@@ -205,6 +234,51 @@ fn map_podman_event(value: &Value) -> Option<(String, Value)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    fn write_program(dir: &Path, name: &str, mode: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn absent_binary_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!binary_available_in("podman", dir.path().as_os_str()));
+    }
+
+    #[test]
+    fn executable_binary_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        write_program(dir.path(), "podman", 0o755);
+        assert!(binary_available_in("podman", dir.path().as_os_str()));
+    }
+
+    #[test]
+    fn non_executable_file_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        write_program(dir.path(), "podman", 0o644);
+        assert!(!binary_available_in("podman", dir.path().as_os_str()));
+    }
+
+    #[test]
+    fn directory_named_podman_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("podman")).unwrap();
+        assert!(!binary_available_in("podman", dir.path().as_os_str()));
+    }
+
+    #[test]
+    fn later_path_entry_is_searched() {
+        let empty = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        write_program(bin.path(), "podman", 0o755);
+        let path = std::env::join_paths([empty.path(), bin.path()]).unwrap();
+        assert!(binary_available_in("podman", &path));
+    }
 
     fn container_event(action: &str, extra_attrs: Value) -> Value {
         let mut attributes = json!({

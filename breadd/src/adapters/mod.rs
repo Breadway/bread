@@ -22,11 +22,16 @@ pub mod power_upower;
 pub mod systemd;
 pub mod udev;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterStatus {
     Connected,
     Disconnected,
+    /// An optional adapter was enabled but its external dependency (for
+    /// example the `podman` binary) is not installed. Unlike `Disconnected`
+    /// this is terminal, not a reconnect that is still being retried, so
+    /// `bread doctor` can tell "not installed" from "should be running".
+    Unavailable,
 }
 
 #[async_trait]
@@ -67,6 +72,19 @@ impl Manager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
+        self.start_all_with(podman::binary_available).await
+    }
+
+    /// [`Self::start_all`] with the optional-adapter probe injected.
+    ///
+    /// The probe is a parameter so a test can prove the absent-dependency
+    /// decision actually consumes it. Calling `start_all` from tests instead
+    /// would depend on the host's `PATH` and would still pass if this function
+    /// hard-coded "available".
+    async fn start_all_with<F>(&self, podman_available: F) -> Result<()>
+    where
+        F: FnOnce() -> bool,
+    {
         info!("starting adapters");
 
         if self.config.adapters.udev.enabled {
@@ -131,10 +149,42 @@ impl Manager {
         }
 
         if self.config.adapters.podman.enabled {
-            self.spawn_adapter(podman::PodmanAdapter::new());
+            // Podman is optional. Probe once so a machine without the binary
+            // gets a single informational line and a terminal "unavailable"
+            // status instead of an error and a 32-second backoff restart loop
+            // for the lifetime of the daemon. A binary that exists but fails
+            // later still goes through the normal supervisor retry path.
+            self.start_optional_adapter(podman::PodmanAdapter::new(), podman_available())
+                .await;
         }
 
         Ok(())
+    }
+
+    /// Spawn an adapter backed by an optional external dependency, or mark it
+    /// [`AdapterStatus::Unavailable`] without entering the retry loop.
+    ///
+    /// Returns whether the adapter was started. Kept separate from
+    /// [`Self::spawn_adapter`] so the absent-dependency path is unit-testable
+    /// without manipulating the process `PATH` or spawning a real binary.
+    async fn start_optional_adapter<A>(&self, adapter: A, available: bool) -> bool
+    where
+        A: Adapter + Clone + 'static,
+    {
+        if !available {
+            info!(
+                adapter = adapter.name(),
+                "optional adapter disabled: external dependency not found"
+            );
+            self.status
+                .write()
+                .await
+                .insert(adapter.name().to_string(), AdapterStatus::Unavailable);
+            return false;
+        }
+
+        self.spawn_adapter(adapter);
+        true
     }
 
     fn spawn_adapter<A>(&self, adapter: A)
@@ -169,5 +219,161 @@ impl Manager {
                 result
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuffer {
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    #[derive(Clone)]
+    struct StubAdapter;
+
+    #[async_trait]
+    impl Adapter for StubAdapter {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+
+        async fn run(&self, _tx: mpsc::Sender<RawEvent>) -> Result<()> {
+            std::future::pending::<()>().await;
+            Ok(())
+        }
+    }
+
+    fn manager(shutdown_rx: watch::Receiver<bool>) -> (Manager, mpsc::Receiver<RawEvent>) {
+        let (raw_tx, raw_rx) = mpsc::channel(8);
+        (Manager::new(raw_tx, Config::default(), shutdown_rx), raw_rx)
+    }
+
+    fn manager_with_config(
+        config: Config,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> (Manager, mpsc::Receiver<RawEvent>) {
+        let (raw_tx, raw_rx) = mpsc::channel(8);
+        (Manager::new(raw_tx, config, shutdown_rx), raw_rx)
+    }
+
+    /// Every adapter except podman disabled, so `start_all_with` touches only
+    /// the optional-adapter decision under test.
+    fn podman_only_config() -> Config {
+        let mut config = Config::default();
+        config.adapters.udev.enabled = false;
+        config.adapters.hyprland.enabled = false;
+        config.adapters.power.enabled = false;
+        config.adapters.bluetooth.enabled = false;
+        config.adapters.network.enabled = false;
+        config.adapters.podman.enabled = true;
+        config
+    }
+
+    #[tokio::test]
+    async fn absent_optional_dependency_logs_once_and_reports_unavailable() {
+        let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (manager, mut raw_rx) = manager_with_config(podman_only_config(), shutdown_rx);
+
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(logs.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Inject the probe result rather than depending on the host PATH. The
+        // probe must actually be consulted: if `start_all_with` ignored it (or
+        // hard-coded "available"), this flag stays false and the assertions
+        // below see a spawned/retrying podman adapter instead of Unavailable.
+        let probed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probed_in_closure = probed.clone();
+        manager
+            .start_all_with(move || {
+                probed_in_closure.store(true, std::sync::atomic::Ordering::SeqCst);
+                false
+            })
+            .await
+            .unwrap();
+        assert!(
+            probed.load(std::sync::atomic::Ordering::SeqCst),
+            "start_all must consult the optional-adapter probe"
+        );
+
+        // Give a hypothetical retry loop time to log again, then confirm the
+        // status never flips to connected/disconnected and nothing was sent.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let status = manager.status_handle().read().await.clone();
+        assert_eq!(status.get("podman"), Some(&AdapterStatus::Unavailable));
+        assert!(raw_rx.try_recv().is_err());
+
+        let contents = logs.contents();
+        assert_eq!(
+            contents
+                .matches("optional adapter disabled: external dependency not found")
+                .count(),
+            1,
+            "expected exactly one informational line, got: {contents}"
+        );
+        assert!(
+            !contents.contains("adapter task failed"),
+            "absent optional dependency must not reach the error/retry path: {contents}"
+        );
+    }
+
+    #[tokio::test]
+    async fn present_optional_dependency_spawns_adapter() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (manager, _raw_rx) = manager(shutdown_rx);
+
+        let started = manager.start_optional_adapter(StubAdapter, true).await;
+        assert!(
+            started,
+            "an available dependency must keep the adapter active"
+        );
+
+        let status = manager.status_handle();
+        for _ in 0..50 {
+            if status.read().await.get("stub") == Some(&AdapterStatus::Connected) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            status.read().await.get("stub"),
+            Some(&AdapterStatus::Connected)
+        );
+
+        let _ = shutdown_tx.send(true);
     }
 }
