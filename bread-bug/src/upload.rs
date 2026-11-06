@@ -8,12 +8,14 @@
 
 use std::fs;
 use std::io::{Read, Write};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use crate::report::Prepared;
 
@@ -248,19 +250,33 @@ pub struct Client {
     agent: ureq::Agent,
 }
 
-/// https only, except for loopback (tests and local development).
-fn endpoint_ok(url: &str) -> bool {
-    url.starts_with("https://")
-        || url.starts_with("http://127.0.0.1")
-        || url.starts_with("http://localhost")
+/// https to any host, or plain http only to a literal loopback address
+/// (tests and local development). Credentials in the URL are never allowed.
+fn endpoint_ok(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.scheme() {
+        "https" => true,
+        "http" => match url.host() {
+            Some(Host::Ipv4(ip)) => ip == Ipv4Addr::LOCALHOST,
+            Some(Host::Ipv6(ip)) => ip == Ipv6Addr::LOCALHOST,
+            Some(Host::Domain(host)) => host == "localhost",
+            None => false,
+        },
+        _ => false,
+    }
 }
 
 impl Client {
     pub fn new(endpoint: &str) -> Result<Self> {
-        let base = endpoint.trim_end_matches('/').to_string();
-        if !endpoint_ok(&base) {
-            bail!("endpoint must be https (got {endpoint})");
-        }
+        // Validate exactly the URL that is used for requests: `url` normalises
+        // the endpoint, so `base` comes from the parsed form rather than the
+        // raw string.
+        let base = match Url::parse(endpoint.trim_end_matches('/')) {
+            Ok(url) if endpoint_ok(&url) => url.as_str().trim_end_matches('/').to_string(),
+            _ => bail!("endpoint must be https (got {endpoint})"),
+        };
         let agent = ureq::AgentBuilder::new()
             .redirects(0) // never follow a redirect to another host
             .timeout_connect(Duration::from_secs(10))
