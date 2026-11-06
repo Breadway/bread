@@ -295,7 +295,16 @@ pub fn build(opts: &BuildOptions) -> Result<Prepared> {
         }
         None => (Vec::new(), None),
     };
-    let mut markers = snap.markers;
+    // `Stopped` is store-only: it closes a freeze so the live stack is not
+    // offered. breadbug-server's v1 schema has no such kind and answers 400
+    // for the whole report when it sees one, which the client treats as a
+    // permanent rejection. Drop stops before the last-N selection so one
+    // cannot consume a slot and push a real panic/crash/freeze marker out.
+    let mut markers: Vec<Marker> = snap
+        .markers
+        .into_iter()
+        .filter(|m| m.kind != MarkerKind::Stopped)
+        .collect();
     let start = markers.len().saturating_sub(MAX_MARKERS);
     markers.drain(..start);
     let marker_version = markers.iter().rev().find_map(|m| m.app_version.clone());

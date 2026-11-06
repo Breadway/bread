@@ -121,6 +121,53 @@ fn report_contains_expected_sections_and_no_seeded_pii() {
 }
 
 #[test]
+fn stopped_markers_are_not_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = Store::open(dir.path(), &BugConfig::default(), ctx()).unwrap();
+    let mut oldest = Marker::new(MarkerKind::Panic, 10);
+    oldest.message = Some("old panic".into());
+    s.record_marker("clip", oldest).unwrap();
+    s.record_marker("clip", Marker::new(MarkerKind::Crash, 20))
+        .unwrap();
+    s.record_marker("clip", Marker::new(MarkerKind::Freeze, 30))
+        .unwrap();
+    s.record_marker("clip", Marker::new(MarkerKind::Recovered, 40))
+        .unwrap();
+    s.record_marker("clip", Marker::new(MarkerKind::Panic, 41))
+        .unwrap();
+    // A second freeze, then the app ends while still frozen: the newest
+    // marker is a store-only stop. An unfiltered last-five selection would
+    // spend a slot on it and push the crash at t=20 out of the report.
+    s.record_marker("clip", Marker::new(MarkerKind::Freeze, 50))
+        .unwrap();
+    s.record_marker("clip", Marker::new(MarkerKind::Stopped, 60))
+        .unwrap();
+
+    let p = build(&opts(dir.path())).unwrap();
+    let kinds: Vec<_> = p.report.markers.iter().map(|m| m.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            MarkerKind::Crash,
+            MarkerKind::Freeze,
+            MarkerKind::Recovered,
+            MarkerKind::Panic,
+            MarkerKind::Freeze,
+        ]
+    );
+    let times: Vec<_> = p.report.markers.iter().map(|m| m.t).collect();
+    assert_eq!(times, [20, 30, 40, 41, 50]);
+    assert!(p
+        .report
+        .markers
+        .iter()
+        .all(|m| m.kind != MarkerKind::Stopped));
+    // No other section of the serialized report may carry the kind either.
+    let text = String::from_utf8(p.bytes).unwrap();
+    assert!(!text.contains("stopped"), "{text}");
+}
+
+#[test]
 fn bytes_hash_verify_and_save_match() {
     let dir = tempfile::tempdir().unwrap();
     let _s = seeded_store(dir.path());
