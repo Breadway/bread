@@ -230,11 +230,66 @@ fn tampered_bytes_are_never_sent() {
 }
 
 #[test]
-fn plain_http_to_a_remote_host_is_refused() {
-    assert!(Client::new("http://bugs.example.com").is_err());
-    assert!(Client::new("ftp://x").is_err());
-    assert!(Client::new("https://bugs.example.com/").is_ok());
-    assert!(Client::new("http://127.0.0.1:1").is_ok());
+fn endpoint_accepts_https_for_any_host() {
+    for url in [
+        "https://bugs.example.com",
+        "https://bugs.example.com/",
+        "https://bugs.breadway.dev",
+        "https://localhost:8120",
+        "https://127.0.0.1:8120",
+        "https://[::1]:8120",
+    ] {
+        assert!(Client::new(url).is_ok(), "should accept {url}");
+    }
+}
+
+#[test]
+fn endpoint_accepts_plain_http_only_for_literal_loopback_host() {
+    for url in [
+        "http://127.0.0.1:8120",
+        "http://127.0.0.1",
+        "http://[::1]:8120",
+        "http://[::1]",
+        "http://localhost:8120",
+        "http://localhost",
+        "http://LOCALHOST:8120",
+    ] {
+        assert!(Client::new(url).is_ok(), "should accept {url}");
+    }
+
+    for url in [
+        "http://bugs.example.com",
+        "http://192.168.1.10:8120",
+        "http://[2001:db8::1]:8120",
+        // Hostnames that merely start with localhost or 127.0.0.1.
+        "http://localhost.evil.example",
+        "http://127.0.0.1.evil.example",
+        "http://localhost.evil.example:8120",
+        "http://127.0.0.1.nip.io:8120",
+    ] {
+        assert!(Client::new(url).is_err(), "should refuse {url}");
+    }
+}
+
+#[test]
+fn endpoint_refuses_userinfo_and_other_schemes() {
+    for url in [
+        "http://localhost@evil.example",
+        "http://127.0.0.1@evil.example",
+        "http://127.0.0.1:8120@evil.example",
+        "http://user:pass@127.0.0.1",
+        "http://user@localhost:8120",
+        "https://user@bugs.example.com",
+        "https://user:pass@bugs.example.com",
+        "ftp://bugs.example.com",
+        "file:///tmp/bugs",
+        "javascript:alert(1)",
+        "not a url",
+        "",
+        "https://",
+    ] {
+        assert!(Client::new(url).is_err(), "should refuse {url:?}");
+    }
 }
 
 #[test]
