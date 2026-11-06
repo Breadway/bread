@@ -72,6 +72,19 @@ impl Manager {
     }
 
     pub async fn start_all(&self) -> Result<()> {
+        self.start_all_with(podman::binary_available).await
+    }
+
+    /// [`Self::start_all`] with the optional-adapter probe injected.
+    ///
+    /// The probe is a parameter so a test can prove the absent-dependency
+    /// decision actually consumes it. Calling `start_all` from tests instead
+    /// would depend on the host's `PATH` and would still pass if this function
+    /// hard-coded "available".
+    async fn start_all_with<F>(&self, podman_available: F) -> Result<()>
+    where
+        F: FnOnce() -> bool,
+    {
         info!("starting adapters");
 
         if self.config.adapters.udev.enabled {
@@ -141,7 +154,7 @@ impl Manager {
             // status instead of an error and a 32-second backoff restart loop
             // for the lifetime of the daemon. A binary that exists but fails
             // later still goes through the normal supervisor retry path.
-            self.start_optional_adapter(podman::PodmanAdapter::new(), podman::binary_available())
+            self.start_optional_adapter(podman::PodmanAdapter::new(), podman_available())
                 .await;
         }
 
@@ -265,10 +278,31 @@ mod tests {
         (Manager::new(raw_tx, Config::default(), shutdown_rx), raw_rx)
     }
 
+    fn manager_with_config(
+        config: Config,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> (Manager, mpsc::Receiver<RawEvent>) {
+        let (raw_tx, raw_rx) = mpsc::channel(8);
+        (Manager::new(raw_tx, config, shutdown_rx), raw_rx)
+    }
+
+    /// Every adapter except podman disabled, so `start_all_with` touches only
+    /// the optional-adapter decision under test.
+    fn podman_only_config() -> Config {
+        let mut config = Config::default();
+        config.adapters.udev.enabled = false;
+        config.adapters.hyprland.enabled = false;
+        config.adapters.power.enabled = false;
+        config.adapters.bluetooth.enabled = false;
+        config.adapters.network.enabled = false;
+        config.adapters.podman.enabled = true;
+        config
+    }
+
     #[tokio::test]
     async fn absent_optional_dependency_logs_once_and_reports_unavailable() {
         let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (manager, mut raw_rx) = manager(shutdown_rx);
+        let (manager, mut raw_rx) = manager_with_config(podman_only_config(), shutdown_rx);
 
         let logs = LogBuffer::default();
         let subscriber = tracing_subscriber::fmt()
@@ -278,10 +312,23 @@ mod tests {
             .finish();
         let _guard = tracing::subscriber::set_default(subscriber);
 
-        let started = manager
-            .start_optional_adapter(podman::PodmanAdapter::new(), false)
-            .await;
-        assert!(!started, "an absent dependency must not spawn the adapter");
+        // Inject the probe result rather than depending on the host PATH. The
+        // probe must actually be consulted: if `start_all_with` ignored it (or
+        // hard-coded "available"), this flag stays false and the assertions
+        // below see a spawned/retrying podman adapter instead of Unavailable.
+        let probed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probed_in_closure = probed.clone();
+        manager
+            .start_all_with(move || {
+                probed_in_closure.store(true, std::sync::atomic::Ordering::SeqCst);
+                false
+            })
+            .await
+            .unwrap();
+        assert!(
+            probed.load(std::sync::atomic::Ordering::SeqCst),
+            "start_all must consult the optional-adapter probe"
+        );
 
         // Give a hypothetical retry loop time to log again, then confirm the
         // status never flips to connected/disconnected and nothing was sent.

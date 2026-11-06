@@ -233,8 +233,13 @@ impl Server {
                     "ipc connection failed"
                 );
             }
-            FailureLogDecision::Suppressed => {
-                debug!(peer = %peer, error = %err, "ipc connection failed (repeat suppressed)");
+            FailureLogDecision::Suppressed { suppressed } => {
+                debug!(
+                    peer = %peer,
+                    suppressed,
+                    error = %err,
+                    "ipc connection failed (repeat suppressed)"
+                );
             }
         }
     }

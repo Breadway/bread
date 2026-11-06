@@ -9,6 +9,13 @@
 //! It deliberately keys on peer plus error text: a *different* error from the
 //! same peer (or the same error from another peer) is never suppressed, so a
 //! real second fault is not hidden behind a noisy first one.
+//!
+//! Known limitation: a one-shot client that connects, writes and exits (for
+//! example `bread-emit`) produces a new pid for every broken pipe, so each is
+//! treated as a first failure and still warns. Collapsing those would require
+//! a global error-text layer, which would also hide the first failure of a
+//! genuinely different client; that trade-off is rejected here. Identifying
+//! the live client stays a live-image check.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -50,8 +57,10 @@ pub(crate) enum FailureLogDecision {
     /// Log at WARN. `suppressed` is the number of identical failures hidden
     /// since the previous warning (0 for a first failure).
     Warn { suppressed: u64 },
-    /// Already warned about this peer and error within the interval.
-    Suppressed,
+    /// Already warned about this peer and error within the interval. `suppressed`
+    /// is the running count including this failure, so the DEBUG line carries
+    /// the same number the next aggregate warning will report.
+    Suppressed { suppressed: u64 },
 }
 
 #[derive(Debug)]
@@ -91,7 +100,9 @@ impl ConnectionFailureLog {
         if let Some(entry) = self.entries.get_mut(&key) {
             if now.saturating_duration_since(entry.last_warn) < self.interval {
                 entry.suppressed = entry.suppressed.saturating_add(1);
-                return FailureLogDecision::Suppressed;
+                return FailureLogDecision::Suppressed {
+                    suppressed: entry.suppressed,
+                };
             }
 
             let suppressed = std::mem::replace(&mut entry.suppressed, 0);
@@ -170,8 +181,8 @@ mod tests {
                     BROKEN_PIPE,
                     start + Duration::from_secs(second)
                 ),
-                FailureLogDecision::Suppressed,
-                "repeat {second} should not warn again"
+                FailureLogDecision::Suppressed { suppressed: second },
+                "repeat {second} should not warn again and should carry its running count"
             );
         }
 
@@ -197,7 +208,7 @@ mod tests {
         );
         assert_eq!(
             log.record(PeerId::Pid(42), BROKEN_PIPE, start + Duration::from_secs(1)),
-            FailureLogDecision::Suppressed
+            FailureLogDecision::Suppressed { suppressed: 1 }
         );
         assert_eq!(
             log.record(PeerId::Pid(43), BROKEN_PIPE, start + Duration::from_secs(2)),
@@ -231,7 +242,7 @@ mod tests {
         );
         assert_eq!(
             log.record(PeerId::Unknown, BROKEN_PIPE, start + Duration::from_secs(1)),
-            FailureLogDecision::Suppressed
+            FailureLogDecision::Suppressed { suppressed: 1 }
         );
     }
 
