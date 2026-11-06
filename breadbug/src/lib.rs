@@ -524,6 +524,24 @@ fn review_loop(
                     return Ok(());
                 };
                 let path = PathBuf::from(if path.is_empty() { default } else { path });
+                if path.exists() {
+                    let answer = prompt(
+                        input,
+                        out,
+                        &format!(
+                            "{} already exists. This will overwrite it. Continue? [y/N]: ",
+                            path.display()
+                        ),
+                    )?;
+                    let overwrite = answer
+                        .as_deref()
+                        .map(str::to_ascii_lowercase)
+                        .is_some_and(|a| a == "y" || a == "yes");
+                    if !overwrite {
+                        writeln!(out, "Not overwritten.")?;
+                        continue;
+                    }
+                }
                 save(p, &path, env, out)?;
                 return Ok(());
             }

@@ -212,6 +212,40 @@ fn interactive_view_then_save_to_file() {
 }
 
 #[test]
+fn interactive_save_confirms_before_overwriting_an_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    let path = dir.path().join("out.json");
+    std::fs::write(&path, b"old report\n").unwrap();
+    let input = format!("2\nbehavior\n\nf\n{}\nn\nc\n", path.display());
+    let (r, out) = go(&[], &e, &input, true);
+    r.unwrap();
+    assert!(
+        out.contains(&format!("{} already exists", path.display())),
+        "{out}"
+    );
+    assert!(out.contains("This will overwrite it"), "{out}");
+    assert!(out.contains("Not overwritten."), "{out}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"old report\n");
+}
+
+#[test]
+fn interactive_save_overwrites_after_confirmation() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = env(dir.path());
+    let path = dir.path().join("out.json");
+    std::fs::write(&path, b"old report\n").unwrap();
+    let input = format!("2\nbehavior\n\nf\n{}\ny\n", path.display());
+    let (r, out) = go(&[], &e, &input, true);
+    r.unwrap();
+    assert!(out.contains("This will overwrite it"), "{out}");
+    assert!(!out.contains("Not overwritten."), "{out}");
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("\"schema\": 1"), "{saved}");
+    assert!(!saved.contains("old report"), "{saved}");
+}
+
+#[test]
 fn interactive_rejects_bad_numbers_then_quits() {
     let dir = tempfile::tempdir().unwrap();
     let e = env(dir.path());
