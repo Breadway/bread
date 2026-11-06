@@ -46,15 +46,18 @@ pub const CSS: &str = r#"
 /// would fall back to the light Adwaita defaults in a snapshot. The same rules
 /// applied globally keep headless evidence faithful to a real BOS session.
 pub fn apply_global() {
-    let Some(display) = gtk4::gdk::Display::default() else {
-        return;
-    };
-    let palette = bread_theme::load_palette();
-    let provider = gtk4::CssProvider::new();
-    provider.load_from_string(&format!("{}\n{}", bread_theme::css_vars(&palette), CSS));
-    gtk4::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(|| {
+        let Some(display) = gtk4::gdk::Display::default() else {
+            return;
+        };
+        let palette = bread_theme::load_palette();
+        let provider = gtk4::CssProvider::new();
+        provider.load_from_string(&format!("{}\n{}", bread_theme::css_vars(&palette), CSS));
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
 }
