@@ -5,7 +5,6 @@
 //! what the upload sends; nothing is regenerated after the preview.
 
 use std::collections::BTreeMap;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -128,18 +127,79 @@ impl Prepared {
     }
 
     /// Write the exact bytes to `path` (mode 0600).
+    ///
+    /// The report is written to a fresh temporary file in the same directory
+    /// and renamed over `path`. That keeps the mode at 0600 even when the
+    /// destination already existed with a wider one, since the old inode is
+    /// replaced rather than reopened, and a failed write never leaves a
+    /// half-written report behind.
     pub fn save(&self, path: &Path) -> Result<()> {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
+
+        let dir = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        let name = path
+            .file_name()
             .with_context(|| format!("create {}", path.display()))?;
-        f.write_all(&self.bytes)?;
-        Ok(())
+        let (tmp, mut file) =
+            create_private_temp(dir, name).with_context(|| format!("create {}", path.display()))?;
+        let written = file.write_all(&self.bytes);
+        drop(file);
+        let result = written.map_err(anyhow::Error::from).and_then(|()| {
+            std::fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
     }
+}
+
+/// Open a brand-new temporary file next to `name` with mode 0600.
+///
+/// `create_new` guarantees a fresh inode, so the mode actually applies and a
+/// stale temporary file can never be reused. The caller renames the file into
+/// place and removes it if the write fails.
+fn create_private_temp(
+    dir: &Path,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let pid = std::process::id();
+    for attempt in 0..1000u32 {
+        let mut tmp_name = std::ffi::OsString::from(".");
+        tmp_name.push(name);
+        tmp_name.push(format!(".{pid}.{attempt}.tmp"));
+        let tmp = dir.join(tmp_name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&tmp) {
+            Ok(file) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(0o600)) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&tmp);
+                        return Err(e);
+                    }
+                }
+                return Ok((tmp, file));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a unique temporary file",
+    ))
 }
 
 /// Everything the builder needs.

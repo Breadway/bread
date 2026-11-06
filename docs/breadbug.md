@@ -20,7 +20,9 @@ repo. Tracker: ECO-EP1 (design spec ECO-66).
 
 The report is built once, serialized once and hashed; the preview, file export
 and upload all use those bytes. The client re-verifies the hash immediately
-before sending. Local `--save` writes mode 0600.
+before sending. Local `--save` writes mode 0600, replacing an existing file
+atomically. The interactive save asks before overwriting a file that is
+already there.
 
 ## Where data comes from
 

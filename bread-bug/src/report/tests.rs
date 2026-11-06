@@ -89,6 +89,12 @@ fn opts(dir: &Path) -> BuildOptions {
     o
 }
 
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
 #[test]
 fn report_contains_expected_sections_and_no_seeded_pii() {
     let dir = tempfile::tempdir().unwrap();
@@ -129,16 +135,51 @@ fn bytes_hash_verify_and_save_match() {
     let out = dir.path().join("report.json");
     p.save(&out).unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), p.bytes);
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(
-        std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    #[cfg(unix)]
+    assert_eq!(mode_of(&out), 0o600);
     let parsed: Report = serde_json::from_slice(&p.bytes).unwrap();
     assert_eq!(parsed, p.report);
     let mut tampered = p.clone();
     tampered.bytes.push(b' ');
     assert!(!tampered.verify());
+}
+
+#[cfg(unix)]
+#[test]
+fn save_of_a_fresh_path_is_private() {
+    let dir = tempfile::tempdir().unwrap();
+    let _s = seeded_store(dir.path());
+    let p = build(&opts(dir.path())).unwrap();
+    let out = dir.path().join("fresh.json");
+    p.save(&out).unwrap();
+    assert_eq!(mode_of(&out), 0o600);
+    assert_eq!(std::fs::read(&out).unwrap(), p.bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn save_tightens_an_existing_files_mode_and_leaves_no_temp_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let _s = seeded_store(dir.path());
+    let p = build(&opts(dir.path())).unwrap();
+    let out = dir.path().join("existing.json");
+    std::fs::write(&out, b"stale report\n").unwrap();
+    std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(mode_of(&out), 0o644);
+
+    p.save(&out).unwrap();
+
+    assert_eq!(mode_of(&out), 0o600);
+    assert_eq!(std::fs::read(&out).unwrap(), p.bytes);
+    let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
 }
 
 #[test]
