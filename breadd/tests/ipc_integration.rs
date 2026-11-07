@@ -13,6 +13,19 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
 
+/// Rewrite a config file the daemon re-reads on `bug.reload` atomically
+/// (temp file in the same directory, then rename). A plain `fs::write`
+/// truncates in place, so a daemon read landing between truncate and write
+/// sees an empty file, which parses as defaults (`excluded_apps = []`) and
+/// silently un-excludes the app under test. Same convention as
+/// `BugConfig::save_to`.
+fn write_config_atomically(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("toml.tmp");
+    fs::write(&tmp, content)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn ping_and_state_dump_work() -> Result<()> {
     let harness = TestHarness::spawn()?;
@@ -2053,8 +2066,8 @@ async fn bug_reload_applies_exclusions_and_wipes_newly_excluded_apps() -> Result
     assert!(reader.apps().contains(&"clip".to_string()));
 
     // The user excludes clip in settings, which rewrites breadbug.toml.
-    fs::write(
-        harness.config_home().join("bread/breadbug.toml"),
+    write_config_atomically(
+        &harness.config_home().join("bread/breadbug.toml"),
         "excluded_apps = [\"clip\"]\n",
     )?;
     let res = harness.send_request("bug.reload", json!({})).await?;
@@ -2110,14 +2123,14 @@ async fn bug_reload_drops_an_excluded_app_from_freeze_tracking() -> Result<()> {
     // Exclude, then un-exclude. Reload must drop the tracked instance, so the
     // next heartbeat starts fresh instead of reporting a recovery of a freeze
     // the user just opted out of.
-    fs::write(
-        harness.config_home().join("bread/breadbug.toml"),
+    write_config_atomically(
+        &harness.config_home().join("bread/breadbug.toml"),
         "excluded_apps = [\"clip\"]\nfreeze_after_ms = 200\n",
     )?;
     let res = harness.send_request("bug.reload", json!({})).await?;
     assert_eq!(res["excluded"], json!(["clip"]));
-    fs::write(
-        harness.config_home().join("bread/breadbug.toml"),
+    write_config_atomically(
+        &harness.config_home().join("bread/breadbug.toml"),
         "excluded_apps = []\nfreeze_after_ms = 200\n",
     )?;
     harness.send_request("bug.reload", json!({})).await?;
