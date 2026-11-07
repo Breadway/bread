@@ -386,6 +386,14 @@ impl Server {
                 };
 
                 self.state_handle.set_profile(name.to_string());
+                // `set_profile` is fire-and-forget over the state-engine
+                // command channel while `state_dump` reads the shared state
+                // directly: without a barrier the immediate `state.dump`
+                // after this response can still see the previous profile.
+                // Flush so the response means the new profile is readable.
+                if let Err(e) = self.state_handle.flush().await {
+                    return Err((id, e.to_string()));
+                }
                 if self
                     .emit_tx
                     .send(BreadEvent::new(

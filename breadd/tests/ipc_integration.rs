@@ -2379,15 +2379,39 @@ enabled = false
     /// A real process whose executable basename belongs to the requested
     /// bread app, so the daemon's `/proc/<pid>/exe` identity check is exercised
     /// rather than bypassed with the test runner's pid.
+    ///
+    /// `Command::spawn` returns right after fork, before the child has
+    /// exec'd: a daemon heartbeat landing in that window reads the test
+    /// binary's exe instead of `bread<app>` and correctly rejects it, which
+    /// is flaky under full-suite load. Poll `/proc/<pid>/exe` until the
+    /// expected basename appears before handing the child back, so the
+    /// first heartbeat is deterministic. The product check itself is
+    /// unchanged.
     fn spawn_app_child(&self, app: &str) -> Result<Child> {
         let executable = self._temp.path().join(format!("bread{app}"));
         fs::copy("/usr/bin/sleep", &executable)?;
-        Ok(Command::new(executable)
+        let expected = format!("bread{app}");
+        let child = Command::new(executable)
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()?)
+            .spawn()?;
+        let pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok(exe) = fs::read_link(format!("/proc/{pid}/exe")) {
+                if exe
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n == expected || n == format!("bread{app}d"))
+                {
+                    return Ok(child);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(child)
     }
 
     async fn send_request(&self, method: &str, params: Value) -> Result<Value> {

@@ -859,7 +859,10 @@ pub fn ipc_heartbeat(
         return Ok(json!({ "ok": true, "tracked": false }));
     };
     if !bread_bug::procid::exe_matches_app(app, &identity.exe) {
-        return Err(format!("pid {pid} does not run the '{app}' executable"));
+        return Err(format!(
+            "pid {pid} does not run the '{app}' executable (exe: {})",
+            identity.exe
+        ));
     }
     if params.get("stopping").and_then(Value::as_bool) == Some(true) {
         if let StopOutcome::Stopped(retired) = watchdog.stopping(app, &instance) {
