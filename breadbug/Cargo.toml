@@ -1,6 +1,6 @@
 [package]
 name = "breadbug"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "Review and optionally send a crash, freeze or bug report for a bread app"
 
