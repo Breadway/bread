@@ -1534,6 +1534,25 @@ Set to `false` to suppress the 10 legacy flat names above and emit only their `b
 | `bread.power.battery.full` | `{ battery_percent }` |
 | `bread.power.changed` | `{ ac_connected, battery_percent }` |
 
+Only one power source runs at a time: when the system bus is reachable,
+`breadd` uses the UPower D-Bus adapter and otherwise falls back to the
+sysfs poller, so AC and battery transitions are never reported twice.
+`power.device.changed` signals map onto the same events: a `line_power`
+device `Online` change emits `bread.power.ac.connected` /
+`bread.power.ac.disconnected`, and a battery device `Percentage` / `State`
+change emits the battery threshold events above (or `bread.power.changed`
+for mid-range levels, so `bread state power` keeps tracking between
+thresholds). UPower-derived battery events additionally carry `charging`
+(true while UPower reports `Charging`), and both carry `path` /
+`native_path` provenance for the originating D-Bus device. The composite
+`DisplayDevice` is intentionally ignored for state (concrete devices are
+authoritative), as is any device whose UPower `Type` is neither line
+power nor battery, or whose `battery_*` object path carries a peripheral
+marker (`hid`, `hidpp`, `mouse`, `keyboard`, `monitor`, `ups`,
+`bluetooth`), so peripheral batteries stay out of system state. An absent
+battery (`IsPresent` false) reports nothing
+rather than a stale 0%.
+
 #### Network
 
 | Event | Data |
