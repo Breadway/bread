@@ -14,6 +14,24 @@ README); there is no Arch/pacman package for `bread` anymore. `bakery`
 installs the systemd user service unit itself, matching the `packaging/systemd/breadd.service`
 file here.
 
+`breadbug-gui` (the GTK4 reporter) and `breadbug-launch` (the display-aware
+entry point for keybinds and notification actions) are built from
+`breadbug-gui/`, a separate workspace so the daemon build does not need GTK
+headers. The `bread` bakery product lists both binaries and `gtk4` in
+`system_deps`.
+
+## Windowed reporter
+
+```bash
+breadbug-launch            # GUI when a display exists, terminal client otherwise
+breadbug-launch --app clip # preselect the app that crashed
+breadbug-launch --tty      # always the terminal client
+```
+
+Keybinds and notification actions should call `breadbug-launch`; calling
+`breadbug` directly skips the windowed front end, and calling `breadbug-gui`
+directly fails on a text console.
+
 ## systemd user service
 
 The service unit starts `breadd` as a user service after the graphical session is available.

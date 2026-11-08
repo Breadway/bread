@@ -168,6 +168,24 @@ Free-text scrubbing is best effort: it cannot know an arbitrary word is a
 name. Build-ids are exempt from long-hex redaction for symbolication. The
 preview exists so users can inspect the exact payload.
 
+## Windowed front end
+
+`breadbug-gui [--app ID]` is the GTK4 front end over the same
+`breadbug::session` code and the same report bytes as the terminal client. It
+shows the first-run notice, app picker, details, the exact report and the
+done/receipt page.
+
+`breadbug-launch [--app ID]` is the entry point for keybinds and notification
+actions. It runs `breadbug-gui` when `WAYLAND_DISPLAY` or `DISPLAY` is set and
+`breadbug` (the terminal client) otherwise. `--tty` forces the terminal client.
+`breadbug-gui` makes the same check itself, so running it from a text console
+hands off to `breadbug` instead of failing to open a display.
+
+The checkout can render every page without a desktop:
+`breadbug-gui/dev/walkthrough.sh OUT_DIR` starts an isolated Broadway display,
+drives the real window through all pages, and fails if any PNG is missing or
+too small to contain a page. It never touches the live session.
+
 ## Consent copy (intended user-facing copy)
 
 The text is `bread_bug::consent::CONSENT_TEXT`. It is shown once, before the

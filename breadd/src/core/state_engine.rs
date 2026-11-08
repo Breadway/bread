@@ -123,13 +123,20 @@ impl StateHandle {
     }
 
     /// Wait until all previously queued state-engine commands have been applied.
-    pub async fn flush_module_statuses(&self) -> Result<()> {
+    /// Generic barrier: any fire-and-forget `set_*` followed by this is
+    /// read-your-write safe for a subsequent `state_dump`/`state_get`.
+    pub async fn flush(&self) -> Result<()> {
         let (ack, done) = tokio::sync::oneshot::channel();
         self.command_tx
             .send(StateCommand::Barrier { ack })
             .map_err(|_| anyhow::anyhow!("state engine command channel closed"))?;
         done.await
             .map_err(|_| anyhow::anyhow!("state engine dropped barrier response"))
+    }
+
+    /// Wait until all previously queued state-engine commands have been applied.
+    pub async fn flush_module_statuses(&self) -> Result<()> {
+        self.flush().await
     }
 
     /// Wipe the module registry and block until the state engine has applied

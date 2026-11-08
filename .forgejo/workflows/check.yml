@@ -47,6 +47,18 @@ jobs:
       - name: test
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --workspace --locked
 
+      # breadbug-gui is deliberately its own workspace (GTK headers are not a
+      # dependency of the daemon). Check it explicitly so a broken window,
+      # launcher or walkthrough example cannot reach a release build.
+      - name: breadbug-gui fmt
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo fmt --manifest-path breadbug-gui/Cargo.toml --check
+
+      - name: breadbug-gui clippy
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo clippy --manifest-path breadbug-gui/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: breadbug-gui test
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --manifest-path breadbug-gui/Cargo.toml --locked
+
       - name: clean owned checkout
         if: always()
         shell: bash

@@ -720,7 +720,10 @@ pub fn ipc_status(store: Option<&Store>) -> Value {
 
 /// `bug.reload`: re-read `breadbug.toml` and apply the exclusion list now
 /// (newly excluded apps are wiped and dropped from freeze tracking). Other
-/// keys are read at startup.
+/// keys are read at startup. Writers must replace the file atomically
+/// (temp file plus rename, as `BugConfig::save_to` does): a truncated
+/// in-place rewrite read mid-write parses as defaults and would silently
+/// clear the exclusion list for that reload.
 pub fn ipc_reload(store: Option<&Store>, watchdog: &Watchdog) -> Result<Value, String> {
     let store = store.ok_or_else(unavailable)?;
     let cfg = BugConfig::load().map_err(|e| format!("{e:#}"))?;
@@ -856,7 +859,10 @@ pub fn ipc_heartbeat(
         return Ok(json!({ "ok": true, "tracked": false }));
     };
     if !bread_bug::procid::exe_matches_app(app, &identity.exe) {
-        return Err(format!("pid {pid} does not run the '{app}' executable"));
+        return Err(format!(
+            "pid {pid} does not run the '{app}' executable (exe: {})",
+            identity.exe
+        ));
     }
     if params.get("stopping").and_then(Value::as_bool) == Some(true) {
         if let StopOutcome::Stopped(retired) = watchdog.stopping(app, &instance) {
