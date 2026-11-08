@@ -2289,7 +2289,10 @@ async fn spawn_test_executable(executable: &Path) -> Result<Child> {
             .stderr(Stdio::null())
             .spawn();
         match spawned {
-            Ok(child) => return Ok(child),
+            Ok(mut child) => {
+                wait_for_child_exec(&mut child, executable).await?;
+                return Ok(child);
+            }
             Err(err) if is_text_file_busy(&err) && attempt < TEXT_FILE_BUSY_ATTEMPTS => {
                 attempt += 1;
                 // 2 ms, 4 ms, 8 ms, 16 ms, then 32 ms per retry.
@@ -2305,6 +2308,40 @@ async fn spawn_test_executable(executable: &Path) -> Result<Child> {
                 })
             }
         }
+    }
+}
+
+/// A freshly forked child reports its parent's executable in `/proc` until the
+/// `execve` completes. The daemon decides which app owns a heartbeat by reading
+/// `/proc/<pid>/exe`, so a test that sends a heartbeat immediately after
+/// `spawn` can lose the race on a loaded builder and be rejected as the wrong
+/// executable. Return only once the kernel reports the child as running
+/// `executable`.
+async fn wait_for_child_exec(child: &mut Child, executable: &Path) -> Result<()> {
+    let expected = executable.to_path_buf();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(target) = fs::read_link(format!("/proc/{}/exe", child.id())) {
+            if target == expected {
+                return Ok(());
+            }
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(anyhow!(
+                "child exited with {status} before exec of {}",
+                expected.display()
+            ));
+        }
+        if Instant::now() >= deadline {
+            child.kill().ok();
+            child.wait().ok();
+            return Err(anyhow!(
+                "child {} did not exec {} within 10s",
+                child.id(),
+                expected.display()
+            ));
+        }
+        sleep(Duration::from_millis(2)).await;
     }
 }
 
