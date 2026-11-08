@@ -335,6 +335,8 @@ impl EventNormalizer {
     fn normalize_power(&self, raw: &RawEvent) -> Vec<BreadEvent> {
         let mut events = Vec::new();
 
+        // Sysfs shape (`power.snapshot`): top-level `ac_connected` /
+        // `battery_percent`. Unchanged by the UPower fix below.
         if let Some(ac) = raw.payload.get("ac_connected").and_then(Value::as_bool) {
             events.push(BreadEvent {
                 event: if ac {
@@ -351,19 +353,7 @@ impl EventNormalizer {
         }
 
         if let Some(level) = raw.payload.get("battery_percent").and_then(Value::as_u64) {
-            let battery_event = if level <= 5 {
-                Some("bread.power.battery.critical")
-            } else if level <= 10 {
-                Some("bread.power.battery.very_low")
-            } else if level <= 20 {
-                Some("bread.power.battery.low")
-            } else if level >= 100 {
-                Some("bread.power.battery.full")
-            } else {
-                None
-            };
-
-            if let Some(event) = battery_event {
+            if let Some(event) = battery_threshold_event(level) {
                 events.push(BreadEvent {
                     event: event.to_string(),
                     timestamp: raw.timestamp,
@@ -372,6 +362,82 @@ impl EventNormalizer {
                     caused_by: None,
                     data: raw.payload.clone(),
                 });
+            }
+        }
+
+        // UPower shape (`power.device.changed`): the payload carries a
+        // `normalized` object translated from the D-Bus PropertiesChanged
+        // signal (`percentage`, `state`, `online`, `battery_type` for the
+        // UPower `Type` property, `native_path`, ...). Before this mapping
+        // existed, every UPower payload fell through to the generic
+        // `bread.power.changed` below without `ac_connected` /
+        // `battery_percent` keys, so the state engine never updated and
+        // `bread.power.ac.*` / `bread.power.battery.*` never fired on
+        // UPower systems. Map it onto the same semantic events as sysfs.
+        if let Some(normalized) = raw.payload.get("normalized").and_then(Value::as_object) {
+            let path = raw
+                .payload
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let native_path = normalized.get("native_path").and_then(Value::as_str);
+            match upower_device_class(normalized, path) {
+                Some(UpowerDeviceClass::LinePower) => {
+                    if let Some(online) = normalized.get("online").and_then(Value::as_bool) {
+                        events.push(BreadEvent {
+                            event: if online {
+                                "bread.power.ac.connected".to_string()
+                            } else {
+                                "bread.power.ac.disconnected".to_string()
+                            },
+                            timestamp: raw.timestamp,
+                            source: AdapterSource::Power,
+                            id: bread_shared::new_event_id(),
+                            caused_by: None,
+                            data: json!({
+                                "ac_connected": online,
+                                "path": path,
+                                "native_path": native_path,
+                            }),
+                        });
+                    }
+                }
+                Some(UpowerDeviceClass::Battery) => {
+                    // `is_present` false means the battery slot is empty;
+                    // report nothing rather than a stale 0%.
+                    let present = normalized
+                        .get("is_present")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if present {
+                        if let Some(pct) = normalized.get("percentage").and_then(Value::as_f64) {
+                            let level = pct.round().clamp(0.0, 100.0) as u64;
+                            let charging = normalized.get("state").and_then(Value::as_u64)
+                                == Some(UPOWER_STATE_CHARGING);
+                            let data = json!({
+                                "battery_percent": level,
+                                "charging": charging,
+                                "path": path,
+                                "native_path": native_path,
+                            });
+                            // Mid-range levels still emit `bread.power.changed`
+                            // (like the sysfs path's generic fallback) so
+                            // `bread state power` tracks the level between
+                            // thresholds.
+                            let name =
+                                battery_threshold_event(level).unwrap_or("bread.power.changed");
+                            events.push(BreadEvent {
+                                event: name.to_string(),
+                                timestamp: raw.timestamp,
+                                source: AdapterSource::Power,
+                                id: bread_shared::new_event_id(),
+                                caused_by: None,
+                                data,
+                            });
+                        }
+                    }
+                }
+                None => {}
             }
         }
 
@@ -670,6 +736,90 @@ fn split_hyprland_fields(data: &str) -> Vec<&str> {
         return Vec::new();
     }
     data.split(">>").collect()
+}
+
+// ─── Power helpers ────────────────────────────────────────────────────
+//
+// UPower numeric enums from `org.freedesktop.UPower.Device`.
+/// UPower `Type` value for mains / line-power devices.
+const UPOWER_DEVICE_TYPE_LINE_POWER: u64 = 1;
+/// UPower `Type` value for batteries.
+const UPOWER_DEVICE_TYPE_BATTERY: u64 = 2;
+/// UPower `State` value meaning the battery is currently charging.
+const UPOWER_STATE_CHARGING: u64 = 1;
+
+/// Shared battery-level threshold mapping for both power sources: sysfs
+/// snapshots and UPower battery payloads emit the same threshold events.
+fn battery_threshold_event(level: u64) -> Option<&'static str> {
+    if level <= 5 {
+        Some("bread.power.battery.critical")
+    } else if level <= 10 {
+        Some("bread.power.battery.very_low")
+    } else if level <= 20 {
+        Some("bread.power.battery.low")
+    } else if level >= 100 {
+        Some("bread.power.battery.full")
+    } else {
+        None
+    }
+}
+
+enum UpowerDeviceClass {
+    LinePower,
+    Battery,
+}
+
+/// Classify a UPower device for power-state purposes.
+///
+/// An explicit `Type` wins: line power (1) and battery (2) drive state,
+/// while anything else (UPS, monitor, mouse, ...) is left alone so a
+/// peripheral battery with a known type never drives system state. `Type`
+/// is only present in the signal when it changed, which is almost never,
+/// so when it is absent fall back to the object path: UPower names
+/// line-power devices `.../line_power_*` and system batteries
+/// `.../battery_*`. A `battery_*` path carrying a peripheral marker
+/// (`hid`, `hidpp`, `mouse`, `keyboard`, `monitor`, `ups`, `bluetooth`)
+/// is treated as a peripheral and stays generic. The composite
+/// `DisplayDevice` matches neither class and stays on the generic
+/// fallback, which also keeps concrete-device and composite signals from
+/// double-reporting the same transition.
+fn upower_device_class(
+    normalized: &serde_json::Map<String, Value>,
+    path: &str,
+) -> Option<UpowerDeviceClass> {
+    if let Some(device_type) = normalized.get("battery_type").and_then(Value::as_u64) {
+        return match device_type {
+            UPOWER_DEVICE_TYPE_LINE_POWER => Some(UpowerDeviceClass::LinePower),
+            UPOWER_DEVICE_TYPE_BATTERY => Some(UpowerDeviceClass::Battery),
+            _ => None,
+        };
+    }
+    if path.contains("line_power") {
+        Some(UpowerDeviceClass::LinePower)
+    } else if path.contains("battery") && !is_peripheral_upower_path(path) {
+        Some(UpowerDeviceClass::Battery)
+    } else {
+        None
+    }
+}
+
+/// True when a UPower object path looks like a peripheral rather than the
+/// system battery, e.g. `.../battery_hidpp_battery_0` for a wireless
+/// mouse. Compared case-insensitively against the lowercased path.
+fn is_peripheral_upower_path(path: &str) -> bool {
+    const PERIPHERAL_MARKERS: &[&str] = &[
+        "hid",
+        "hidpp",
+        "mouse",
+        "keyboard",
+        "monitor",
+        "ups",
+        "bluetooth",
+    ];
+    let lowered = path.to_lowercase();
+    PERIPHERAL_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
 }
 
 #[cfg(test)]
@@ -1259,6 +1409,251 @@ mod tests {
         let names: Vec<&str> = out.iter().map(|e| e.event.as_str()).collect();
         assert!(names.contains(&"bread.power.ac.disconnected"));
         assert!(names.contains(&"bread.power.battery.critical"));
+    }
+
+    // ─── Power via UPower ─────────────────────────────────────────────
+    //
+    // The UPower adapter emits `power.device.changed` with a `normalized`
+    // object translated from the D-Bus PropertiesChanged signal. These
+    // tests use realistic payloads, including the exact Yoga Slim 7
+    // scenario from the issue (ACAD line power online, BAT1 charging at
+    // 96%) where the state used to stay stuck at ac_connected=false with
+    // battery_percent=null.
+
+    /// Builds a `power.device.changed` raw event the way
+    /// `UPowerAdapter` does: `{path, properties, invalidated, normalized}`.
+    fn upower_changed(path: &str, normalized: Value, ts: u64) -> RawEvent {
+        raw(
+            AdapterSource::Power,
+            "power.device.changed",
+            json!({
+                "path": path,
+                "properties": {},
+                "invalidated": [],
+                "normalized": normalized,
+            }),
+            ts,
+        )
+    }
+
+    fn upower_line_power_online(path: &str, online: bool, ts: u64) -> RawEvent {
+        // `Type` is only present when it changed, so a typical Online
+        // signal carries no `battery_type`: classification falls back to
+        // the object path.
+        upower_changed(
+            path,
+            json!({
+                "percentage": Value::Null,
+                "state": Value::Null,
+                "time_to_empty": Value::Null,
+                "time_to_full": Value::Null,
+                "is_present": Value::Null,
+                "battery_type": Value::Null,
+                "online": online,
+                "native_path": "ACAD",
+                "model": Value::Null,
+                "vendor": Value::Null,
+                "serial": Value::Null,
+                "update_time": Value::Null,
+            }),
+            ts,
+        )
+    }
+
+    fn upower_battery(
+        path: &str,
+        percentage: f64,
+        state: u64,
+        is_present: bool,
+        ts: u64,
+    ) -> RawEvent {
+        upower_changed(
+            path,
+            json!({
+                "percentage": percentage,
+                "state": state,
+                "time_to_empty": 0,
+                "time_to_full": 1200,
+                "is_present": is_present,
+                "battery_type": Value::Null,
+                "online": Value::Null,
+                "native_path": "BAT1",
+                "model": "L22B4PA0",
+                "vendor": "Sunwoda",
+                "serial": "1234",
+                "update_time": 1700000000u64,
+            }),
+            ts,
+        )
+    }
+
+    #[test]
+    fn upower_line_power_online_emits_ac_connected() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&upower_line_power_online(
+            "/org/freedesktop/UPower/devices/line_power_ACAD",
+            true,
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.ac.connected");
+        assert_eq!(out[0].data.get("ac_connected"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn upower_line_power_offline_emits_ac_disconnected() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&upower_line_power_online(
+            "/org/freedesktop/UPower/devices/line_power_ACAD",
+            false,
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.ac.disconnected");
+        assert_eq!(out[0].data.get("ac_connected"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn upower_ac_transition_sequence_emits_on_each_change() {
+        let n = EventNormalizer::new(0);
+        let path = "/org/freedesktop/UPower/devices/line_power_ACAD";
+        let off = n.normalize(&upower_line_power_online(path, false, 1));
+        let on = n.normalize(&upower_line_power_online(path, true, 2));
+        assert_eq!(off[0].event, "bread.power.ac.disconnected");
+        assert_eq!(on[0].event, "bread.power.ac.connected");
+    }
+
+    #[test]
+    fn upower_explicit_line_power_type_wins_over_path() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&upower_changed(
+            "/org/freedesktop/UPower/devices/line_power_ACAD",
+            json!({"battery_type": 1, "online": true}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.ac.connected");
+    }
+
+    #[test]
+    fn upower_battery_charging_96_reports_level_and_charging() {
+        // The issue's exact scenario: BAT1 present, charging, 96%.
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&upower_battery(
+            "/org/freedesktop/UPower/devices/battery_BAT1",
+            96.0,
+            1,
+            true,
+            1,
+        ));
+        // Mid-range level: generic changed (like the sysfs path) so state
+        // keeps tracking, carrying the level plus charging state.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.changed");
+        assert_eq!(out[0].data.get("battery_percent"), Some(&json!(96)));
+        assert_eq!(out[0].data.get("charging"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn upower_battery_thresholds_match_sysfs_mapping() {
+        let n = EventNormalizer::new(0);
+        // (percentage, upower state, expected event, expected charging)
+        let cases = [
+            (4.0, 2u64, "bread.power.battery.critical", false),
+            (15.0, 2u64, "bread.power.battery.low", false),
+            (8.0, 2u64, "bread.power.battery.very_low", false),
+            (100.0, 4u64, "bread.power.battery.full", false),
+            (50.0, 1u64, "bread.power.changed", true),
+        ];
+        for (pct, state, expected, charging) in cases {
+            let out = n.normalize(&upower_battery(
+                "/org/freedesktop/UPower/devices/battery_BAT1",
+                pct,
+                state,
+                true,
+                (pct * 10.0) as u64,
+            ));
+            assert_eq!(out.len(), 1, "level {pct} should emit exactly 1 event");
+            assert_eq!(out[0].event, expected, "level {pct}");
+            assert_eq!(
+                out[0].data.get("battery_percent"),
+                Some(&json!(pct as u64)),
+                "level {pct}"
+            );
+            assert_eq!(
+                out[0].data.get("charging"),
+                Some(&Value::Bool(charging)),
+                "level {pct}"
+            );
+        }
+    }
+
+    #[test]
+    fn upower_missing_battery_emits_no_battery_event() {
+        let n = EventNormalizer::new(0);
+        let out = n.normalize(&upower_battery(
+            "/org/freedesktop/UPower/devices/battery_BAT1",
+            0.0,
+            0,
+            false,
+            1,
+        ));
+        // Empty slot: fall back to generic changed with the raw payload,
+        // never a stale 0% threshold event.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.changed");
+        assert!(out[0].data.get("battery_percent").is_none());
+    }
+
+    #[test]
+    fn upower_peripheral_battery_type_never_drives_state() {
+        let n = EventNormalizer::new(0);
+        // An explicit non-battery `Type` (5 = mouse) beats the path: a HID
+        // device whose object path happens to contain "battery" must not
+        // surface as the system battery.
+        let out = n.normalize(&upower_changed(
+            "/org/freedesktop/UPower/devices/battery_hidpp_0",
+            json!({"battery_type": 5, "percentage": 12.0, "state": 2}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.changed");
+        assert!(out[0].data.get("battery_percent").is_none());
+        assert!(out[0].data.get("charging").is_none());
+    }
+
+    #[test]
+    fn upower_hid_path_without_type_stays_generic() {
+        let n = EventNormalizer::new(0);
+        // The blocker regression: `Type` is absent from typical change
+        // signals, so a peripheral battery without an explicit type (here
+        // a wireless mouse at a low 12%) must still not drive system state
+        // just because its path contains "battery".
+        let out = n.normalize(&upower_changed(
+            "/org/freedesktop/UPower/devices/battery_hidpp_battery_0",
+            json!({"percentage": 12.0, "state": 2, "is_present": true}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.changed");
+        assert!(out[0].data.get("battery_percent").is_none());
+        assert!(out[0].data.get("charging").is_none());
+    }
+
+    #[test]
+    fn upower_display_device_composite_stays_generic() {
+        let n = EventNormalizer::new(0);
+        // The composite DisplayDevice matches neither class, so its
+        // signals stay generic instead of double-reporting transitions
+        // the concrete devices already emit.
+        let out = n.normalize(&upower_changed(
+            "/org/freedesktop/UPower/devices/DisplayDevice",
+            json!({"percentage": 96.0, "state": 1}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.changed");
+        assert!(out[0].data.get("battery_percent").is_none());
     }
 
     // ─── Bluetooth ─────────────────────────────────────────────────────────

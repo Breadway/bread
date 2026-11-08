@@ -99,6 +99,12 @@ pub struct PowerState {
     pub ac_connected: bool,
     pub battery_percent: Option<u8>,
     pub battery_low: bool,
+    /// Whether the battery is currently charging, when the power source
+    /// reports it. The sysfs poller has no charging signal, so this stays
+    /// `None` on systems without UPower; the UPower adapter updates it
+    /// from the device `State` property.
+    #[serde(default)]
+    pub charging: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -98,7 +98,11 @@ impl Manager {
         }
 
         if self.config.adapters.power.enabled {
-            // Prefer UPower D-Bus adapter; fall back to sysfs poller if D-Bus is unavailable.
+            // Power source precedence: UPower when the system bus is
+            // reachable, otherwise the sysfs poller. Exactly one of the
+            // two runs, so AC and battery transitions are reported once;
+            // the normalizer maps both payload shapes onto the same
+            // `bread.power.*` events and `state.power` keys.
             match power_upower::UPowerAdapter::probe().await {
                 Ok(adapter) => self.spawn_adapter(adapter),
                 Err(e) => {

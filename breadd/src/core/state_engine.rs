@@ -650,6 +650,11 @@ fn apply_event_to_state(state: &mut RuntimeState, event: &BreadEvent) {
                 state.power.battery_percent = Some(battery.min(100) as u8);
                 state.power.battery_low = battery <= 20;
             }
+            // Only UPower battery events carry `charging`; sysfs snapshots
+            // leave the previous value untouched.
+            if let Some(charging) = event.data.get("charging").and_then(Value::as_bool) {
+                state.power.charging = Some(charging);
+            }
         }
         "bread.profile.activated" => {
             if let Some(name) = event.data.get("name").and_then(Value::as_str) {
@@ -1184,6 +1189,47 @@ mod tests {
             &ev("bread.power.changed", json!({"battery_percent": 250u64})),
         );
         assert_eq!(state.power.battery_percent, Some(100));
+    }
+
+    #[test]
+    fn power_charging_flag_tracks_upower_battery_events() {
+        let mut state = RuntimeState::default();
+        // Sysfs-style events carry no `charging`: the flag starts unknown.
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.power.ac.connected", json!({"ac_connected": true})),
+        );
+        assert!(state.power.ac_connected);
+        assert_eq!(state.power.charging, None);
+
+        // UPower battery event sets both the level and the flag.
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.power.changed",
+                json!({"battery_percent": 96, "charging": true}),
+            ),
+        );
+        assert_eq!(state.power.battery_percent, Some(96));
+        assert_eq!(state.power.charging, Some(true));
+
+        // An event without `charging` (e.g. sysfs poll) leaves the flag alone.
+        apply_event_to_state(
+            &mut state,
+            &ev("bread.power.changed", json!({"battery_percent": 50})),
+        );
+        assert_eq!(state.power.battery_percent, Some(50));
+        assert_eq!(state.power.charging, Some(true));
+
+        // Unplugged and discharging clears it.
+        apply_event_to_state(
+            &mut state,
+            &ev(
+                "bread.power.battery.low",
+                json!({"battery_percent": 18, "charging": false}),
+            ),
+        );
+        assert_eq!(state.power.charging, Some(false));
     }
 
     // ─── apply_event_to_state: network ────────────────────────────────────
