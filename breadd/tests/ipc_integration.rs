@@ -2,11 +2,13 @@ mod common;
 
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1838,7 +1840,7 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     // A live breadclip-named child is the tracked app instance.
-    let mut child = harness.spawn_app_child("clip")?;
+    let mut child = harness.spawn_app_child("clip").await?;
     let pid = child.id();
     let beat = json!({ "app": "clip", "pid": pid, "interval_ms": 250 });
     harness.send_request("bug.heartbeat", beat.clone()).await?;
@@ -1874,7 +1876,7 @@ async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
     harness.wait_until_ready().await?;
 
     // A breadclip-named process that has already exited and been reaped.
-    let mut child = harness.spawn_app_child("clip")?;
+    let mut child = harness.spawn_app_child("clip").await?;
     let dead_pid = child.id();
     child.kill()?;
     child.wait()?;
@@ -1884,7 +1886,7 @@ async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
             json!({ "app": "clip", "pid": dead_pid, "interval_ms": 250 }),
         )
         .await?;
-    let mut pad = harness.spawn_app_child("pad")?;
+    let mut pad = harness.spawn_app_child("pad").await?;
     let pad_pid = pad.id();
     harness
         .send_request(
@@ -1916,6 +1918,82 @@ async fn dead_pid_and_clean_stop_never_report_a_freeze() -> Result<()> {
     pad.kill()?;
     pad.wait()?;
     harness.shutdown();
+    Ok(())
+}
+
+/// Regression for the intermittent `Text file busy` failure in
+/// `dead_pid_and_clean_stop_never_report_a_freeze`.
+///
+/// Each spawn must get its own copy path and close the write handle before
+/// exec. A shared path let one task truncate the binary another task was
+/// already running, which is ETXTBSY. Concurrent rounds make that old race
+/// easy to hit while the test itself asserts only what a correct harness
+/// guarantees.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_app_child_spawns_never_share_a_copy_path() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let root = temp.path().to_path_buf();
+    for _ in 0..2 {
+        let mut tasks = Vec::new();
+        for _ in 0..12 {
+            let root = root.clone();
+            tasks.push(tokio::spawn(async move {
+                let mut child = spawn_named_sleep(&root, "clip").await?;
+                // `Command::spawn` returns as the child crosses exec, so for
+                // a moment `/proc/<pid>/exe` can still resolve the forked
+                // parent. Poll briefly instead of assuming an instant switch.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let exe = fs::read_link(format!("/proc/{}/exe", child.id()));
+                    let name = exe
+                        .as_ref()
+                        .ok()
+                        .and_then(|exe| exe.file_name())
+                        .and_then(|name| name.to_str());
+                    if name == Some("breadclip") {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(anyhow!(
+                            "pid {} never ran breadclip (last exe: {:?})",
+                            child.id(),
+                            exe.map(|path| path.display().to_string())
+                        ));
+                    }
+                    sleep(Duration::from_millis(1)).await;
+                }
+                child.kill()?;
+                child.wait()?;
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
+        for task in tasks {
+            task.await??;
+        }
+    }
+    Ok(())
+}
+
+/// The exec retry must turn a transient ETXTBSY into a successful spawn
+/// instead of failing the test. Holding a write handle makes the first exec
+/// fail deterministically; releasing it a few milliseconds later is exactly
+/// the window the real cross-test race leaves behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_waits_out_a_transient_text_file_busy() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let executable = temp.path().join("breadclip");
+    install_test_executable(Path::new("/usr/bin/sleep"), &executable)?;
+
+    let hold = fs::OpenOptions::new().write(true).open(&executable)?;
+    let release = tokio::spawn(async move {
+        sleep(Duration::from_millis(10)).await;
+        drop(hold);
+    });
+
+    let mut child = spawn_test_executable(&executable).await?;
+    release.await?;
+    child.kill()?;
+    child.wait()?;
     Ok(())
 }
 
@@ -1992,7 +2070,7 @@ async fn frozen_dead_process_is_retired_and_next_instance_is_not_recovery() -> R
     reader.next_line().await?;
 
     // A real child whose executable matches the bread app.
-    let mut child = harness.spawn_app_child("clip")?;
+    let mut child = harness.spawn_app_child("clip").await?;
     let old_pid = child.id();
     harness
         .send_request(
@@ -2091,7 +2169,7 @@ async fn bug_reload_drops_an_excluded_app_from_freeze_tracking() -> Result<()> {
     let mut reader = BufReader::new(read_half).lines();
     reader.next_line().await?;
 
-    let mut child = harness.spawn_app_child("clip")?;
+    let mut child = harness.spawn_app_child("clip").await?;
     let pid = child.id();
     harness
         .send_request(
@@ -2147,6 +2225,87 @@ struct TestHarness {
     _temp: TempDir,
     child: Child,
     socket_path: PathBuf,
+}
+
+/// How many times to retry a spawn that lost the transient "Text file busy"
+/// race. A concurrent `fork` (another test thread starting any process) can
+/// duplicate the write handle of an executable this task just copied, and
+/// `exec` then sees its target as still open for writing. The copy is fully
+/// written, flushed and closed before the exec attempt, so a bounded retry
+/// with a short backoff is enough for the duplicated handle to go away.
+const TEXT_FILE_BUSY_ATTEMPTS: u32 = 20;
+
+/// Gives every copied executable its own directory, even within one
+/// `TestHarness`, so no copy can truncate a binary another child is running.
+static SPAWN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Copy `source` to `dest`, flush the bytes, and close every write handle
+/// before returning. No caller can exec a file this function still has open
+/// for writing.
+fn install_test_executable(source: &Path, dest: &Path) -> Result<()> {
+    fs::copy(source, dest)?;
+    {
+        // `fs::copy` already closes its own descriptor, but make the
+        // write-then-close ordering explicit: an exec must never see this
+        // path open for writing.
+        let file = fs::OpenOptions::new().write(true).open(dest)?;
+        file.sync_all()?;
+    }
+    fs::set_permissions(dest, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+fn is_text_file_busy(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::ExecutableFileBusy
+}
+
+/// Exec `executable`, retrying the transient "Text file busy" failure.
+///
+/// `fork` in another thread can briefly hold a duplicate of a write
+/// descriptor this process opened for the same file, and `exec` then sees its
+/// target as still open for writing. The copy is fully written, flushed and
+/// closed first, so a bounded retry with a short backoff lets the duplicated
+/// handle go away.
+async fn spawn_test_executable(executable: &Path) -> Result<Child> {
+    let mut attempt: u32 = 0;
+    loop {
+        let spawned = Command::new(executable)
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => return Ok(child),
+            Err(err) if is_text_file_busy(&err) && attempt < TEXT_FILE_BUSY_ATTEMPTS => {
+                attempt += 1;
+                // 2 ms, 4 ms, 8 ms, 16 ms, then 32 ms per retry.
+                let millis = (2u64 << (attempt - 1).min(4)).min(50);
+                sleep(Duration::from_millis(millis)).await;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "could not spawn {} after {attempt} Text file busy retries",
+                        executable.display()
+                    )
+                })
+            }
+        }
+    }
+}
+
+/// Copy `sleep` to a path whose basename is `bread<app>` and exec it.
+///
+/// Every call gets a private directory: an executable is never replaced or
+/// truncated while a previous child may still be running it.
+async fn spawn_named_sleep(root: &Path, app: &str) -> Result<Child> {
+    let sequence = SPAWN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let dir = root.join(format!("spawn-{sequence}"));
+    fs::create_dir_all(&dir)?;
+    let executable = dir.join(format!("bread{app}"));
+    install_test_executable(Path::new("/usr/bin/sleep"), &executable)?;
+    spawn_test_executable(&executable).await
 }
 
 impl TestHarness {
@@ -2366,15 +2525,8 @@ enabled = false
     /// A real process whose executable basename belongs to the requested
     /// bread app, so the daemon's `/proc/<pid>/exe` identity check is exercised
     /// rather than bypassed with the test runner's pid.
-    fn spawn_app_child(&self, app: &str) -> Result<Child> {
-        let executable = self._temp.path().join(format!("bread{app}"));
-        fs::copy("/usr/bin/sleep", &executable)?;
-        Ok(Command::new(executable)
-            .arg("30")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?)
+    async fn spawn_app_child(&self, app: &str) -> Result<Child> {
+        spawn_named_sleep(self._temp.path(), app).await
     }
 
     async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
