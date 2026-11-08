@@ -1547,8 +1547,10 @@ thresholds). UPower-derived battery events additionally carry `charging`
 `native_path` provenance for the originating D-Bus device. The composite
 `DisplayDevice` is intentionally ignored for state (concrete devices are
 authoritative), as is any device whose UPower `Type` is neither line
-power nor battery, so peripheral batteries can never surface as the
-system battery. An absent battery (`IsPresent` false) reports nothing
+power nor battery, or whose `battery_*` object path carries a peripheral
+marker (`hid`, `hidpp`, `mouse`, `keyboard`, `monitor`, `ups`,
+`bluetooth`), so peripheral batteries stay out of system state. An absent
+battery (`IsPresent` false) reports nothing
 rather than a stale 0%.
 
 #### Network

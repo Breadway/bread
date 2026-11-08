@@ -773,11 +773,14 @@ enum UpowerDeviceClass {
 ///
 /// An explicit `Type` wins: line power (1) and battery (2) drive state,
 /// while anything else (UPS, monitor, mouse, ...) is left alone so a
-/// peripheral battery can never masquerade as the system battery. `Type`
+/// peripheral battery with a known type never drives system state. `Type`
 /// is only present in the signal when it changed, which is almost never,
 /// so when it is absent fall back to the object path: UPower names
-/// line-power devices `.../line_power_*` and batteries `.../battery_*`.
-/// The composite `DisplayDevice` matches neither and stays on the generic
+/// line-power devices `.../line_power_*` and system batteries
+/// `.../battery_*`. A `battery_*` path carrying a peripheral marker
+/// (`hid`, `hidpp`, `mouse`, `keyboard`, `monitor`, `ups`, `bluetooth`)
+/// is treated as a peripheral and stays generic. The composite
+/// `DisplayDevice` matches neither class and stays on the generic
 /// fallback, which also keeps concrete-device and composite signals from
 /// double-reporting the same transition.
 fn upower_device_class(
@@ -793,11 +796,30 @@ fn upower_device_class(
     }
     if path.contains("line_power") {
         Some(UpowerDeviceClass::LinePower)
-    } else if path.contains("battery") {
+    } else if path.contains("battery") && !is_peripheral_upower_path(path) {
         Some(UpowerDeviceClass::Battery)
     } else {
         None
     }
+}
+
+/// True when a UPower object path looks like a peripheral rather than the
+/// system battery, e.g. `.../battery_hidpp_battery_0` for a wireless
+/// mouse. Compared case-insensitively against the lowercased path.
+fn is_peripheral_upower_path(path: &str) -> bool {
+    const PERIPHERAL_MARKERS: &[&str] = &[
+        "hid",
+        "hidpp",
+        "mouse",
+        "keyboard",
+        "monitor",
+        "ups",
+        "bluetooth",
+    ];
+    let lowered = path.to_lowercase();
+    PERIPHERAL_MARKERS
+        .iter()
+        .any(|marker| lowered.contains(marker))
 }
 
 #[cfg(test)]
@@ -1592,6 +1614,24 @@ mod tests {
         let out = n.normalize(&upower_changed(
             "/org/freedesktop/UPower/devices/battery_hidpp_0",
             json!({"battery_type": 5, "percentage": 12.0, "state": 2}),
+            1,
+        ));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].event, "bread.power.changed");
+        assert!(out[0].data.get("battery_percent").is_none());
+        assert!(out[0].data.get("charging").is_none());
+    }
+
+    #[test]
+    fn upower_hid_path_without_type_stays_generic() {
+        let n = EventNormalizer::new(0);
+        // The blocker regression: `Type` is absent from typical change
+        // signals, so a peripheral battery without an explicit type (here
+        // a wireless mouse at a low 12%) must still not drive system state
+        // just because its path contains "battery".
+        let out = n.normalize(&upower_changed(
+            "/org/freedesktop/UPower/devices/battery_hidpp_battery_0",
+            json!({"percentage": 12.0, "state": 2, "is_present": true}),
             1,
         ));
         assert_eq!(out.len(), 1);
