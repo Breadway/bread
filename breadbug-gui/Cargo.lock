@@ -96,7 +96,7 @@ dependencies = [
 
 [[package]]
 name = "bread-bug"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bread-scrub",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "bread-scrub"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "regex",
  "serde_json",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "bread-shared"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "dirs 6.0.0",
  "serde",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "breadbug"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "bread-bug",
