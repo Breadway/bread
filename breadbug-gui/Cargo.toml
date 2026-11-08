@@ -1,6 +1,6 @@
 [package]
 name = "breadbug-gui"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 description = "GTK4 front end for breadbug: pick an app, review exactly what a report contains, save or send it"
 
@@ -27,3 +27,10 @@ gtk4 = { version = "0.11", features = ["v4_12"] }
 # this crate, and the main bread workspace (and its CI image) should not
 # require them. Build it from this directory.
 [workspace]
+
+# Keep line tables in release builds so breadbug-gui and breadbug-launch can
+# publish resolvable crash frames before the binaries are stripped, matching
+# the root workspace profile. This crate is its own workspace, so it does not
+# inherit that setting.
+[profile.release]
+debug = "line-tables-only"
