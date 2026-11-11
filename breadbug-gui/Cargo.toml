@@ -1,6 +1,6 @@
 [package]
 name = "breadbug-gui"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2021"
 description = "GTK4 front end for breadbug: pick an app, review exactly what a report contains, save or send it"
 
