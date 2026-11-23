@@ -25,15 +25,20 @@ fi
 T="$(mktemp -d)"
 mkdir -p "$T/runtime" "$T/home" "$T/state" "$T/cfg" "$T/cache"
 chmod 700 "$T/runtime"
-cat > "$T/sway.conf" <<'EOF'
-output HEADLESS-1 resolution 1400x900
+cat > "$T/sway.conf" <<EOF
+output HEADLESS-1 resolution ${SHOT_WIDTH:-1400}x${SHOT_HEIGHT:-900}
 default_border none
 gaps inner 0
 gaps outer 0
 EOF
 
 PIDS=""
-if [ "${REAL:-0}" = "1" ]; then
+if [ "${LIVE:-0}" = "1" ]; then
+    # Read-only smoke test against the running daemon: symlink its socket into
+    # the throwaway runtime dir. Tracing is enabled and cleared by the app.
+    mkdir -p "$T/runtime/bread"
+    ln -s "/run/user/$(id -u)/bread/breadd.sock" "$T/runtime/bread/breadd.sock"
+elif [ "${REAL:-0}" = "1" ]; then
     # Exercise the real daemon and the real IPC methods. A tiny init.lua
     # chains two custom events and a timer supplies a steady stream.
     mkdir -p "$T/cfg/bread/modules"
@@ -83,7 +88,7 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
+dbus-run-session -- env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
     WAYLAND_DISPLAY=wayland-1 GDK_BACKEND=wayland GTK_USE_PORTAL=0 \
     HOME="$T/home" XDG_STATE_HOME="$T/state" XDG_CONFIG_HOME="$T/cfg" \
     XDG_CACHE_HOME="$T/cache" XDG_RUNTIME_DIR="$T/runtime" \

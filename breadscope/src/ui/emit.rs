@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
 use gtk4::prelude::*;
-use gtk4::{Box as GBox, Entry, Label, Orientation, TextView, Window};
+use gtk4::{Box as GBox, Button, Entry, Label, Orientation, TextView, Window};
 
 use super::{button, dim_label, hbox, horizontal_spacer, label, Action, Shared};
 use crate::ipc;
@@ -46,7 +46,7 @@ pub fn open(
         .transient_for(parent)
         .modal(true)
         .title("Emit event")
-        .default_width(520)
+        .default_width(580)
         .build();
     dialog.add_css_class("scope");
 
@@ -71,19 +71,44 @@ pub fn open(
     error.set_visible(false);
     content.append(&error);
 
+    let examples = hbox(5);
+    let examples_label = Label::new(Some("try:"));
+    examples_label.add_css_class("tiny");
+    examples_label.add_css_class("faint");
+    examples.append(&examples_label);
+    content.append(&examples);
+
     content.append(&field_label("Event name"));
     let name = Entry::new();
     name.set_text("bread.custom.test");
     name.add_css_class("mono");
     content.append(&name);
+    let validation = Label::new(Some(""));
+    validation.add_css_class("tiny");
+    validation.set_xalign(0.0);
+    validation.set_wrap(true);
+    content.append(&validation);
 
-    content.append(&field_label("Source"));
+    let source_row = hbox(8);
+    let source_label = field_label("Source");
+    source_row.append(&source_label);
     let source = Entry::new();
     source.set_text("Manual");
     source.set_editable(false);
-    content.append(&source);
+    source.set_hexpand(true);
+    source_row.append(&source);
+    let source_note = Label::new(Some("breadd assigns the event id"));
+    source_note.add_css_class("tiny");
+    source_note.add_css_class("faint");
+    source_row.append(&source_note);
+    content.append(&source_row);
 
-    content.append(&field_label("Data (JSON)"));
+    let data_header = hbox(8);
+    data_header.append(&field_label("Data (JSON)"));
+    data_header.append(&horizontal_spacer());
+    let format = button("Format", "small");
+    data_header.append(&format);
+    content.append(&data_header);
     let data = TextView::new();
     data.set_monospace(true);
     data.set_wrap_mode(gtk4::WrapMode::WordChar);
@@ -100,7 +125,7 @@ pub fn open(
     content.append(&data_scroll);
 
     let hint = dim_label(
-        "Try bread.custom.test, or bread.power.ac.connected to see the reserved-domain guard.",
+        "Accepted events appear in the stream immediately. Reserved examples are rejected locally and by breadd.",
     );
     hint.add_css_class("tiny");
     content.append(&hint);
@@ -117,6 +142,71 @@ pub fn open(
     actions_row.append(&publish);
     content.append(&actions_row);
     dialog.set_child(Some(&content));
+
+    for (label_text, event_name, payload, note) in [
+        (
+            "custom",
+            "bread.custom.test",
+            r#"{"note": "poked from breadscope"}"#,
+            "accepted",
+        ),
+        (
+            "command",
+            "bread.command.bar.refresh",
+            r#"{"app": "bar"}"#,
+            "accepted on the command bus",
+        ),
+        (
+            "reserved",
+            "bread.power.ac.connected",
+            r#"{"ac_connected": true}"#,
+            "rejected: adapter-owned domain",
+        ),
+    ] {
+        let chip = Button::with_label(label_text);
+        chip.add_css_class("chip");
+        chip.set_tooltip_text(Some(note));
+        {
+            let name = name.clone();
+            let data = data.clone();
+            let validation = validation.clone();
+            chip.connect_clicked(move |_| {
+                name.set_text(event_name);
+                data.buffer().set_text(payload);
+                update_validation(&validation, event_name);
+            });
+        }
+        examples.append(&chip);
+    }
+
+    {
+        let validation = validation.clone();
+        name.connect_changed(move |entry| {
+            update_validation(&validation, &entry.text());
+        });
+    }
+    update_validation(&validation, &name.text());
+
+    {
+        let error = error.clone();
+        let data = data.clone();
+        format.connect_clicked(move |_| {
+            let buffer = data.buffer();
+            let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(value) => {
+                    buffer.set_text(
+                        &serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.to_string()),
+                    );
+                    error.set_visible(false);
+                }
+                Err(err) => {
+                    error.set_text(&format!("data is not valid JSON: {err}"));
+                    error.set_visible(true);
+                }
+            }
+        });
+    }
 
     {
         let controller = gtk4::EventControllerKey::new();
@@ -203,6 +293,27 @@ pub fn open(
     }
     dialog.present();
     name.grab_focus();
+}
+
+fn update_validation(label: &Label, name: &str) {
+    label.remove_css_class("ok");
+    label.remove_css_class("bad");
+    let name = name.trim();
+    if name.is_empty() {
+        label.set_text("Enter an event name.");
+        label.add_css_class("bad");
+        return;
+    }
+    match validate_event_name(name) {
+        Ok(()) => {
+            label.set_text("accepted by the manual-emit guard");
+            label.add_css_class("ok");
+        }
+        Err(message) => {
+            label.set_text(&message);
+            label.add_css_class("bad");
+        }
+    }
 }
 
 fn field_label(text: &str) -> Label {

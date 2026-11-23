@@ -2,13 +2,14 @@
 
 use gtk4::prelude::*;
 use gtk4::{
-    pango, Align, Box as GBox, Button, FlowBox, Label, Orientation, ScrolledWindow, Stack,
-    StackSwitcher,
+    pango, Align, Box as GBox, Button, FlowBox, Label, Orientation, ScrolledWindow, SearchEntry,
+    Stack, StackSwitcher,
 };
 
+use super::json::JsonView;
 use super::{
-    button, dim_label, ellipsize, hbox, horizontal_spacer, label, mono, page_sub, text_view, vbox,
-    Action, Shared,
+    button, dim_label, ellipsize, hbox, horizontal_spacer, label, mono, page_sub, vbox, Action,
+    Shared,
 };
 use crate::model;
 
@@ -37,10 +38,24 @@ impl StateView {
         title.add_css_class("page-title");
         titles.append(&title);
         titles.append(&page_sub(
-            "The same shapes returned by state.dump, workflows.list, and widgets.list. Read-only: breadscope never edits daemon state.",
+            "Live daemon snapshots from state.dump, workflows.list, and widgets.list. Read-only.",
         ));
         header.append(&titles);
         header.append(&horizontal_spacer());
+        let search = SearchEntry::new();
+        search.set_placeholder_text(Some("filter keys"));
+        search.set_width_chars(16);
+        search.set_max_width_chars(24);
+        search.set_valign(Align::Center);
+        {
+            let shared = shared.clone();
+            let actions = actions.clone();
+            search.connect_search_changed(move |entry| {
+                shared.borrow_mut().state_search = entry.text().to_string();
+                let _ = actions.send(Action::RefreshState);
+            });
+        }
+        header.append(&search);
 
         let stack = Stack::new();
         stack.set_vexpand(true);
@@ -122,6 +137,12 @@ impl StateView {
         &self.root
     }
 
+    pub fn set_tab(&self, tab: &str) {
+        if matches!(tab, "runtime" | "workflows" | "widgets") {
+            self.stack.set_visible_child_name(tab);
+        }
+    }
+
     pub fn refresh(&self, shared: &Shared) {
         let signature = {
             let state = shared.borrow();
@@ -151,18 +172,33 @@ fn render_runtime(keys: &GBox, panel: &GBox, window: &gtk4::ApplicationWindow, s
     while let Some(child) = panel.first_child() {
         panel.remove(&child);
     }
-    let (state, selected) = {
+    let (state, selected, query) = {
         let state = shared.borrow();
-        (state.state.clone(), state.state_key.clone())
+        (
+            state.state.clone(),
+            state.state_key.clone(),
+            state.state_search.trim().to_lowercase(),
+        )
     };
     let Some(object) = state.as_object() else {
         panel.append(&dim_label("No runtime state reported by the daemon."));
         return;
     };
-    let mut sorted: Vec<(&String, &serde_json::Value)> = object.iter().collect();
+    let mut sorted: Vec<(&String, &serde_json::Value)> = object
+        .iter()
+        .filter(|(key, value)| {
+            query.is_empty()
+                || key.to_lowercase().contains(&query)
+                || value.to_string().to_lowercase().contains(&query)
+        })
+        .collect();
     sorted.sort_by(|a, b| a.0.cmp(b.0));
     if sorted.is_empty() {
-        panel.append(&dim_label("Runtime state is empty."));
+        panel.append(&dim_label(if query.is_empty() {
+            "Runtime state is empty."
+        } else {
+            "No state key matches the filter."
+        }));
         return;
     }
     let selected = sorted
@@ -206,8 +242,12 @@ fn render_runtime(keys: &GBox, panel: &GBox, window: &gtk4::ApplicationWindow, s
     let title_label = mono(&format!("state.dump().{selected}"));
     title_label.add_css_class("small");
     title.append(&title_label);
+    let count = Label::new(Some(&format!("{} keys", sorted.len())));
+    count.add_css_class("tiny");
+    count.add_css_class("faint");
+    title.append(&count);
     title.append(&horizontal_spacer());
-    let copy = button("Copy", "small");
+    let copy = button("Copy key", "small");
     {
         let window = window.clone();
         let text = serde_json::to_string_pretty(&value).unwrap_or_default();
@@ -217,8 +257,9 @@ fn render_runtime(keys: &GBox, panel: &GBox, window: &gtk4::ApplicationWindow, s
     }
     title.append(&copy);
     panel.append(&title);
-    let pretty = serde_json::to_string_pretty(&value).unwrap_or_default();
-    panel.append(&text_view(&pretty, 560));
+    let json = JsonView::new(520);
+    json.set_value(&value);
+    panel.append(&json.root);
 }
 
 fn type_summary(value: &serde_json::Value) -> String {
@@ -268,9 +309,12 @@ fn render_workflows(container: &GBox, shared: &Shared) {
         container.append(&dim_label("No workflow instances reported."));
         return;
     }
-    for workflow in &state.workflows {
+    for (index, workflow) in state.workflows.iter().enumerate() {
         let row = hbox(10);
         row.add_css_class("table-row");
+        if index % 2 == 1 {
+            row.add_css_class("alt");
+        }
         let name = Label::new(Some(&workflow.name));
         name.add_css_class("table-text");
         name.add_css_class("mono");

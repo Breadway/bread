@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod emit;
 pub mod flow;
+pub mod json;
 pub mod modules;
 pub mod state;
 pub mod stream;
@@ -25,6 +26,7 @@ use crate::ipc::{self, StreamUpdate};
 use crate::model::{
     self, Health, Module, Snapshot, SubscriptionEntry, TraceEntry, WidgetSummary, Workflow,
 };
+use crate::session::{self, Session};
 use crate::style;
 
 pub const EVENT_CAP: usize = 2000;
@@ -70,8 +72,14 @@ pub enum Action {
     SetTrace(bool),
     ReloadModules,
     FilterStream(String),
+    ShowInstances(String),
     RefreshStream,
+    RefreshFlow,
+    RefreshModules,
+    RefreshAdapters,
     RefreshState,
+    TogglePause,
+    OpenModule(String),
     Toast(String),
 }
 
@@ -83,6 +91,22 @@ pub struct AppState {
     pub filter: String,
     pub source: String,
     pub causal: bool,
+    /// Summary mode: one row per event type, with a count.
+    pub grouped: bool,
+    /// Hide the raw `bread.hyprland.event` firehose unless asked for.
+    pub hide_raw: bool,
+    /// Hide the legacy `bread.hyprland.*` compatibility names when the
+    /// canonical `bread.window.*` / `bread.monitor.*` / `bread.workspace.*`
+    /// events carry the same signal.
+    pub hide_legacy: bool,
+    /// Keep the newest visible event selected and pinned to the bottom.
+    pub follow_tail: bool,
+    /// Event age filter in minutes; 0 means the whole buffer.
+    pub window_minutes: u64,
+    /// Separate time window for the interaction map.
+    pub flow_window_minutes: u64,
+    pub module_search: String,
+    pub state_search: String,
     pub selected_event: Option<String>,
     /// True once the user explicitly picks an event; until then the inspector
     /// follows the newest buffered event.
@@ -114,6 +138,14 @@ impl Default for AppState {
             filter: String::new(),
             source: "all".to_string(),
             causal: true,
+            grouped: true,
+            hide_raw: true,
+            hide_legacy: true,
+            follow_tail: true,
+            window_minutes: 0,
+            flow_window_minutes: 0,
+            module_search: String::new(),
+            state_search: String::new(),
             selected_event: None,
             selection_locked: false,
             view: View::Stream,
@@ -264,10 +296,41 @@ impl AppState {
         }
     }
 
-    pub fn matches_filter(&self, event: &BreadEvent) -> bool {
-        if !self.source_matches(event) {
-            return false;
+    pub fn is_raw(event: &BreadEvent) -> bool {
+        event.event == "bread.hyprland.event"
+    }
+
+    pub fn is_legacy(event: &BreadEvent) -> bool {
+        event.event.starts_with("bread.hyprland.") && !Self::is_raw(event)
+    }
+
+    pub fn raw_is_visible(&self) -> bool {
+        !self.hide_raw || self.filter.contains("hyprland.event")
+    }
+
+    pub fn legacy_is_visible(&self) -> bool {
+        !self.hide_legacy || self.filter.contains("hyprland.")
+    }
+
+    pub fn in_window(&self, event: &BreadEvent) -> bool {
+        if self.window_minutes == 0 {
+            return true;
         }
+        let cutoff =
+            bread_shared::now_unix_ms().saturating_sub(self.window_minutes.saturating_mul(60_000));
+        event.timestamp >= cutoff
+    }
+
+    pub fn in_flow_window(&self, event: &BreadEvent) -> bool {
+        if self.flow_window_minutes == 0 {
+            return true;
+        }
+        let cutoff = bread_shared::now_unix_ms()
+            .saturating_sub(self.flow_window_minutes.saturating_mul(60_000));
+        event.timestamp >= cutoff
+    }
+
+    pub fn passes_text_filter(&self, event: &BreadEvent) -> bool {
         let pattern = self.filter.trim();
         if pattern.is_empty() {
             return true;
@@ -279,6 +342,102 @@ impl AppState {
                 || model::source_label(&event.source)
                     .to_lowercase()
                     .contains(&pattern.to_lowercase())
+        }
+    }
+
+    pub fn matches_filter(&self, event: &BreadEvent) -> bool {
+        self.in_window(event)
+            && self.source_matches(event)
+            && self.passes_text_filter(event)
+            && (self.raw_is_visible() || !Self::is_raw(event))
+            && (self.legacy_is_visible() || !Self::is_legacy(event))
+    }
+
+    /// Counts per source chip for the current text filter and time window,
+    /// ignoring the active source chip so every chip keeps a useful count.
+    pub fn source_counts(&self) -> (usize, std::collections::HashMap<String, usize>) {
+        let mut counts = std::collections::HashMap::new();
+        let mut total = 0usize;
+        for event in &self.events {
+            if !self.in_window(event)
+                || !self.passes_text_filter(event)
+                || (!self.raw_is_visible() && Self::is_raw(event))
+                || (!self.legacy_is_visible() && Self::is_legacy(event))
+            {
+                continue;
+            }
+            total += 1;
+            let key = model::source_key(&event.source);
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        (total, counts)
+    }
+
+    pub fn legacy_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| {
+                self.in_window(event) && self.passes_text_filter(event) && Self::is_legacy(event)
+            })
+            .count()
+    }
+
+    pub fn raw_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| {
+                self.in_window(event) && self.passes_text_filter(event) && Self::is_raw(event)
+            })
+            .count()
+    }
+
+    pub fn session(&self) -> Session {
+        Session {
+            view: Some(self.view.id().to_string()),
+            filter: Some(self.filter.clone()),
+            source: Some(self.source.clone()),
+            causal: Some(self.causal),
+            grouped: Some(self.grouped),
+            hide_raw: Some(self.hide_raw),
+            hide_legacy: Some(self.hide_legacy),
+            follow_tail: Some(self.follow_tail),
+            window_minutes: Some(self.window_minutes),
+            flow_window_minutes: Some(self.flow_window_minutes),
+            width: None,
+            height: None,
+        }
+    }
+
+    pub fn apply_session(&mut self, session: &Session) {
+        if let Some(view) = session.view.as_deref().and_then(View::parse) {
+            self.view = view;
+        }
+        if let Some(filter) = session.filter.clone() {
+            self.filter = filter;
+        }
+        if let Some(source) = session.source.clone() {
+            self.source = source;
+        }
+        if let Some(causal) = session.causal {
+            self.causal = causal;
+        }
+        if let Some(grouped) = session.grouped {
+            self.grouped = grouped;
+        }
+        if let Some(hide_raw) = session.hide_raw {
+            self.hide_raw = hide_raw;
+        }
+        if let Some(hide_legacy) = session.hide_legacy {
+            self.hide_legacy = hide_legacy;
+        }
+        if let Some(follow) = session.follow_tail {
+            self.follow_tail = follow;
+        }
+        if let Some(minutes) = session.window_minutes {
+            self.window_minutes = minutes;
+        }
+        if let Some(minutes) = session.flow_window_minutes {
+            self.flow_window_minutes = minutes;
         }
     }
 
@@ -490,19 +649,18 @@ impl Topbar {
         self.status.remove_css_class("warn");
         self.status.remove_css_class("bad");
         let (text, class) = if state.daemon_up {
-            ("connected".to_string(), "ok")
+            ("●  connected".to_string(), "ok")
         } else if state.stream_error.is_some() {
-            ("disconnected".to_string(), "bad")
+            ("●  disconnected".to_string(), "bad")
         } else {
-            ("connecting".to_string(), "warn")
+            ("●  connecting".to_string(), "warn")
         };
         self.status.set_text(&text);
         self.status.add_css_class(class);
 
         let meta = match state.health.as_ref() {
             Some(health) => format!(
-                "pid {}   v{}   up {}   api {}",
-                health.pid,
+                "v{}   up {}   api {}",
                 if health.version.is_empty() {
                     "?"
                 } else {
@@ -518,6 +676,12 @@ impl Topbar {
             None => "no daemon metadata".to_string(),
         };
         self.meta.set_text(&meta);
+        if let Some(health) = state.health.as_ref() {
+            self.meta.set_tooltip_text(Some(&format!(
+                "pid {}\nsocket {}",
+                health.pid, health.socket
+            )));
+        }
         self.trace.set_active(state.trace_enabled);
         self.trace.set_label(if state.trace_enabled {
             "Trace on"
@@ -570,12 +734,65 @@ impl Sidebar {
     }
 }
 
+pub struct StatusBar {
+    left: Label,
+    right: Label,
+}
+
+impl StatusBar {
+    pub fn refresh(&self, shared: &Shared) {
+        let state = shared.borrow();
+        let mut left = if state.paused {
+            format!("paused · {} buffered", state.pending_count())
+        } else if state.follow_tail {
+            "following live".to_string()
+        } else {
+            "scroll paused".to_string()
+        };
+        if state.window_minutes > 0 {
+            left.push_str(&format!(" · last {}m", state.window_minutes));
+        }
+        if !state.filter.trim().is_empty() {
+            left.push_str(&format!(" · filter {}", state.filter.trim()));
+        }
+        if let Some(error) = state.stream_error.as_deref() {
+            left.push_str(&format!(" · {error}"));
+        }
+        self.left.set_text(&left);
+        self.left.remove_css_class("ok");
+        self.left.remove_css_class("warn");
+        self.left.remove_css_class("bad");
+        if state.daemon_up {
+            self.left.add_css_class("ok");
+        } else {
+            self.left.add_css_class("bad");
+        }
+
+        let api = state
+            .health
+            .as_ref()
+            .map(|health| health.api_version.as_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("?");
+        self.right.set_text(&format!(
+            "{} events  ·  {} subscriptions  ·  trace {}  ·  api {}",
+            state.events.len(),
+            state.subscriptions.len(),
+            if state.trace_enabled { "on" } else { "off" },
+            api
+        ));
+    }
+}
+
 pub struct Hub {
     pub shared: Shared,
     pub window: ApplicationWindow,
     pub stack: Stack,
     pub topbar: Topbar,
     pub sidebar: Sidebar,
+    pub statusbar: StatusBar,
+    pub banner: Revealer,
+    pub banner_label: Label,
     pub stream: stream::StreamView,
     pub flow: flow::FlowView,
     pub modules: modules::ModulesView,
@@ -584,7 +801,7 @@ pub struct Hub {
     nav: Vec<(View, Button)>,
     toast: Revealer,
     toast_label: Label,
-    toast_source: RefCell<Option<glib::SourceId>>,
+    toast_generation: Rc<Cell<u64>>,
     current: Cell<View>,
     actions: Sender<Action>,
 }
@@ -612,20 +829,55 @@ impl Hub {
         } else if view == View::Adapters {
             self.adapters.refresh(&self.shared);
         }
+        self.persist();
+    }
+
+    pub fn persist(&self) {
+        let mut session = self.shared.borrow().session();
+        // A switch_view during startup can run before the window is mapped.
+        // Do not replace a remembered size with the 1x1 pre-map allocation.
+        if self.window.width() > 200 && self.window.height() > 200 {
+            session.width = Some(self.window.width());
+            session.height = Some(self.window.height());
+        } else {
+            session.width = None;
+            session.height = None;
+        }
+        crate::session::save(&session);
+    }
+
+    pub fn refresh_chrome(&self) {
+        self.topbar.refresh(&self.shared);
+        self.sidebar.refresh(&self.shared);
+        self.statusbar.refresh(&self.shared);
+        let (down, message) = {
+            let state = self.shared.borrow();
+            let down = !state.daemon_up;
+            let message = state
+                .stream_error
+                .clone()
+                .unwrap_or_else(|| "breadd is not reachable; reconnecting".to_string());
+            (down, message)
+        };
+        self.banner.set_reveal_child(down);
+        if down {
+            self.banner_label.set_text(&message);
+        }
     }
 
     pub fn toast(&self, message: &str) {
         self.toast_label.set_text(message);
         self.toast.set_reveal_child(true);
-        if let Some(source) = self.toast_source.borrow_mut().take() {
-            source.remove();
-        }
+        let generation = self.toast_generation.get().saturating_add(1);
+        self.toast_generation.set(generation);
         let reveal = self.toast.clone();
-        let source = glib::timeout_add_seconds_local(3, move || {
-            reveal.set_reveal_child(false);
+        let current = self.toast_generation.clone();
+        glib::timeout_add_seconds_local(3, move || {
+            if current.get() == generation {
+                reveal.set_reveal_child(false);
+            }
             glib::ControlFlow::Break
         });
-        *self.toast_source.borrow_mut() = Some(source);
     }
 
     pub fn handle_action(&self, action: Action) {
@@ -659,8 +911,37 @@ impl Hub {
                 self.stream.set_filter(&pattern);
                 self.switch_view(View::Stream);
             }
-            Action::RefreshStream => self.stream.refresh(&self.shared),
+            Action::ShowInstances(event_name) => {
+                {
+                    let mut state = self.shared.borrow_mut();
+                    state.filter = event_name.clone();
+                    state.grouped = false;
+                    state.causal = false;
+                    state.selection_locked = false;
+                    state.follow_tail = true;
+                }
+                self.stream.set_filter(&event_name);
+                self.stream.set_grouped(false);
+                self.switch_view(View::Stream);
+            }
+            Action::RefreshStream => {
+                self.stream.refresh(&self.shared);
+                self.statusbar.refresh(&self.shared);
+            }
+            Action::RefreshFlow => self.flow.refresh(&self.shared),
+            Action::RefreshModules => self.modules.refresh(&self.shared),
+            Action::RefreshAdapters => self.adapters.refresh(&self.shared),
             Action::RefreshState => self.state.refresh(&self.shared),
+            Action::OpenModule(name) => {
+                self.shared.borrow_mut().selected_module = Some(name);
+                self.switch_view(View::Modules);
+            }
+            Action::TogglePause => {
+                let paused = !self.shared.borrow().paused;
+                self.shared.borrow_mut().set_paused(paused);
+                self.stream.refresh(&self.shared);
+                self.statusbar.refresh(&self.shared);
+            }
             Action::Toast(message) => self.toast(&message),
         }
     }
@@ -683,18 +964,24 @@ fn nav_button(icon: &str, text: &str, count: &str) -> (Button, Label) {
     (button, count_label)
 }
 
-pub fn build_window(app: &Application, initial_view: Option<View>) -> ApplicationWindow {
+pub fn build_window(
+    app: &Application,
+    initial_view: Option<View>,
+    initial_tab: Option<String>,
+) -> ApplicationWindow {
     bread_theme::gtk::apply_shared();
     style::apply_global();
 
+    let saved = session::load();
     let shared: Shared = Rc::new(RefCell::new(AppState::default()));
+    shared.borrow_mut().apply_session(&saved);
     let (action_tx, action_rx) = mpsc::channel::<Action>();
 
     let window = ApplicationWindow::builder()
         .application(app)
         .title("breadscope")
-        .default_width(1360)
-        .default_height(860)
+        .default_width(saved.width.filter(|width| *width > 200).unwrap_or(1360))
+        .default_height(saved.height.filter(|height| *height > 200).unwrap_or(880))
         .build();
     window.add_css_class("scope");
 
@@ -734,7 +1021,7 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     topbar_box.append(&loaf);
     topbar_box.append(&brand);
 
-    let mock_tag = Label::new(Some("GTK4"));
+    let mock_tag = Label::new(Some("LOCAL"));
     mock_tag.add_css_class("mock-tag");
     mock_tag.set_valign(Align::Center);
     topbar_box.append(&mock_tag);
@@ -773,6 +1060,22 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     }
     topbar_box.append(&emit_button);
     root.append(&topbar_box);
+
+    // A visible reconnect state, not just a tiny pill in the corner.
+    let banner = Revealer::new();
+    banner.set_transition_type(RevealerTransitionType::SlideDown);
+    banner.set_transition_duration(140);
+    let banner_row = hbox(8);
+    banner_row.add_css_class("banner");
+    let banner_icon = gtk4::Image::from_icon_name("network-offline-symbolic");
+    banner_icon.set_pixel_size(14);
+    banner_row.append(&banner_icon);
+    let banner_label = Label::new(Some("breadd is not reachable; reconnecting"));
+    banner_label.set_xalign(0.0);
+    banner_label.set_hexpand(true);
+    banner_row.append(&banner_label);
+    banner.set_child(Some(&banner_row));
+    root.append(&banner);
 
     // ---- body: rail + stack ---------------------------------------------
     let body = hbox(0);
@@ -852,15 +1155,26 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     socket.set_max_width_chars(28);
     socket.set_xalign(0.0);
     rail_card.append(&socket);
-    let about = Button::with_label("What is this?");
+    let rail_buttons = hbox(4);
+    let about = Button::with_label("About");
     about.add_css_class("btn");
     about.add_css_class("small");
-    about.set_margin_top(6);
+    about.set_hexpand(true);
     {
         let parent = window.clone();
         about.connect_clicked(move |_| show_about(&parent));
     }
-    rail_card.append(&about);
+    rail_buttons.append(&about);
+    let shortcuts = Button::with_label("Keys");
+    shortcuts.add_css_class("btn");
+    shortcuts.add_css_class("small");
+    shortcuts.set_hexpand(true);
+    {
+        let parent = window.clone();
+        shortcuts.connect_clicked(move |_| show_shortcuts(&parent));
+    }
+    rail_buttons.append(&shortcuts);
+    rail_card.append(&rail_buttons);
     rail.append(&rail_card);
     body.append(&rail);
 
@@ -873,10 +1187,13 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     stack.set_transition_duration(120);
 
     let stream_view = stream::StreamView::new(&shared, &window, action_tx.clone());
-    let flow_view = flow::FlowView::new(&shared);
+    let flow_view = flow::FlowView::new(&shared, action_tx.clone());
     let modules_view = modules::ModulesView::new(&shared, action_tx.clone());
     let state_view = state::StateView::new(&shared, &window, action_tx.clone());
-    let adapters_view = adapters::AdaptersView::new(&shared);
+    if let Some(tab) = initial_tab.as_deref() {
+        state_view.set_tab(tab);
+    }
+    let adapters_view = adapters::AdaptersView::new(&shared, action_tx.clone());
 
     stack.add_named(stream_view.root(), Some(View::Stream.id()));
     stack.add_named(flow_view.root(), Some(View::Flow.id()));
@@ -884,6 +1201,20 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     stack.add_named(state_view.root(), Some(View::State.id()));
     stack.add_named(adapters_view.root(), Some(View::Adapters.id()));
     body.append(&stack);
+
+    let statusbar_box = hbox(10);
+    statusbar_box.add_css_class("statusbar");
+    let status_left = Label::new(Some("connecting"));
+    status_left.set_xalign(0.0);
+    status_left.add_css_class("status-text");
+    statusbar_box.append(&status_left);
+    statusbar_box.append(&horizontal_spacer());
+    let status_right = Label::new(Some(""));
+    status_right.set_xalign(1.0);
+    status_right.add_css_class("status-text");
+    status_right.add_css_class("faint");
+    statusbar_box.append(&status_right);
+    root.append(&statusbar_box);
 
     // ---- toast -----------------------------------------------------------
     let toast_layer = gtk4::Overlay::new();
@@ -912,6 +1243,12 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
             trace,
         },
         sidebar: Sidebar { counts, footer },
+        statusbar: StatusBar {
+            left: status_left,
+            right: status_right,
+        },
+        banner,
+        banner_label,
         stream: stream_view,
         flow: flow_view,
         modules: modules_view,
@@ -920,11 +1257,12 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
         nav,
         toast,
         toast_label,
-        toast_source: RefCell::new(None),
+        toast_generation: Rc::new(Cell::new(0)),
         current: Cell::new(View::Stream),
         actions: action_tx.clone(),
     });
-    hub.switch_view(initial_view.unwrap_or(View::Stream));
+    let start_view = initial_view.unwrap_or_else(|| shared.borrow().view);
+    hub.switch_view(start_view);
 
     {
         let focus = gtk4::gio::SimpleAction::new("focus-filter", None);
@@ -944,6 +1282,151 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
             application.set_accels_for_action("win.focus-filter", &["<Ctrl>f"]);
             application.set_accels_for_action("win.emit-event", &["<Ctrl><Shift>e", "F2"]);
         }
+    }
+
+    {
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let hub_for_keys = hub.clone();
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            use gtk4::gdk::Key;
+            let focus = gtk4::prelude::GtkWindowExt::focus(&hub_for_keys.window);
+            let typing = focus
+                .map(|widget| {
+                    widget.is::<gtk4::Entry>()
+                        || widget.is::<gtk4::SearchEntry>()
+                        || widget.is::<gtk4::TextView>()
+                        || widget.is::<gtk4::DropDown>()
+                })
+                .unwrap_or(false);
+
+            if key == Key::F2
+                || (key == Key::e
+                    && modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                    && modifiers.contains(gtk4::gdk::ModifierType::SHIFT_MASK))
+            {
+                hub_for_keys.handle_action(Action::Emit);
+                return glib::Propagation::Stop;
+            }
+            if key == Key::f && modifiers.contains(gtk4::gdk::ModifierType::CONTROL_MASK) {
+                hub_for_keys.switch_view(View::Stream);
+                hub_for_keys.stream.focus_filter();
+                return glib::Propagation::Stop;
+            }
+            if key == Key::question && !typing {
+                show_shortcuts(&hub_for_keys.window);
+                return glib::Propagation::Stop;
+            }
+            if key == Key::Escape && !typing {
+                let mut state = hub_for_keys.shared.borrow_mut();
+                state.filter.clear();
+                state.selected_event = None;
+                state.selection_locked = false;
+                state.follow_tail = true;
+                drop(state);
+                hub_for_keys.stream.clear_filter();
+                hub_for_keys.stream.refresh(&hub_for_keys.shared);
+                return glib::Propagation::Stop;
+            }
+            if typing {
+                return glib::Propagation::Proceed;
+            }
+
+            match key {
+                Key::space => {
+                    hub_for_keys.handle_action(Action::TogglePause);
+                    glib::Propagation::Stop
+                }
+                Key::slash => {
+                    hub_for_keys.switch_view(View::Stream);
+                    hub_for_keys.stream.focus_filter();
+                    glib::Propagation::Stop
+                }
+                Key::f => {
+                    hub_for_keys.stream.toggle_follow(&hub_for_keys.shared);
+                    glib::Propagation::Stop
+                }
+                Key::t => {
+                    let enabled = !hub_for_keys.shared.borrow().trace_enabled;
+                    hub_for_keys.handle_action(Action::SetTrace(enabled));
+                    glib::Propagation::Stop
+                }
+                Key::g => {
+                    let grouped = !hub_for_keys.shared.borrow().grouped;
+                    hub_for_keys.shared.borrow_mut().grouped = grouped;
+                    hub_for_keys.stream.set_grouped(grouped);
+                    let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    glib::Propagation::Stop
+                }
+                Key::r => {
+                    let hide = !hub_for_keys.shared.borrow().hide_raw;
+                    hub_for_keys.shared.borrow_mut().hide_raw = hide;
+                    let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    glib::Propagation::Stop
+                }
+                Key::l => {
+                    let hide = !hub_for_keys.shared.borrow().hide_legacy;
+                    hub_for_keys.shared.borrow_mut().hide_legacy = hide;
+                    let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    glib::Propagation::Stop
+                }
+                Key::Up => {
+                    if hub_for_keys.current.get() == View::Stream
+                        && hub_for_keys.stream.select_offset(&hub_for_keys.shared, -1)
+                    {
+                        let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                        glib::Propagation::Stop
+                    } else {
+                        glib::Propagation::Proceed
+                    }
+                }
+                Key::Down => {
+                    if hub_for_keys.current.get() == View::Stream
+                        && hub_for_keys.stream.select_offset(&hub_for_keys.shared, 1)
+                    {
+                        let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                        glib::Propagation::Stop
+                    } else {
+                        glib::Propagation::Proceed
+                    }
+                }
+                Key::Page_Up => {
+                    if hub_for_keys.current.get() == View::Stream
+                        && hub_for_keys.stream.select_offset(&hub_for_keys.shared, -10)
+                    {
+                        let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    }
+                    glib::Propagation::Stop
+                }
+                Key::Page_Down => {
+                    if hub_for_keys.current.get() == View::Stream
+                        && hub_for_keys.stream.select_offset(&hub_for_keys.shared, 10)
+                    {
+                        let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    }
+                    glib::Propagation::Stop
+                }
+                Key::Home => {
+                    if hub_for_keys.current.get() == View::Stream {
+                        hub_for_keys.stream.select_end(&hub_for_keys.shared, false);
+                        let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    }
+                    glib::Propagation::Stop
+                }
+                Key::End => {
+                    if hub_for_keys.current.get() == View::Stream {
+                        hub_for_keys.stream.select_end(&hub_for_keys.shared, true);
+                        let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    }
+                    glib::Propagation::Stop
+                }
+                _ => {
+                    let _ = modifiers;
+                    glib::Propagation::Proceed
+                }
+            }
+        });
+        window.add_controller(keys);
     }
 
     // ---- background loops -------------------------------------------------
@@ -994,8 +1477,7 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
             tick_hub.handle_action(action);
         }
 
-        tick_hub.topbar.refresh(&tick_hub.shared);
-        tick_hub.sidebar.refresh(&tick_hub.shared);
+        tick_hub.refresh_chrome();
 
         let view = tick_hub.current.get();
         if view == View::Stream
@@ -1005,8 +1487,6 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
         {
             last_stream_refresh.set(Instant::now());
             tick_hub.stream.refresh(&tick_hub.shared);
-        } else if view == View::Stream && got_events {
-            tick_hub.stream.refresh_pending(&tick_hub.shared);
         }
         if view == View::Flow && (got_events || got_snapshot) {
             tick_hub.flow.refresh(&tick_hub.shared);
@@ -1027,7 +1507,9 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     {
         let stream_handle = stream_handle;
         let poller = poller;
+        let hub_for_close = hub.clone();
         window.connect_close_request(move |_| {
+            hub_for_close.persist();
             stream_handle.stop();
             poller.stop();
             std::thread::spawn(|| {
@@ -1041,14 +1523,88 @@ pub fn build_window(app: &Application, initial_view: Option<View>) -> Applicatio
     window
 }
 
-fn show_about(parent: &ApplicationWindow) {
+fn dialog_window(parent: &ApplicationWindow, title: &str, width: i32) -> gtk4::Window {
     let dialog = gtk4::Window::builder()
         .transient_for(parent)
         .modal(true)
-        .title("About breadscope")
-        .default_width(440)
+        .title(title)
+        .default_width(width)
         .build();
     dialog.add_css_class("scope");
+    let keys = gtk4::EventControllerKey::new();
+    keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let dialog_for_key = dialog.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk4::gdk::Key::Escape {
+            dialog_for_key.close();
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    dialog.add_controller(keys);
+    dialog
+}
+
+fn show_shortcuts(parent: &ApplicationWindow) {
+    let dialog = dialog_window(parent, "Keyboard shortcuts", 520);
+    let content = vbox(12);
+    content.set_margin_top(18);
+    content.set_margin_bottom(18);
+    content.set_margin_start(18);
+    content.set_margin_end(18);
+    let title = label("Keyboard shortcuts");
+    title.add_css_class("dialog-title");
+    content.append(&title);
+    content.append(&dim_label(
+        "Navigation works from any view; the event actions apply to the stream.",
+    ));
+
+    let grid = gtk4::Grid::new();
+    grid.set_row_spacing(7);
+    grid.set_column_spacing(14);
+    let rows: [(&str, &str); 16] = [
+        ("Ctrl+F  /  /", "focus the event filter"),
+        ("F2  /  Ctrl+Shift+E", "open the emit dialog"),
+        ("Ctrl+Enter", "publish from the emit dialog"),
+        ("Space", "pause or resume the stream"),
+        ("Up  /  Down", "select the previous or next event"),
+        ("PgUp  /  PgDn", "move ten events"),
+        ("Home  /  End", "first or newest event"),
+        ("f", "follow the newest event"),
+        ("g", "toggle grouped event table"),
+        ("r", "show or hide raw Hyprland events"),
+        ("l", "show or hide legacy Hyprland names"),
+        ("t", "toggle handler tracing"),
+        ("Esc", "clear the filter and release the selection"),
+        ("?", "show this list"),
+        ("Click a row", "inspect that event"),
+        ("Click a flow node", "isolate its paths"),
+    ];
+    for (index, (keys, what)) in rows.iter().enumerate() {
+        let key = Label::new(Some(keys));
+        key.add_css_class("keycap");
+        key.set_xalign(1.0);
+        grid.attach(&key, 0, index as i32, 1, 1);
+        let text = Label::new(Some(what));
+        text.set_xalign(0.0);
+        text.set_wrap(true);
+        grid.attach(&text, 1, index as i32, 1, 1);
+    }
+    content.append(&grid);
+    let close = button("Close", "");
+    close.set_halign(Align::End);
+    {
+        let dialog = dialog.clone();
+        close.connect_clicked(move |_| dialog.close());
+    }
+    content.append(&close);
+    dialog.set_child(Some(&content));
+    dialog.present();
+}
+
+fn show_about(parent: &ApplicationWindow) {
+    let dialog = dialog_window(parent, "About breadscope", 460);
     let content = vbox(10);
     content.set_margin_top(18);
     content.set_margin_bottom(18);
@@ -1063,7 +1619,7 @@ fn show_about(parent: &ApplicationWindow) {
     body.set_wrap(true);
     body.set_max_width_chars(52);
     content.append(&body);
-    let hint = mono("breadscope 0.11.0");
+    let hint = mono(concat!("breadscope ", env!("CARGO_PKG_VERSION")));
     hint.add_css_class("small");
     hint.add_css_class("faint");
     content.append(&hint);
@@ -1145,5 +1701,95 @@ pub fn fit_text(cr: &gtk4::cairo::Context, text: &str, max_width: f64) -> String
         "…".to_string()
     } else {
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bread_shared::{AdapterSource, BreadEvent};
+
+    fn event(name: &str, source: AdapterSource, age_ms: u64) -> BreadEvent {
+        BreadEvent::with_timestamp(
+            name,
+            bread_shared::now_unix_ms().saturating_sub(age_ms),
+            source,
+            serde_json::json!({"k": "v"}),
+        )
+    }
+
+    #[test]
+    fn time_window_filters_old_events() {
+        let mut state = AppState {
+            window_minutes: 1,
+            ..AppState::default()
+        };
+        assert!(state.in_window(&event("bread.test", AdapterSource::System, 10_000)));
+        assert!(!state.in_window(&event("bread.test", AdapterSource::System, 120_000)));
+        state.window_minutes = 0;
+        assert!(state.in_window(&event("bread.test", AdapterSource::System, 120_000)));
+    }
+
+    #[test]
+    fn text_filter_accepts_globs_and_substrings() {
+        let mut state = AppState {
+            filter: "bread.device.**".into(),
+            ..AppState::default()
+        };
+        assert!(state.passes_text_filter(&event(
+            "bread.device.dock.connected",
+            AdapterSource::Udev,
+            0
+        )));
+        assert!(!state.passes_text_filter(&event(
+            "bread.power.ac.connected",
+            AdapterSource::Power,
+            0
+        )));
+        state.filter = "dock".into();
+        assert!(state.passes_text_filter(&event(
+            "bread.device.dock.connected",
+            AdapterSource::Udev,
+            0
+        )));
+    }
+
+    #[test]
+    fn source_filter_distinguishes_apps_from_adapters() {
+        let state = AppState {
+            source: "app".into(),
+            ..AppState::default()
+        };
+        assert!(state.source_matches(&event(
+            "bread.clip.copied",
+            AdapterSource::App("clip".into()),
+            0
+        )));
+        assert!(!state.source_matches(&event("bread.device.connected", AdapterSource::Udev, 0)));
+    }
+
+    #[test]
+    fn session_round_trips_into_app_state() {
+        let mut state = AppState::default();
+        state.apply_session(&Session {
+            view: Some("flow".into()),
+            filter: Some("bread.power.**".into()),
+            source: Some("power".into()),
+            causal: Some(false),
+            follow_tail: Some(false),
+            grouped: Some(false),
+            hide_raw: Some(true),
+            hide_legacy: Some(true),
+            window_minutes: Some(5),
+            flow_window_minutes: Some(15),
+            width: Some(1400),
+            height: Some(900),
+        });
+        assert_eq!(state.view, View::Flow);
+        assert_eq!(state.filter, "bread.power.**");
+        assert!(!state.causal);
+        assert_eq!(state.window_minutes, 5);
+        let saved = state.session();
+        assert_eq!(saved.view.as_deref(), Some("flow"));
     }
 }

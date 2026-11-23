@@ -25,10 +25,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$T/runtime" "$T/home" "$T/state" "$T/cfg" "$T/cache"
+mkdir -p "$T/runtime" "$T/home" "$T/state" "$T/cfg" "$T/cache" "$T/state/breadscope"
 chmod 700 "$T/runtime"
-cat > "$T/sway.conf" <<'EOF'
-output HEADLESS-1 resolution 1400x900
+if [ -n "${SESSION:-}" ]; then
+    printf '%s' "$SESSION" > "$T/state/breadscope/session.json"
+fi
+cat > "$T/sway.conf" <<EOF
+output HEADLESS-1 resolution ${SHOT_WIDTH:-1400}x${SHOT_HEIGHT:-900}
 default_border none
 gaps inner 0
 gaps outer 0
@@ -53,11 +56,15 @@ if [ ! -S "$T/runtime/wayland-1" ]; then
     exit 1
 fi
 
-env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
+EXTRA=()
+if [ -n "${TAB:-}" ]; then
+    EXTRA+=(--tab "$TAB")
+fi
+dbus-run-session -- env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
     WAYLAND_DISPLAY=wayland-1 GDK_BACKEND=wayland GTK_USE_PORTAL=0 \
     HOME="$T/home" XDG_STATE_HOME="$T/state" XDG_CONFIG_HOME="$T/cfg" \
     XDG_CACHE_HOME="$T/cache" XDG_RUNTIME_DIR="$T/runtime" \
-    "$BIN" --view "$VIEW" >"$T/app.log" 2>&1 &
+    "$BIN" --view "$VIEW" "${EXTRA[@]}" >"$T/app.log" 2>&1 &
 PIDS+=($!)
 
 sleep "${SHOT_WAIT:-6}"

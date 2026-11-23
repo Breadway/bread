@@ -192,6 +192,16 @@ pub fn source_key(source: &AdapterSource) -> String {
     }
 }
 
+pub fn source_short(source: &AdapterSource) -> String {
+    match source {
+        AdapterSource::Hyprland => "hyprland".into(),
+        AdapterSource::System => "lua/system".into(),
+        AdapterSource::Manual => "manual".into(),
+        AdapterSource::App(app) => format!("app:{app}"),
+        other => source_key(other),
+    }
+}
+
 pub fn source_label(source: &AdapterSource) -> String {
     match source {
         AdapterSource::Hyprland => "Hyprland".into(),
