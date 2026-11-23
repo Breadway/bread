@@ -81,6 +81,30 @@ jobs:
           TS="$(date -u +%Y%m%d%H%M%S)"
           echo "VERSION=${MA}.${MI}.$((PA + 1))-dev.${TS}+${SHA}" >> "$GITHUB_ENV"
 
+      # BREAD-81 workaround: the shared artifact-only copyback skips a profile
+      # whose deps/ directory has been pruned from the cache, so the host
+      # checkout can end up with no target/release at all. Stage the known
+      # binaries from the most recent cached release dir before publishing.
+      - name: stage release binaries
+        run: |
+          set -euo pipefail
+          cd "$BREAD_CI_JOB_DIR/src"
+          mkdir -p target/release
+          roots=("${BREAD_CI_CACHE_ROOT:-$HOME/.cache/bread-ci}")
+          if [ -n "${BREAD_CI_HOST_CACHE:-}" ]; then
+            roots+=("$BREAD_CI_HOST_CACHE")
+          fi
+          release_dir="$(find "${roots[@]}" -type f -path '*/release/breadd' \
+            -printf '%T@ %h\n' 2>/dev/null | sort -nr | head -n1 | cut -d' ' -f2-)"
+          if [ -z "${release_dir}" ]; then
+            echo "::error::stage release binaries: no cached */release/breadd found under ${roots[*]}" >&2
+            exit 1
+          fi
+          echo "staging release binaries from ${release_dir}"
+          for bin in breadd bread bread-emit bread-module-host breadbug breadbug-gui breadbug-launch breadscope; do
+            cp -a "${release_dir}/${bin}" target/release/
+          done
+
       # Debug symbols for breadbug, keyed by build-id, taken from the
       # unstripped binaries (the strip happens in "prepare artifacts").
       - name: publish debug symbols
