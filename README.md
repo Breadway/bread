@@ -47,6 +47,8 @@ bread-cli/           CLI frontend: talks to breadd over a Unix socket
 bread-emit/          Tiny fire-and-forget IPC emitter (hooks / command bus)
 bread-module-host/   Out-of-process sandboxed Lua module runtime
 bread-shared/        Shared types: RawEvent, BreadEvent, AdapterSource
+breadscope/          GTK4 observability window: events, modules, interaction map
+breadbug-gui/        GTK4 front end for the bug reporter
 packaging/           systemd user service unit (bakery installs this)
 ```
 
@@ -56,6 +58,23 @@ The daemon is structured in four layers:
 - **Normalizer**: transforms raw adapter signals into semantic Bread events
 - **State engine**: maintains runtime state and dispatches events to subscribers
 - **Lua runtime**: loads your modules, registers handlers, executes automation
+
+---
+
+## Observing bread
+
+`breadscope` is a GTK4 window for seeing what the daemon is doing: live events
+with their `caused_by` chains, which modules subscribe to each event, exact
+handler timings while tracing is on, an interaction map of sources to event
+families to modules, runtime state, workflows, widgets, and adapter health.
+
+```bash
+breadscope
+```
+
+It reads the same local Unix socket as `bread`, opens no network listener, and
+does not edit state. See [breadscope/README.md](breadscope/README.md) for the
+views, keys, and the development harness.
 
 ---
 

@@ -5,6 +5,7 @@ system_deps = ["systemd-libs", "openssl", "zlib", "gtk4"]
 optional_system_deps = ["bluez", "hyprland"]
 bread_deps = []
 license_file = "LICENSE"
+desktop_file = "breadscope.desktop"
 
 [[service]]
 unit = "breadd.service"

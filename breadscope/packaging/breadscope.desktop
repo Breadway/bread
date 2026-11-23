@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=breadscope
+Comment=Observe bread events, modules, and interaction paths
+Exec=breadscope
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Development;System;Monitor;
+Keywords=bread;events;daemon;debug;observability;
+StartupNotify=true

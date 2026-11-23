@@ -1,0 +1,32 @@
+[package]
+name = "breadscope"
+version = "0.10.1"
+edition = "2021"
+description = "GTK4 observability app for bread: live events, causal chains, module subscriptions, and interaction paths"
+
+[lib]
+name = "breadscope"
+path = "src/lib.rs"
+
+[[bin]]
+name = "breadscope"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+bread-shared = { path = "../bread-shared" }
+bread-theme = { git = "https://git.breadway.dev/Breadway/bread-ecosystem", tag = "v0.8.0", features = ["gtk"] }
+gtk4 = { version = "0.11", features = ["v4_12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Deliberately its own workspace: GTK4 dev libraries are only needed to build
+# this crate, and the main bread workspace (and its CI image) should not
+# require them. Build it from this directory.
+[workspace]
+
+# Keep line tables in release builds so crash reports resolve, matching the
+# root workspace profile and breadbug-gui. Stripped at packaging time.
+[profile.release]
+debug = "line-tables-only"

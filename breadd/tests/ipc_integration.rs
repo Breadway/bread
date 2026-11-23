@@ -566,6 +566,121 @@ async fn modules_list_returns_array() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn subscriptions_list_reports_patterns_and_dispatch_counts() -> Result<()> {
+    let harness =
+        TestHarness::spawn_with_init("bread.on('bread.custom.probe', function(e) end)\n")?;
+    harness.wait_until_ready().await?;
+
+    let subs = harness
+        .send_request("subscriptions.list", json!({}))
+        .await?;
+    let entries = subs.as_array().expect("subscriptions.list is an array");
+    let probe = entries
+        .iter()
+        .find(|entry| entry.get("pattern").and_then(Value::as_str) == Some("bread.custom.probe"))
+        .expect("probe subscription is listed");
+    assert_eq!(probe.get("kind").and_then(Value::as_str), Some("event"));
+    assert_eq!(probe.get("count").and_then(Value::as_u64), Some(0));
+
+    harness
+        .send_request("emit", json!({"event": "bread.custom.probe", "data": {}}))
+        .await?;
+    sleep(Duration::from_millis(150)).await;
+
+    let subs = harness
+        .send_request("subscriptions.list", json!({}))
+        .await?;
+    let probe = subs
+        .as_array()
+        .expect("subscriptions.list is an array")
+        .iter()
+        .find(|entry| entry.get("pattern").and_then(Value::as_str) == Some("bread.custom.probe"))
+        .cloned()
+        .expect("probe subscription is still listed");
+    assert!(
+        probe.get("count").and_then(Value::as_u64).unwrap_or(0) >= 1,
+        "dispatch count should increment, got: {probe:?}"
+    );
+    assert_eq!(
+        probe.get("last_event").and_then(Value::as_str),
+        Some("bread.custom.probe")
+    );
+    assert!(probe.get("last_at").and_then(Value::as_u64).is_some());
+
+    harness.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
+async fn handler_trace_is_opt_in_and_reports_timing() -> Result<()> {
+    let harness =
+        TestHarness::spawn_with_init("bread.on('bread.custom.traced', function(e) end)\n")?;
+    harness.wait_until_ready().await?;
+
+    harness
+        .send_request("emit", json!({"event": "bread.custom.traced", "data": {}}))
+        .await?;
+    sleep(Duration::from_millis(100)).await;
+
+    let traces = harness
+        .send_request("events.trace", json!({"since_ms": 600_000}))
+        .await?;
+    assert!(
+        !traces
+            .as_array()
+            .expect("events.trace is an array")
+            .iter()
+            .any(|entry| entry.get("event").and_then(Value::as_str) == Some("bread.custom.traced")),
+        "tracing is off by default and must record nothing"
+    );
+
+    let set = harness
+        .send_request("trace.set", json!({"enabled": true}))
+        .await?;
+    assert_eq!(set.get("enabled").and_then(Value::as_bool), Some(true));
+
+    harness
+        .send_request("emit", json!({"event": "bread.custom.traced", "data": {}}))
+        .await?;
+    sleep(Duration::from_millis(150)).await;
+
+    let traces = harness
+        .send_request("events.trace", json!({"since_ms": 600_000}))
+        .await?;
+    let entry = traces
+        .as_array()
+        .expect("events.trace is an array")
+        .iter()
+        .find(|entry| entry.get("event").and_then(Value::as_str) == Some("bread.custom.traced"))
+        .cloned()
+        .expect("enabled tracing records the handler invocation");
+    assert_eq!(
+        entry.get("pattern").and_then(Value::as_str),
+        Some("bread.custom.traced")
+    );
+    assert_eq!(entry.get("ok").and_then(Value::as_bool), Some(true));
+    assert!(entry.get("event_id").and_then(Value::as_str).is_some());
+    assert!(entry.get("duration_us").and_then(Value::as_u64).is_some());
+
+    harness
+        .send_request("trace.set", json!({"enabled": false}))
+        .await?;
+    let traces = harness
+        .send_request("events.trace", json!({"since_ms": 600_000}))
+        .await?;
+    assert!(
+        traces
+            .as_array()
+            .expect("events.trace is an array")
+            .is_empty(),
+        "disabling tracing should clear the ring"
+    );
+
+    harness.shutdown();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Capability-scoped module API (Workstream D)
 // ---------------------------------------------------------------------------

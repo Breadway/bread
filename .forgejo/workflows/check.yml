@@ -59,6 +59,15 @@ jobs:
       - name: breadbug-gui test
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --manifest-path breadbug-gui/Cargo.toml --locked
 
+      - name: breadscope fmt
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo fmt --manifest-path breadscope/Cargo.toml --check
+
+      - name: breadscope clippy
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo clippy --manifest-path breadscope/Cargo.toml --all-targets --locked -- -D warnings
+
+      - name: breadscope test
+        run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --manifest-path breadscope/Cargo.toml --locked
+
       - name: clean owned checkout
         if: always()
         shell: bash

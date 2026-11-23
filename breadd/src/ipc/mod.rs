@@ -47,7 +47,13 @@ mod module_host_bridge;
 /// an app id.
 ///
 /// *Since 1.8.0*: breadbug's `bug.*` IPC methods and `bread.bug.*` events.
-const API_VERSION: &str = "1.8.0";
+///
+/// *Since 1.9.0*: observability introspection for breadscope:
+/// `subscriptions.list` (live Lua subscription registry with module, pattern,
+/// and dispatch counts), `trace.set` / `events.trace` (opt-in handler timing),
+/// so a GUI can show which modules a given event reached and how long each
+/// handler took without parsing Lua source or changing the hot path when off.
+const API_VERSION: &str = "1.9.0";
 
 #[derive(Clone)]
 pub struct Server {
@@ -348,6 +354,14 @@ impl Server {
                 let full = self.state_handle.state_dump().await;
                 Ok(full.get("modules").cloned().unwrap_or_else(|| json!([])))
             }
+            "subscriptions.list" => {
+                let entries = self
+                    .lua_runtime
+                    .subscriptions()
+                    .await
+                    .map_err(|err| (id.clone(), err.to_string()))?;
+                Ok(serde_json::to_value(entries).unwrap_or_else(|_| json!([])))
+            }
             "workflows.list" => {
                 let full = self.state_handle.state_dump().await;
                 Ok(full.get("workflows").cloned().unwrap_or_else(|| json!([])))
@@ -529,6 +543,25 @@ impl Server {
                     })
                     .unwrap_or_default();
                 Ok(serde_json::to_value(replay).unwrap_or_else(|_| json!([])))
+            }
+            "trace.set" => {
+                let enabled = req
+                    .params
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| (id.clone(), "missing enabled".to_string()))?;
+                self.lua_runtime.set_trace(enabled);
+                Ok(json!({ "enabled": enabled }))
+            }
+            "events.trace" => {
+                let since_ms = req
+                    .params
+                    .get("since_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(60_000);
+                let event_id = req.params.get("event_id").and_then(Value::as_str);
+                let traces = self.lua_runtime.trace_snapshot(since_ms, event_id);
+                Ok(serde_json::to_value(traces).unwrap_or_else(|_| json!([])))
             }
             "bug.log" => bugstore::ipc_log(self.bug_store.as_deref(), &req.params),
             "bug.logs" => bugstore::ipc_logs(self.bug_store.as_deref(), &req.params),
