@@ -648,6 +648,10 @@ for the full list alongside the pre-existing methods.
 - Run `bread events` to see live normalized events.
 - Run `bread events --tree` *(Since: v1.5)* to render events as a causality tree instead of a flat stream: events that a Lua handler emitted via `bread.emit()` in reaction to another event are nested underneath it, following the `caused_by` chain (see [Dictionary: Event reference](#dictionary-event-reference)). Useful for untangling "why did this event fire" when several modules chain-react to each other.
 - Run `bread state` to see full runtime state as JSON.
+- Run `breadscope` for a desktop view of the same data: live events and causal
+  chains, matching subscriptions and handler timing, the interaction map,
+  runtime state, workflows, widgets, and adapter health. Tracing is enabled only
+  while the window is open; see `breadscope/README.md`.
 - Run `bread doctor` to check adapter and module health, including modules
   running with full, ungated `bread.*` access because they have no
   `permissions` declared.
@@ -1796,6 +1800,9 @@ Available methods:
 | `emit` | `event`, `data`, optional `source`, `kind` | Inject an event. Without `source`, builds a `BreadEvent` directly, tagged `Manual` *(Since: v1.5, previously tagged `System`; see below)*, for manually testing Lua handlers (this is what `bread emit <event>` and `bread-emit` use). Well-formed `bread.command.<known-app>.<verb>` is allowed on this path *(Since: v1.7)*; other reserved domains stay rejected. With `source` set to `terminal`/`git`/`remote`, or a registered sibling-app id (see [Namespaces](#namespaces)), builds a real `RawEvent` (requires `kind` too) that goes through the normalizer like any adapter. A sourced app may also publish a well-formed command to another known app. Any other `source` value is rejected: this is the anti-spoofing boundary that stops a socket client from forging e.g. `power`/`hyprland` events. |
 | `workflows.list` | none | List running/completed workflow instances and their step/status *(Since: v1.2)* |
 | `widgets.list` | none | List all registered widgets across every module *(Since: v1.3)* |
+| `subscriptions.list` | none | Snapshot the live Lua subscription registry: one entry per handler with `id`, `module`, `pattern`, `kind` (`event` or `state_watch`), `once`, `filtered`, `raw_kind`, `count`, `last_event`, and `last_at`. Counts and last-seen fields cover the current Lua runtime and reset on reload. *(Since: v1.9)* |
+| `trace.set` | `enabled` (bool) | Turn opt-in handler timing on or off. Off by default; disabling clears the recorded ring. Intended for short-lived observability clients such as breadscope, which enable it on start and disable it on exit. *(Since: v1.9)* |
+| `events.trace` | `since_ms` (default 60000), optional `event_id` | Handler invocations recorded while tracing is enabled: `event_id`, `event`, `module`, `pattern`, `duration_us`, `ok`, `at`. Newest last, capped at 1024 entries in memory. Empty when tracing is off or nothing has run since it was enabled. *(Since: v1.9)* |
 | `bug.log` | `app`, `msg`, optional `level`, `t` | Append one log line to breadbug's on-disk store, scrubbed on ingest. `app` must be a registered app id or `breadd`. Excluded apps store nothing and reply `{ stored: false }`. *(Since: v1.8)* |
 | `bug.logs` | `app`, `lines` (`[{msg, level?, t?}]`, at most 1000) | Batch form of `bug.log`. *(Since: v1.8)* |
 | `bug.marker` | `app`, `marker` (`kind` = `panic`/`crash`/`freeze`/`recovered`, optional `t`, `app_version`, `build_id`, `message`, `location`, `signal`, `frames`) | Record a crash or freeze marker (frames carry module, module-relative offset and GNU build-id only, never memory). Process identity fields are set only by breadd, not trusted from a client; identity and pid are removed from the report payload. On success the daemon publishes `bread.bug.<kind>`. *(Since: v1.8)* |

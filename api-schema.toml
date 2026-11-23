@@ -563,6 +563,23 @@ name = "bug.reload"
 kind = "ipc_method"
 since = "1.8"
 
+# Observability introspection (breadscope), *Since: v1.9*.
+
+[[entry]]
+name = "subscriptions.list"
+kind = "ipc_method"
+since = "1.9"
+
+[[entry]]
+name = "trace.set"
+kind = "ipc_method"
+since = "1.9"
+
+[[entry]]
+name = "events.trace"
+kind = "ipc_method"
+since = "1.9"
+
 # ---------------------------------------------------------------------------
 # CLI commands (bread-cli/src/main.rs): checked against README.md's "CLI
 # reference" section, not Documentation.md (which has no CLI section of its

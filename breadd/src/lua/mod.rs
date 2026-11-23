@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 
 use anyhow::{anyhow, Result};
 use bread_shared::widget::{WidgetNode, WidgetPlacement, WidgetSpec};
@@ -153,6 +153,10 @@ pub enum LuaMessage {
     StartupComplete {
         reply: oneshot::Sender<std::result::Result<(), String>>,
     },
+    /// Snapshot the live Lua subscription registry for `subscriptions.list`.
+    ListSubscriptions {
+        reply: oneshot::Sender<Vec<SubscriptionEntry>>,
+    },
     /// Run every module's `on_unload` hook, then answer on `reply` and exit
     /// the Lua thread.
     Shutdown {
@@ -177,6 +181,7 @@ pub struct ErrorEntry {
 pub struct RuntimeHandle {
     tx: mpsc::UnboundedSender<LuaMessage>,
     recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
+    trace: TraceState,
 }
 
 impl RuntimeHandle {
@@ -238,6 +243,31 @@ impl RuntimeHandle {
             .map(|buf| buf.iter().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Snapshot every live Lua subscription (event handlers, once handlers,
+    /// filtered handlers, state watches, and raw Hyprland handlers) with its
+    /// owning module and dispatch statistics.
+    pub async fn subscriptions(&self) -> Result<Vec<SubscriptionEntry>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(LuaMessage::ListSubscriptions { reply })
+            .map_err(|_| anyhow!("lua runtime channel closed"))?;
+        rx.await
+            .map_err(|_| anyhow!("lua runtime dropped subscriptions response"))
+    }
+
+    /// Handler invocations observed since `since_ms` ago, newest last. Only
+    /// populated while tracing is enabled; toggled via [`set_trace`].
+    pub fn trace_snapshot(&self, since_ms: u64, event_id: Option<&str>) -> Vec<DispatchTraceEntry> {
+        self.trace.snapshot(since_ms, event_id)
+    }
+
+    pub fn set_trace(&self, enabled: bool) {
+        self.trace.set_enabled(enabled);
+        if !enabled {
+            self.trace.clear();
+        }
+    }
 }
 
 pub fn spawn_runtime(
@@ -248,9 +278,11 @@ pub fn spawn_runtime(
 ) -> Result<RuntimeHandle> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let recent_errors = Arc::new(Mutex::new(VecDeque::with_capacity(50)));
+    let trace = TraceState::default();
     let handle = RuntimeHandle {
         tx,
         recent_errors: recent_errors.clone(),
+        trace: trace.clone(),
     };
     let thread_tx = handle.tx.clone();
 
@@ -269,6 +301,7 @@ pub fn spawn_runtime(
                     emit_tx,
                     thread_tx.clone(),
                     recent_errors,
+                    trace,
                     module_host_registry,
                 ) {
                     Ok(engine) => engine,
@@ -336,6 +369,9 @@ pub fn spawn_runtime(
                             };
                             let _ = reply.send(result);
                         }
+                        LuaMessage::ListSubscriptions { reply } => {
+                            let _ = reply.send(engine.subscription_snapshot());
+                        }
                         LuaMessage::Shutdown { reply } => {
                             engine.run_on_unload();
                             let _ = reply.send(());
@@ -361,12 +397,118 @@ struct HandlerEntry {
     module: Option<String>,
     raw_kind: Option<String>,
     kind: HandlerKind,
+    /// The event pattern this handler registered with (`bread.on`,
+    /// `bread.once`, `bread.filter`, `bread.state.watch`, or the synthetic
+    /// `bread.hyprland.event` pattern for `bread.hyprland.on_raw`). Kept here
+    /// so `subscriptions.list` can report the live registry without a second
+    /// copy that could drift from dispatch.
+    pattern: String,
+    /// `true` when the subscription removes itself after the first match.
+    once: bool,
+    /// Invocations that actually reached the callback (raw-kind and filter
+    /// rejections are not counted). Lifetime of the current Lua runtime.
+    count: u64,
+    last_event: Option<String>,
+    last_at: Option<u64>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum HandlerKind {
     Event,
     StateWatch,
+}
+
+impl HandlerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            HandlerKind::Event => "event",
+            HandlerKind::StateWatch => "state_watch",
+        }
+    }
+}
+
+/// One live Lua subscription, as returned by the `subscriptions.list` IPC
+/// method. `count`/`last_event`/`last_at` are dispatch statistics for the
+/// current Lua runtime and reset on `bread reload`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SubscriptionEntry {
+    pub id: u64,
+    pub module: Option<String>,
+    pub pattern: String,
+    pub kind: &'static str,
+    pub once: bool,
+    pub filtered: bool,
+    pub raw_kind: Option<String>,
+    pub count: u64,
+    pub last_event: Option<String>,
+    pub last_at: Option<u64>,
+}
+
+/// One handler invocation captured while tracing is enabled, surfaced by
+/// `events.trace`. Only the handler's own duration is measured: matching and
+/// dispatch fan-out happen outside the timed region.
+#[derive(Debug, Clone, Serialize)]
+pub struct DispatchTraceEntry {
+    pub event_id: String,
+    pub event: String,
+    pub module: Option<String>,
+    pub pattern: String,
+    pub duration_us: u64,
+    pub ok: bool,
+    pub at: u64,
+}
+
+const TRACE_CAPACITY: usize = 1024;
+
+/// Opt-in handler timing. Disabled by default so the dispatch hot path pays
+/// one relaxed atomic load; `trace.set` flips it, and a bounded in-memory
+/// ring avoids any I/O while a GUI is watching.
+#[derive(Clone, Default)]
+pub struct TraceState {
+    inner: Arc<TraceInner>,
+}
+
+#[derive(Default)]
+struct TraceInner {
+    enabled: AtomicBool,
+    entries: Mutex<VecDeque<DispatchTraceEntry>>,
+}
+
+impl TraceState {
+    pub fn enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.inner.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn record(&self, entry: DispatchTraceEntry) {
+        let mut entries = self.inner.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if entries.len() == TRACE_CAPACITY {
+            entries.pop_front();
+        }
+        entries.push_back(entry);
+    }
+
+    pub fn clear(&self) {
+        self.inner
+            .entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    pub fn snapshot(&self, since_ms: u64, event_id: Option<&str>) -> Vec<DispatchTraceEntry> {
+        let cutoff = now_unix_ms().saturating_sub(since_ms);
+        let entries = self.inner.entries.lock().unwrap_or_else(|e| e.into_inner());
+        entries
+            .iter()
+            .filter(|entry| entry.at >= cutoff)
+            .filter(|entry| event_id.is_none_or(|id| entry.event_id == id))
+            .cloned()
+            .collect()
+    }
 }
 
 struct TimerEntry {
@@ -436,6 +578,8 @@ struct LuaEngine {
     modules_config: ModulesConfig,
     notifications_config: NotificationsConfig,
     recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
+    /// Opt-in dispatch timing shared with [`RuntimeHandle`].
+    trace: TraceState,
     /// Workstream G: spawn/token bookkeeping for out-of-process module
     /// hosts, shared with `ipc::Server` (which authenticates the spawned
     /// children and serves their RPC calls). See `crate::module_host`.
@@ -450,6 +594,7 @@ impl LuaEngine {
         emit_tx: mpsc::UnboundedSender<BreadEvent>,
         lua_tx: mpsc::UnboundedSender<LuaMessage>,
         recent_errors: Arc<Mutex<VecDeque<ErrorEntry>>>,
+        trace: TraceState,
         module_host_registry: ModuleHostRegistry,
     ) -> Result<Self> {
         let socket_path = config.socket_path();
@@ -468,6 +613,7 @@ impl LuaEngine {
             state_handle,
             emit_tx,
             lua_tx,
+            trace,
             module_host_registry,
             socket_path,
             entry_point: config.lua_entry_point(),
@@ -559,6 +705,11 @@ impl LuaEngine {
                                 module,
                                 raw_kind: None,
                                 kind: HandlerKind::Event,
+                                pattern: pattern.clone(),
+                                once: false,
+                                count: 0,
+                                last_event: None,
+                                last_at: None,
                             },
                         );
                     state_handle
@@ -592,6 +743,11 @@ impl LuaEngine {
                                 module,
                                 raw_kind: None,
                                 kind: HandlerKind::Event,
+                                pattern: pattern.clone(),
+                                once: true,
+                                count: 0,
+                                last_event: None,
+                                last_at: None,
                             },
                         );
                     state_handle
@@ -635,6 +791,11 @@ impl LuaEngine {
                             module,
                             raw_kind: None,
                             kind: HandlerKind::Event,
+                            pattern: pattern.clone(),
+                            once: false,
+                            count: 0,
+                            last_event: None,
+                            last_at: None,
                         },
                     );
                 state_handle
@@ -754,6 +915,7 @@ impl LuaEngine {
                         .lock()
                         .map_err(|_| LuaError::external("module context lock poisoned"))?
                         .clone();
+                    let pattern = format!("bread.state.changed.{path}");
                     handlers
                         .lock()
                         .map_err(|_| LuaError::external("handler lock poisoned"))?
@@ -765,6 +927,11 @@ impl LuaEngine {
                                 module,
                                 raw_kind: None,
                                 kind: HandlerKind::StateWatch,
+                                pattern: pattern.clone(),
+                                once: false,
+                                count: 0,
+                                last_event: None,
+                                last_at: None,
                             },
                         );
                     watch_ids
@@ -775,7 +942,7 @@ impl LuaEngine {
                         .register_watch(id, path.clone())
                         .map_err(LuaError::external)?;
                     state_handle
-                        .register_subscription(id, format!("bread.state.changed.{path}"), false)
+                        .register_subscription(id, pattern, false)
                         .map_err(LuaError::external)?;
                     Ok(id.0)
                 })?;
@@ -1112,6 +1279,11 @@ impl LuaEngine {
                                 module,
                                 raw_kind: Some(event),
                                 kind: HandlerKind::Event,
+                                pattern: "bread.hyprland.event".to_string(),
+                                once: false,
+                                count: 0,
+                                last_event: None,
+                                last_at: None,
                             },
                         );
                     state_handle
@@ -2043,7 +2215,7 @@ impl LuaEngine {
     }
 
     fn handle_event(&self, id: SubscriptionId, event: BreadEvent) -> Result<()> {
-        let (callback, filter, raw_kind, kind, module) = {
+        let (callback, filter, raw_kind, kind, module, pattern) = {
             let handlers = self.handlers.lock().unwrap_or_else(|e| e.into_inner());
             let Some(entry) = handlers.get(&id) else {
                 return Ok(());
@@ -2059,6 +2231,7 @@ impl LuaEngine {
                 entry.raw_kind.clone(),
                 entry.kind,
                 entry.module.clone(),
+                entry.pattern.clone(),
             )
         };
 
@@ -2082,12 +2255,21 @@ impl LuaEngine {
             }
         }
 
+        if let Ok(mut handlers) = self.handlers.lock() {
+            if let Some(entry) = handlers.get_mut(&id) {
+                entry.count = entry.count.saturating_add(1);
+                entry.last_event = Some(event.event.clone());
+                entry.last_at = Some(now_unix_ms());
+            }
+        }
+
         self.set_current_module(module.clone());
         // Every subscriber invocation triggered by this event should see the
         // same parent id, and a `bread.emit()` call made synchronously
         // inside the callback should attribute its `caused_by` to *this*
         // event, not whatever was dispatching (if anything) before it.
         let previous_dispatch_id = self.set_current_dispatch_id(Some(event.id.clone()));
+        let started = StdInstant::now();
         let result = match kind {
             HandlerKind::Event => {
                 let event_value = json_to_lua(&self.lua, &event)?;
@@ -2101,16 +2283,56 @@ impl LuaEngine {
                 callback.call::<_, ()>((new_lua, old_lua))
             }
         };
+        let duration_us = started.elapsed().as_micros() as u64;
         // Restore rather than clear, so this correctly unwinds if dispatch
         // is ever reentrant (e.g. a callback that pumps messages itself).
         self.set_current_dispatch_id(previous_dispatch_id);
         self.set_current_module(None);
+
+        if self.trace.enabled() {
+            self.trace.record(DispatchTraceEntry {
+                event_id: event.id.clone(),
+                event: event.event.clone(),
+                module: module.clone(),
+                pattern,
+                duration_us,
+                ok: result.is_ok(),
+                at: now_unix_ms(),
+            });
+        }
 
         if let Err(err) = result {
             error!(subscription = id.0, error = %err, "lua callback failed");
             self.handle_callback_error(module.as_deref(), id, err);
         }
         Ok(())
+    }
+
+    /// Sorted snapshot of every live handler, for `subscriptions.list`.
+    fn subscription_snapshot(&self) -> Vec<SubscriptionEntry> {
+        let handlers = self.handlers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries: Vec<SubscriptionEntry> = handlers
+            .iter()
+            .map(|(id, entry)| SubscriptionEntry {
+                id: id.0,
+                module: entry.module.clone(),
+                pattern: entry.pattern.clone(),
+                kind: entry.kind.as_str(),
+                once: entry.once,
+                filtered: entry.filter.is_some(),
+                raw_kind: entry.raw_kind.clone(),
+                count: entry.count,
+                last_event: entry.last_event.clone(),
+                last_at: entry.last_at,
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            a.module
+                .cmp(&b.module)
+                .then_with(|| a.pattern.cmp(&b.pattern))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        entries
     }
 
     fn handle_timer(&self, id: TimerId) -> Result<()> {
