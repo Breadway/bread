@@ -1,0 +1,1923 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>breadscope - bread observability (mockup)</title>
+<style>
+  :root {
+    --bg: #0c0c0c;
+    --bg-soft: #0f0f0f;
+    --surface: #171717;
+    --surface-2: #1e1e1e;
+    --surface-3: #242424;
+    --line: #292929;
+    --line-soft: #1f1f1f;
+    --fg: #e8e8e8;
+    --muted: #8d8d8d;
+    --dim: #666;
+    --accent: #d9a05b;
+    --accent-soft: rgba(217, 160, 91, .13);
+    --accent-line: rgba(217, 160, 91, .38);
+    --green: #98c379;
+    --red: #e06c75;
+    --yellow: #e5c07b;
+    --blue: #61afef;
+    --pink: #c678dd;
+    --teal: #56b6c2;
+    --radius: 8px;
+    --font: "Varela Round", "Nunito", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "JetBrains Mono", "SFMono-Regular", "Cascadia Code", ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.45;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2c2c2c; border-radius: 6px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
+  ::selection { background: rgba(217, 160, 91, .35); }
+
+  .app {
+    display: grid;
+    grid-template-columns: 232px minmax(0, 1fr);
+    grid-template-rows: 58px minmax(0, 1fr);
+    height: 100vh;
+  }
+
+  /* ------------------------------- top bar ------------------------------- */
+  .topbar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #131313, #0e0e0e);
+  }
+  .brand { display: flex; align-items: center; gap: 11px; min-width: 204px; }
+  .loaf {
+    position: relative;
+    width: 30px; height: 24px;
+    border-radius: 9px 9px 6px 6px;
+    background: linear-gradient(160deg, #e8c087, #c98a45);
+    box-shadow: inset 0 -4px 0 rgba(74, 42, 10, .22), 0 1px 0 rgba(255,255,255,.14);
+    flex: none;
+  }
+  .loaf::after {
+    content: "";
+    position: absolute;
+    left: 6px; right: 6px; top: 7px;
+    height: 2px;
+    border-radius: 2px;
+    background: rgba(74, 42, 10, .48);
+    box-shadow: 0 5px 0 rgba(74, 42, 10, .48), 0 10px 0 rgba(74, 42, 10, .34);
+    transform: rotate(-7deg);
+  }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.05; }
+  .brand-name { font-weight: 700; font-size: 17px; letter-spacing: .2px; }
+  .brand-sub { font-size: 10.5px; color: var(--dim); letter-spacing: .6px; text-transform: uppercase; margin-top: 2px; }
+  .tag {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--accent);
+    border: 1px solid var(--accent-line);
+    background: var(--accent-soft);
+    padding: 3px 7px;
+    border-radius: 999px;
+  }
+  .topbar-spacer { flex: 1; }
+  .status-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 5px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .status-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(152, 195, 121, .12); animation: pulse 2.4s infinite; }
+  .status-pill.paused .dot { background: var(--yellow); box-shadow: 0 0 0 4px rgba(229, 192, 123, .12); animation: none; }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(152, 195, 121, .16); }
+    50% { box-shadow: 0 0 0 6px rgba(152, 195, 121, .02); }
+  }
+  .top-meta { display: flex; align-items: center; gap: 14px; font-family: var(--mono); font-size: 11.5px; color: var(--dim); }
+  .top-meta .api { color: var(--muted); border-left: 1px solid var(--line); padding-left: 14px; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--fg);
+    padding: 7px 12px;
+    border-radius: 6px;
+    font-size: 12.5px;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  .btn:hover { background: var(--surface-3); border-color: #363636; }
+  .btn.primary { background: var(--accent); color: #1b1206; border-color: transparent; font-weight: 700; }
+  .btn.primary:hover { background: #e5b274; }
+  .btn.ghost { background: transparent; }
+  .btn.small { padding: 5px 9px; font-size: 11.5px; }
+  .btn svg { width: 14px; height: 14px; }
+
+  /* -------------------------------- rail --------------------------------- */
+  .rail {
+    border-right: 1px solid var(--line);
+    background: #101010;
+    padding: 14px 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+  }
+  .rail-group {
+    font-size: 10px;
+    letter-spacing: 1.3px;
+    text-transform: uppercase;
+    color: #5c5c5c;
+    padding: 0 9px;
+    margin: 16px 0 6px;
+  }
+  .rail-group:first-child { margin-top: 2px; }
+  .nav-btn {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 9px;
+    background: transparent;
+    border: 0;
+    border-radius: 7px;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: left;
+    transition: background .12s, color .12s;
+  }
+  .nav-btn:hover { background: #181818; color: var(--fg); }
+  .nav-btn.active {
+    background: linear-gradient(90deg, rgba(217, 160, 91, .15), rgba(217, 160, 91, .05));
+    color: #f0d5ac;
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+  .nav-btn svg { width: 16px; height: 16px; flex: none; opacity: .9; }
+  .nav-btn .count {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--dim);
+  }
+  .nav-btn.active .count { color: var(--accent); }
+  .rail-spacer { flex: 1; }
+  .rail-card {
+    margin-top: 14px;
+    border: 1px solid var(--line-soft);
+    background: #141414;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .rail-card .row { display: flex; align-items: center; gap: 6px; }
+  .rail-card .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+  .rail-card .socket { font-family: var(--mono); font-size: 10.5px; color: var(--dim); margin-top: 6px; word-break: break-all; line-height: 1.4; }
+  .rail-card button {
+    margin-top: 9px;
+    width: 100%;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--muted);
+    padding: 5px;
+    font-size: 11px;
+  }
+  .rail-card button:hover { color: var(--fg); }
+
+  /* -------------------------------- main --------------------------------- */
+  main { position: relative; overflow: hidden; min-width: 0; }
+  .view { position: absolute; inset: 0; display: none; flex-direction: column; min-height: 0; }
+  .view.active { display: flex; }
+
+  /* ------------------------------- stream -------------------------------- */
+  .stream-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-soft);
+    flex-wrap: wrap;
+  }
+  .search-wrap { position: relative; flex: 1 1 260px; min-width: 220px; max-width: 460px; }
+  .search-wrap svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; color: var(--dim); }
+  .search-wrap input {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 34px 8px 31px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--fg);
+    outline: none;
+    transition: border-color .12s, box-shadow .12s;
+  }
+  .search-wrap input::placeholder { color: #5a5a5a; }
+  .search-wrap input:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px rgba(217, 160, 91, .08); }
+  .search-wrap kbd {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    font-family: var(--mono); font-size: 10px; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; background: var(--surface-2);
+  }
+  .segmented { display: inline-flex; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
+  .segmented button {
+    border: 0; background: transparent; color: var(--muted);
+    padding: 5px 10px; border-radius: 4px; font-size: 11.5px; white-space: nowrap;
+  }
+  .segmented button.active { background: var(--surface-3); color: var(--fg); }
+  .chips { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border-bottom: 1px solid var(--line-soft); background: var(--bg-soft); flex-wrap: wrap; }
+  .chips .label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-right: 4px; }
+  .chip {
+    border: 1px solid transparent;
+    background: #151515;
+    border-radius: 999px;
+    padding: 3px 9px;
+    font-size: 11px;
+    color: var(--muted);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip:hover { color: var(--fg); background: var(--surface-2); }
+  .chip .swatch { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .9; }
+  .chip.active { color: var(--fg); background: var(--surface-3); border-color: #383838; }
+  .chip.active .swatch { box-shadow: 0 0 0 3px rgba(255,255,255,.05); }
+  .chips .spacer { flex: 1; }
+  .chips .hint { font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+  .volume-strip {
+    display: flex; align-items: flex-end; gap: 2px;
+    height: 34px; padding: 0 16px 6px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--bg-soft);
+  }
+  .volume-strip .bar { flex: 1; min-width: 2px; background: #2a2520; border-radius: 2px 2px 0 0; transition: height .3s; }
+  .volume-strip .bar.hot { background: var(--accent-line); }
+  .volume-strip .vol-label { align-self: center; font-family: var(--mono); font-size: 9.5px; color: var(--dim); margin-left: 8px; white-space: nowrap; }
+
+  .stream-body { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 410px; min-height: 0; }
+  .events-pane { min-width: 0; overflow-y: auto; }
+  .events-list { padding-bottom: 40px; }
+  .event-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 8px 14px 8px 0;
+    border-bottom: 1px solid #191919;
+    cursor: pointer;
+    position: relative;
+    transition: background .1s;
+  }
+  .event-row:hover { background: #141414; }
+  .event-row.selected { background: #191512; box-shadow: inset 3px 0 0 var(--accent); }
+  .tree-connector {
+    width: 20px; flex: none; align-self: stretch;
+    color: #3d3d3d; font-family: var(--mono); font-size: 12px;
+    padding-top: 4px; text-align: right; padding-right: 4px;
+  }
+  .event-time { width: 78px; flex: none; font-family: var(--mono); font-size: 11px; color: var(--dim); padding-top: 2px; font-variant-numeric: tabular-nums; }
+  .event-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; margin-top: 7px; }
+  .event-main { flex: 1; min-width: 0; }
+  .event-name { font-family: var(--mono); font-size: 12.3px; color: #dcdcdc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .event-name .evt-root { color: #6f6f6f; }
+  .event-row.selected .event-name { color: #f4e3c9; }
+  .event-summary { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .event-meta { display: flex; align-items: center; gap: 7px; flex: none; padding-top: 2px; }
+  .mini-tag {
+    font-family: var(--mono); font-size: 9.5px; color: var(--dim);
+    border: 1px solid #262626; background: #141414; border-radius: 4px; padding: 1px 5px;
+    white-space: nowrap;
+  }
+  .mini-tag.by { color: #b99a6d; border-color: #352b1f; background: #1a1611; }
+  .mini-tag.id { color: #5a5a5a; }
+  .empty-state { padding: 60px 24px; text-align: center; color: var(--dim); }
+  .empty-state strong { display: block; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
+
+  /* ------------------------------ inspector ------------------------------ */
+  .inspector {
+    border-left: 1px solid var(--line);
+    background: #101010;
+    overflow-y: auto;
+    padding: 18px 18px 40px;
+  }
+  .insp-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 4px; }
+  .insp-head .event-dot { margin-top: 8px; }
+  .insp-title { font-family: var(--mono); font-size: 13.5px; word-break: break-all; line-height: 1.35; }
+  .insp-sub { display: flex; align-items: center; gap: 8px; margin: 8px 0 16px; flex-wrap: wrap; }
+  .insp-sub .src { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .insp-sub .when { font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+  .section-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: #6b6b6b;
+    margin: 20px 0 8px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-label::after { content: ""; flex: 1; height: 1px; background: var(--line-soft); }
+  .chain { display: flex; flex-direction: column; gap: 2px; }
+  .chain-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 5px; border: 1px solid transparent;
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    cursor: pointer; text-align: left; background: transparent; width: 100%;
+  }
+  .chain-item:hover { background: #171717; color: var(--fg); }
+  .chain-item.current { background: var(--accent-soft); border-color: var(--accent-line); color: #f0d5ac; }
+  .chain-item .arrow { color: #4a4a4a; flex: none; }
+  .chain-item .cname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chain-item .cmeta { margin-left: auto; font-size: 9.5px; color: var(--dim); flex: none; }
+  .handler-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; padding: 7px 8px; border-radius: 5px; }
+  .handler-row:nth-child(odd) { background: #141414; }
+  .handler-name { font-family: var(--mono); font-size: 11.5px; color: #d5d5d5; display: flex; align-items: center; gap: 6px; grid-column: 1; grid-row: 1; }
+  .handler-pattern { font-family: var(--mono); font-size: 10px; color: var(--dim); grid-column: 1; grid-row: 2; }
+  .handler-lat { font-family: var(--mono); font-size: 10px; color: var(--green); grid-column: 2; grid-row: 1 / span 2; align-self: center; text-align: right; }
+  .handler-lat.slow { color: var(--yellow); }
+  .json {
+    font-family: var(--mono); font-size: 11px; line-height: 1.6;
+    background: #121212; border: 1px solid var(--line-soft); border-radius: 6px;
+    padding: 10px 12px; overflow-x: auto; margin: 0; white-space: pre;
+  }
+  .j-key { color: #9ecbff; }
+  .j-str { color: #c3e88d; }
+  .j-num { color: #f0b37e; }
+  .j-bool { color: #c792ea; }
+  .j-null { color: #7a7a7a; }
+  .insp-actions { display: flex; gap: 8px; margin-top: 16px; }
+  .note { font-size: 11px; color: var(--dim); line-height: 1.5; }
+  .note code { font-family: var(--mono); color: var(--muted); }
+
+  /* -------------------------------- flow --------------------------------- */
+  .page-head {
+    display: flex; align-items: flex-start; gap: 16px;
+    padding: 18px 22px 14px; border-bottom: 1px solid var(--line);
+    background: var(--bg-soft);
+  }
+  .page-head h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .2px; }
+  .page-head p { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); max-width: 720px; }
+  .page-head .grow { flex: 1; }
+  .page-head .controls { display: flex; align-items: center; gap: 8px; }
+  select {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+    padding: 6px 9px; font-size: 11.5px; color: var(--muted); outline: none;
+  }
+  .flow-body { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 330px; min-height: 0; }
+  .flow-canvas { position: relative; overflow: auto; background: radial-gradient(circle at 45% 40%, #151515 0%, #0d0d0d 70%); }
+  .flow-canvas svg { width: 100%; height: 100%; min-height: 560px; display: block; }
+  .flow-side { border-left: 1px solid var(--line); background: #101010; overflow-y: auto; padding: 18px; }
+  .flow-side h3 { margin: 0 0 4px; font-size: 13px; }
+  .flow-side .sub { font-size: 11px; color: var(--dim); margin-bottom: 14px; }
+  .flow-stat { display: flex; justify-content: space-between; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 11.5px; }
+  .flow-stat .n { font-family: var(--mono); color: var(--fg); }
+  .path-row { padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+  .path-row .p-top { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; }
+  .path-row .p-name { color: #c8c8c8; font-family: var(--mono); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .path-row .p-count { color: var(--dim); font-family: var(--mono); font-size: 10px; flex: none; }
+  .path-bar { height: 3px; border-radius: 2px; background: #242424; margin-top: 5px; overflow: hidden; }
+  .path-bar span { display: block; height: 100%; background: var(--accent-line); border-radius: 2px; }
+  .flow-legend { display: flex; align-items: center; gap: 14px; font-size: 10.5px; color: var(--dim); }
+  .flow-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .flow-legend i { width: 14px; height: 2px; background: #4a4a4a; display: inline-block; border-radius: 2px; }
+
+  /* ------------------------------- modules ------------------------------- */
+  .page { flex: 1; overflow-y: auto; padding: 18px 22px 50px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+  .stat-card { border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius); padding: 11px 13px; }
+  .stat-card .v { font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .stat-card .l { font-size: 10.5px; color: var(--dim); margin-top: 3px; letter-spacing: .3px; }
+  .stat-card.warn .v { color: var(--yellow); }
+  .stat-card.bad .v { color: var(--red); }
+  .modules-layout { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; align-items: start; }
+  .module-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+  .module-card {
+    border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius);
+    padding: 13px; text-align: left; color: inherit;
+    transition: border-color .12s, background .12s, transform .12s;
+  }
+  .module-card:hover { border-color: #3a3a3a; background: #1a1a1a; }
+  .module-card.selected { border-color: var(--accent-line); background: #1a1712; }
+  .module-card.degraded { border-color: rgba(224, 108, 117, .3); }
+  .module-card .top { display: flex; align-items: center; gap: 8px; }
+  .module-card .name { font-family: var(--mono); font-size: 12.5px; font-weight: 500; color: #e5e5e5; }
+  .module-card .kind { margin-left: auto; display: flex; gap: 4px; }
+  .module-card .tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 9px; }
+  .pattern-chip { font-family: var(--mono); font-size: 9.5px; color: #8f8f8f; background: #111; border: 1px solid #262626; border-radius: 4px; padding: 1px 5px; }
+  .module-card .bottom { display: flex; align-items: center; gap: 12px; margin-top: 10px; font-family: var(--mono); font-size: 10px; color: var(--dim); }
+  .module-card .bottom b { color: var(--muted); font-weight: 500; }
+  .module-card .err { margin-top: 9px; font-size: 10.5px; color: #d98b92; background: rgba(224,108,117,.07); border: 1px solid rgba(224,108,117,.2); border-radius: 5px; padding: 5px 7px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .status-dot.loaded { background: var(--green); }
+  .status-dot.degraded { background: var(--yellow); box-shadow: 0 0 0 3px rgba(229,192,123,.1); }
+  .status-dot.disabled { background: #555; }
+  .status-dot.load_error { background: var(--red); }
+  .module-detail { border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius); padding: 16px; position: sticky; top: 0; }
+  .module-detail h2 { margin: 0; font-family: var(--mono); font-size: 14px; }
+  .module-detail .detail-sub { color: var(--dim); font-size: 10.5px; margin: 3px 0 14px; }
+  .detail-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); font-size: 11.5px; }
+  .detail-row .k { color: var(--dim); }
+  .detail-row .v { font-family: var(--mono); color: var(--muted); text-align: right; }
+  .pattern-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .pattern-list .pattern-chip { display: flex; justify-content: space-between; padding: 4px 7px; }
+  .pattern-list .pattern-chip .pc { color: var(--dim); }
+  .kv { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+  .kv div { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10.5px; color: var(--dim); }
+  .kv b { color: var(--muted); font-weight: 400; }
+
+  /* -------------------------------- state -------------------------------- */
+  .tabs { display: flex; gap: 4px; }
+  .tab { background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--muted); padding: 7px 10px; font-size: 12px; }
+  .tab.active { color: var(--fg); border-bottom-color: var(--accent); }
+  .state-body { flex: 1; display: grid; grid-template-columns: 258px minmax(0, 1fr); min-height: 0; }
+  .key-list { border-right: 1px solid var(--line); background: #101010; overflow-y: auto; padding: 10px; }
+  .key-item {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 7px 9px; border-radius: 6px; border: 1px solid transparent;
+    background: transparent; color: var(--muted); text-align: left; font-family: var(--mono); font-size: 11.5px;
+  }
+  .key-item:hover { background: #171717; }
+  .key-item.active { background: var(--accent-soft); border-color: var(--accent-line); color: #f0d5ac; }
+  .key-item .t { margin-left: auto; font-size: 9.5px; color: var(--dim); }
+  .json-panel { overflow: auto; padding: 18px 20px 60px; }
+  .json-panel .json { font-size: 11.5px; }
+  .panel-title { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .panel-title h2 { margin: 0; font-family: var(--mono); font-size: 13px; color: var(--muted); font-weight: 400; }
+  .table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  .table th { text-align: left; font-size: 9.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); font-weight: 400; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  .table td { padding: 9px 8px; border-bottom: 1px solid var(--line-soft); color: var(--muted); }
+  .table td.mono { font-family: var(--mono); font-size: 11px; color: #d0d0d0; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); font-family: var(--mono); }
+  .badge.green { color: var(--green); border-color: rgba(152,195,121,.3); background: rgba(152,195,121,.07); }
+  .badge.red { color: var(--red); border-color: rgba(224,108,117,.3); background: rgba(224,108,117,.07); }
+  .badge.yellow { color: var(--yellow); border-color: rgba(229,192,123,.3); background: rgba(229,192,123,.07); }
+  .badge.blue { color: var(--blue); border-color: rgba(97,175,239,.3); background: rgba(97,175,239,.07); }
+  .widget-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .widget-card { border: 1px solid var(--line); background: var(--surface); border-radius: var(--radius); overflow: hidden; }
+  .widget-preview { height: 92px; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 30%, #1c1c1c, #111); border-bottom: 1px solid var(--line-soft); }
+  .widget-meta { padding: 10px 12px; }
+  .widget-meta .wname { font-family: var(--mono); font-size: 11.5px; color: #ddd; }
+  .widget-meta .wsub { font-size: 10.5px; color: var(--dim); margin-top: 3px; display: flex; align-items: center; gap: 7px; }
+  .wbox { display: flex; align-items: center; }
+  .wlabel { font-size: 14px; }
+  .wlabel.dim { color: var(--muted); }
+  .wlabel.accent { color: var(--accent); }
+  .wlabel.green { color: var(--green); }
+  .wlabel.red { color: var(--red); }
+  .wlabel.yellow { color: var(--yellow); }
+  .wlabel.blue { color: var(--blue); }
+  .wlabel.bold { font-weight: 700; }
+  .wlabel.sm { font-size: 12px; } .wlabel.xs { font-size: 10px; } .wlabel.lg { font-size: 16px; } .wlabel.xl { font-size: 20px; }
+  .wicon { color: var(--muted); display: inline-flex; }
+  .wicon svg { width: 18px; height: 18px; }
+  .wprogress { width: 76px; height: 5px; border-radius: 3px; background: #2a2a2a; overflow: hidden; margin-left: 8px; }
+  .wprogress span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+  /* ------------------------------- adapters ------------------------------ */
+  .adapter-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .adapter-card { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 12px; }
+  .adapter-card .a-top { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 11.5px; color: #ddd; }
+  .adapter-card .a-last { font-family: var(--mono); font-size: 9.5px; color: var(--dim); margin-top: 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .adapter-card .a-meta { display: flex; gap: 8px; margin-top: 6px; font-size: 10px; color: var(--dim); }
+  .err-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .err-item { border: 1px solid var(--line-soft); background: #141414; border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 10.5px; color: #b58a8d; }
+  .err-item .et { color: var(--dim); margin-right: 8px; }
+
+  /* -------------------------------- modal -------------------------------- */
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,.6); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    width: min(540px, calc(100vw - 40px));
+    background: var(--surface); border: 1px solid #333; border-radius: 10px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.6);
+    padding: 18px;
+  }
+  .modal h2 { margin: 0 0 3px; font-size: 15px; }
+  .modal .m-sub { color: var(--dim); font-size: 11px; margin-bottom: 16px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 5px; }
+  .field input, .field textarea {
+    width: 100%; background: #111; border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; color: var(--fg); outline: none;
+  }
+  .field input:focus, .field textarea:focus { border-color: var(--accent-line); }
+  .field textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
+  .field .help { font-size: 10px; color: var(--dim); margin-top: 5px; }
+  .modal-err { display: none; font-family: var(--mono); font-size: 10.5px; color: #efa3a8; background: rgba(224,108,117,.08); border: 1px solid rgba(224,108,117,.25); border-radius: 5px; padding: 7px 9px; margin-bottom: 10px; }
+  .modal-err.show { display: block; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  .modal-actions .spacer { flex: 1; }
+
+  /* ---------------------------- notes + toast ---------------------------- */
+  .notes-btn {
+    position: fixed; right: 18px; bottom: 16px; z-index: 20;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 999px;
+    color: var(--muted); padding: 7px 12px; font-size: 11px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  }
+  .notes-btn:hover { color: var(--fg); border-color: #3a3a3a; }
+  .notes-panel {
+    position: fixed; right: 18px; bottom: 56px; z-index: 20;
+    width: 356px; max-height: 74vh; overflow-y: auto;
+    background: #131313; border: 1px solid #303030; border-radius: 10px;
+    padding: 15px 16px; box-shadow: 0 20px 60px rgba(0,0,0,.55);
+    display: none;
+  }
+  .notes-panel.open { display: block; }
+  .notes-panel h3 { margin: 0 0 3px; font-size: 13px; }
+  .notes-panel .np-sub { color: var(--dim); font-size: 10.5px; margin-bottom: 12px; }
+  .notes-panel h4 { margin: 14px 0 5px; font-size: 10px; text-transform: uppercase; letter-spacing: 1.1px; color: #6d6d6d; }
+  .notes-panel ul { margin: 0; padding-left: 16px; }
+  .notes-panel li { font-size: 10.8px; color: var(--muted); margin-bottom: 5px; line-height: 1.45; }
+  .notes-panel code { font-family: var(--mono); font-size: 10px; color: #c9b18d; }
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 14px);
+    z-index: 60; background: #1d1d1d; border: 1px solid #3a3a3a; color: var(--fg);
+    padding: 9px 14px; border-radius: 7px; font-size: 12px;
+    opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5); max-width: 80vw;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast .t-ok { color: var(--green); }
+
+  @media (max-width: 1180px) {
+    .stream-body { grid-template-columns: minmax(0, 1fr) 350px; }
+    .modules-layout, .flow-body { grid-template-columns: 1fr; }
+    .module-detail, .flow-side { display: none; }
+    .summary-grid { grid-template-columns: repeat(3, 1fr); }
+    .adapter-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="loaf" aria-hidden="true"></div>
+      <div class="brand-text">
+        <span class="brand-name">breadscope</span>
+        <span class="brand-sub">bread observability</span>
+      </div>
+    </div>
+    <span class="tag">mockup</span>
+    <div class="topbar-spacer"></div>
+    <div class="status-pill" id="daemonStatus"><span class="dot"></span><span id="daemonStatusText">connected</span></div>
+    <div class="top-meta">
+      <span>pid 3246</span>
+      <span>v0.10.1</span>
+      <span>up 3h 12m</span>
+      <span class="api">api 1.8.0</span>
+    </div>
+    <button class="btn primary" id="emitBtn">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+      Emit event
+    </button>
+  </header>
+
+  <aside class="rail">
+    <div class="rail-group">Observe</div>
+    <button class="nav-btn active" data-view="stream">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 8h3l1.8-4 3 8 1.8-4h3.4"/></svg>
+      Event stream
+      <span class="count" id="navStreamCount">1.3k</span>
+    </button>
+    <button class="nav-btn" data-view="flow">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="3.5" cy="4" r="1.7"/><circle cx="3.5" cy="12" r="1.7"/><circle cx="12.5" cy="8" r="1.7"/><path d="M5.2 4.7l5.6 2.7M5.2 11.3l5.6-2.7"/></svg>
+      Interaction map
+    </button>
+
+    <div class="rail-group">Inspect</div>
+    <button class="nav-btn" data-view="modules">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>
+      Modules
+      <span class="count">12</span>
+    </button>
+    <button class="nav-btn" data-view="state">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="8" cy="4" rx="5" ry="2"/><path d="M3 4v4c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8v4c0 1.1 2.2 2 5 2s5-.9 5-2V8"/></svg>
+      Runtime state
+    </button>
+
+    <div class="rail-group">System</div>
+    <button class="nav-btn" data-view="adapters">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v4M10 2v4M4.5 6h7v2.2a3.5 3.5 0 0 1-7 0zM8 11.5V14"/></svg>
+      Adapters and health
+      <span class="count">2</span>
+    </button>
+
+    <div class="rail-spacer"></div>
+    <div class="rail-card">
+      <div class="row"><span class="dot"></span><span>daemon reachable</span></div>
+      <div class="socket">$XDG_RUNTIME_DIR/bread/breadd.sock</div>
+      <button id="notesBtn">What is real in this mockup?</button>
+    </div>
+  </aside>
+
+  <main>
+    <!-- ------------------------------ stream ------------------------------ -->
+    <section class="view active" id="view-stream">
+      <div class="stream-toolbar">
+        <div class="search-wrap">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.3"/><path d="M10.2 10.2L14 14"/></svg>
+          <input id="patternInput" placeholder="filter: bread.device.** or dock" spellcheck="false" aria-label="Event filter">
+          <kbd>/</kbd>
+        </div>
+        <div class="segmented" id="orderToggle">
+          <button data-order="flat">Newest first</button>
+          <button data-order="causal" class="active">Causal tree</button>
+        </div>
+        <button class="btn" id="pauseBtn">
+          <svg viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="3" height="10" rx="1"/><rect x="9" y="3" width="3" height="10" rx="1"/></svg>
+          <span id="pauseLabel">Pause</span>
+        </button>
+        <button class="btn ghost" id="clearBtn">Clear buffer</button>
+      </div>
+      <div class="chips" id="sourceChips">
+        <span class="label">source</span>
+        <button class="chip active" data-source="all"><span class="swatch" style="color:#8d8d8d"></span>all</button>
+        <button class="chip" data-source="udev"><span class="swatch" style="color:#61afef"></span>udev</button>
+        <button class="chip" data-source="hyprland"><span class="swatch" style="color:#c678dd"></span>hyprland</button>
+        <button class="chip" data-source="power"><span class="swatch" style="color:#e5c07b"></span>power</button>
+        <button class="chip" data-source="network"><span class="swatch" style="color:#56b6c2"></span>network</button>
+        <button class="chip" data-source="bluetooth"><span class="swatch" style="color:#7aa2f7"></span>bluetooth</button>
+        <button class="chip" data-source="system"><span class="swatch" style="color:#98c379"></span>lua / system</button>
+        <button class="chip" data-source="manual"><span class="swatch" style="color:#8d8d8d"></span>manual</button>
+        <span class="spacer"></span>
+        <span class="hint" id="streamCount">0 shown</span>
+      </div>
+      <div class="volume-strip" id="volumeStrip" aria-hidden="true"></div>
+      <div class="stream-body">
+        <div class="events-pane">
+          <div class="events-list" id="eventsList"></div>
+        </div>
+        <aside class="inspector" id="inspector"></aside>
+      </div>
+    </section>
+
+    <!-- ------------------------------- flow ------------------------------- -->
+    <section class="view" id="view-flow">
+      <div class="page-head">
+        <div>
+          <h1>Interaction map</h1>
+          <p>Which sources reach which event families, and which modules handle them. Edge width is event volume. Select any node to isolate its paths.</p>
+        </div>
+        <div class="grow"></div>
+        <div class="controls">
+          <div class="flow-legend"><span><i></i>event flow</span></div>
+          <select id="flowWindow">
+            <option>last 15 min</option>
+            <option>last 1 hour</option>
+            <option>since daemon start</option>
+          </select>
+          <button class="btn small" id="flowReset">Reset</button>
+        </div>
+      </div>
+      <div class="flow-body">
+        <div class="flow-canvas" id="flowCanvas"></div>
+        <aside class="flow-side" id="flowSide"></aside>
+      </div>
+    </section>
+
+    <!-- ------------------------------ modules ----------------------------- -->
+    <section class="view" id="view-modules">
+      <div class="page-head">
+        <div>
+          <h1>Modules</h1>
+          <p>Loaded Lua modules, built-ins, and sandboxed out-of-process hosts. Subscription counts are computed from the live stream in this mockup.</p>
+        </div>
+        <div class="grow"></div>
+        <button class="btn small" id="reloadAllBtn">Reload all</button>
+      </div>
+      <div class="page">
+        <div class="summary-grid" id="moduleSummary"></div>
+        <div class="modules-layout">
+          <div class="module-grid" id="moduleGrid"></div>
+          <aside id="moduleDetail"></aside>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------- state ------------------------------ -->
+    <section class="view" id="view-state">
+      <div class="page-head">
+        <div>
+          <h1>Runtime state</h1>
+          <p>The same shape returned by <code>state.dump</code>, plus workflows and widget trees exposed through their own IPC methods.</p>
+        </div>
+        <div class="grow"></div>
+        <div class="tabs" id="stateTabs">
+          <button class="tab active" data-tab="runtime">Runtime</button>
+          <button class="tab" data-tab="workflows">Workflows</button>
+          <button class="tab" data-tab="widgets">Widgets</button>
+        </div>
+      </div>
+      <div class="state-body" id="stateBody"></div>
+    </section>
+
+    <!-- ----------------------------- adapters ----------------------------- -->
+    <section class="view" id="view-adapters">
+      <div class="page-head">
+        <div>
+          <h1>Adapters and health</h1>
+          <p>Adapter liveness from <code>health</code>, subscription counts, buffer pressure, and the last handler errors breadd reported.</p>
+        </div>
+      </div>
+      <div class="page" id="adaptersPage"></div>
+    </section>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="emitModal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="emitTitle">
+    <h2 id="emitTitle">Emit an event</h2>
+    <div class="m-sub">Calls the IPC <code>emit</code> method as a manual source. Adapter-owned domains are rejected by breadd.</div>
+    <div class="modal-err" id="emitError"></div>
+    <div class="field">
+      <label for="emitName">Event name</label>
+      <input id="emitName" value="bread.custom.test" spellcheck="false" autocomplete="off">
+      <div class="help">Try <code>bread.custom.test</code>, or <code>bread.power.ac.connected</code> to see the reserved-domain guard.</div>
+    </div>
+    <div class="field">
+      <label for="emitSource">Source</label>
+      <input id="emitSource" value="Manual" disabled>
+    </div>
+    <div class="field">
+      <label for="emitData">Data (JSON)</label>
+      <textarea id="emitData" spellcheck="false">{"note": "poked from breadscope"}</textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn ghost" id="emitCancel">Cancel</button>
+      <div class="spacer"></div>
+      <button class="btn primary" id="emitPublish">Publish</button>
+    </div>
+  </div>
+</div>
+
+<div class="notes-panel" id="notesPanel">
+  <h3>What is real here</h3>
+  <div class="np-sub">The mockup is static except for the simulated stream. Every panel maps to a real IPC method.</div>
+  <h4>Backed by existing IPC</h4>
+  <ul>
+    <li><code>events.subscribe</code> and <code>events.replay</code> feed the stream and filters.</li>
+    <li><code>caused_by</code> on each event builds the causal tree and inspector chain.</li>
+    <li><code>health</code> gives version, uptime, adapters, subscriptions, and recent errors.</li>
+    <li><code>modules.list</code> and <code>state.dump</code> give module status and store.</li>
+    <li><code>workflows.list</code>, <code>widgets.list</code>, <code>profile.list</code> fill their views.</li>
+    <li><code>emit</code> powers the dialog, including the reserved-domain rejection.</li>
+  </ul>
+  <h4>Needs a small IPC addition</h4>
+  <ul>
+    <li>Per-module subscriptions and handler latency are not exposed today. <code>modules.list</code> has no subscription list, and events carry no dispatch trace. The "Handled by" rows and the subscription counts on module cards assume a new method, for example <code>subscriptions.list</code>, and per-event handler timing.</li>
+    <li>Event volume history is not in the API either. The strip is simulated; a real implementation would keep a ring of counts client-side.</li>
+  </ul>
+  <h4>Deliberately mocked</h4>
+  <ul>
+    <li>The ticker injecting chains every 3.4 s, the latencies, and the 15 minute counts.</li>
+    <li>Widget previews render from a mock tree; real trees come from <code>widgets.list</code>.</li>
+  </ul>
+  <div style="margin-top:14px"><button class="btn small" id="notesClose">Close</button></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ------------------------------------------------------------------
+  // utilities
+  // ------------------------------------------------------------------
+  const $ = (sel, root) => (root || document).querySelector(sel);
+  const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+  const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const pad = (n, w) => String(n).padStart(w, "0");
+  const fmtTime = (ts) => {
+    const d = new Date(ts);
+    return pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) + ":" + pad(d.getSeconds(), 2) + "." + pad(d.getMilliseconds(), 3);
+  };
+  const fmtAge = (ts) => {
+    const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.round(s / 60) + "m ago";
+    return Math.round(s / 3600) + "h ago";
+  };
+  const shortId = (id) => { const v = String(id || ""); return v.length > 10 ? v.slice(0, 4) + "·" + v.slice(-4) : v; };
+
+  function highlightJSON(value) {
+    const json = JSON.stringify(value, null, 2);
+    if (json === undefined) return "";
+    const re = /("(?:\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*"\s*:)|("(?:\\u[\da-fA-F]{4}|\\[^u]|[^\\"])*")|(\btrue\b|\bfalse\b)|(\bnull\b)|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+    let out = "";
+    let last = 0;
+    let m;
+    while ((m = re.exec(json)) !== null) {
+      out += esc(json.slice(last, m.index));
+      let cls = "j-num";
+      if (m[1]) cls = "j-key";
+      else if (m[2]) cls = "j-str";
+      else if (m[3]) cls = "j-bool";
+      else if (m[4]) cls = "j-null";
+      out += '<span class="' + cls + '">' + esc(m[0]) + "</span>";
+      last = m.index + m[0].length;
+    }
+    out += esc(json.slice(last));
+    return out;
+  }
+
+  function patternToRegex(pattern) {
+    let out = "^";
+    for (let i = 0; i < pattern.length; i++) {
+      const c = pattern[i];
+      if (c === "*") {
+        if (pattern[i + 1] === "*") {
+          out += ".*";
+          i++;
+        } else {
+          out += "[^.]+";
+        }
+      } else if (c === "?") {
+        out += "[^.]";
+      } else {
+        out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      }
+    }
+    return new RegExp(out + "$");
+  }
+  const regexCache = new Map();
+  function matchPattern(pattern, name) {
+    if (pattern === "**" ) return true;
+    if (!regexCache.has(pattern)) regexCache.set(pattern, patternToRegex(pattern));
+    return regexCache.get(pattern).test(name);
+  }
+  function matchesFilter(evt, filter) {
+    if (!filter) return true;
+    if (filter.indexOf("*") !== -1 || filter.indexOf("?") !== -1) return matchPattern(filter, evt.event);
+    return evt.event.indexOf(filter) !== -1 || (evt.by || "").indexOf(filter) !== -1;
+  }
+  function sourceKey(evt) {
+    const s = typeof evt.source === "string" ? evt.source : "app";
+    const map = { udev: "udev", hyprland: "hyprland", power: "power", network: "network", bluetooth: "bluetooth", system: "system", manual: "manual", app: "app", terminal: "terminal", git: "git", systemd: "systemd", podman: "podman", filesystem: "filesystem", remote: "remote" };
+    return map[s.toLowerCase()] || "system";
+  }
+  const sourceColor = { udev: "#61afef", hyprland: "#c678dd", power: "#e5c07b", network: "#56b6c2", bluetooth: "#7aa2f7", system: "#98c379", manual: "#8d8d8d", app: "#d9a05b", terminal: "#8d8d8d", git: "#8d8d8d", systemd: "#8d8d8d", podman: "#8d8d8d", filesystem: "#8d8d8d", remote: "#8d8d8d" };
+  function sourceLabel(evt) {
+    if (typeof evt.source === "string" && evt.source !== "App") return evt.source;
+    if (evt.source === "App") return "App" + (evt.data && evt.data.app ? "(" + evt.data.app + ")" : "");
+    return String(evt.source);
+  }
+  function summarize(evt) {
+    const d = evt.data || {};
+    const keys = Object.keys(d);
+    if (!keys.length) return "no payload";
+    return keys.slice(0, 3).map((k) => {
+      const v = d[k];
+      const shown = v && typeof v === "object" ? JSON.stringify(v) : String(v);
+      return k + "=" + shown;
+    }).join("  ·  ");
+  }
+
+  // ------------------------------------------------------------------
+  // mock data
+  // ------------------------------------------------------------------
+  const T0 = Date.now();
+  const at = (minutesAgo) => T0 - Math.round(minutesAgo * 60000);
+  const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(16).slice(2));
+
+  const ID = {
+    startup: "3f6c1d20-5a1e-4a5f-9d70-8b2c0e4a1001",
+    profileDefault: "3f6c1d20-5a1e-4a5f-9d70-8b2c0e4a1002",
+    dockUsb: "b3f2c9a0-4e6d-4b8a-9c1e-7a2f5d8e0c11",
+    dockNamed: "b3f2c9a0-4e6d-4b8a-9c1e-7a2f5d8e0c12",
+    monitor: "c41d8e77-2a90-4f0e-8c33-19b6a2d4e201",
+    layout: "c41d8e77-2a90-4f0e-8c33-19b6a2d4e202",
+    wsMoved: "c41d8e77-2a90-4f0e-8c33-19b6a2d4e203",
+    profileDock: "c41d8e77-2a90-4f0e-8c33-19b6a2d4e204",
+    barRefresh: "c41d8e77-2a90-4f0e-8c33-19b6a2d4e205",
+    workspace: "d7a0e412-88bc-4c55-a2f1-6e4d3b8f3301",
+    window: "d7a0e412-88bc-4c55-a2f1-6e4d3b8f3302",
+    ac: "e2b4f688-10c3-4d7a-b5e9-2f8c1a6d4401",
+    profilePerf: "e2b4f688-10c3-4d7a-b5e9-2f8c1a6d4402",
+    btPaired: "f9c5a733-6d21-4b0c-9e48-71a3d2c05501",
+    btDevice: "f9c5a733-6d21-4b0c-9e48-71a3d2c05502",
+    btNamed: "f9c5a733-6d21-4b0c-9e48-71a3d2c05503",
+    widgetClick: "a8d1f204-3b7e-4e61-8c09-5d2f4a1b6601",
+    networkUp: "a8d1f204-3b7e-4e61-8c09-5d2f4a1b6602",
+    crash: "a8d1f204-3b7e-4e61-8c09-5d2f4a1b6603",
+    manual: "a8d1f204-3b7e-4e61-8c09-5d2f4a1b6604",
+    monitorDown: "b0e6c945-7a12-4d3f-9b81-2c5e8f0a7701",
+    wsFallback: "b0e6c945-7a12-4d3f-9b81-2c5e8f0a7702",
+    profileMobile: "b0e6c945-7a12-4d3f-9b81-2c5e8f0a7703",
+    acDown: "b0e6c945-7a12-4d3f-9b81-2c5e8f0a7704"
+  };
+
+  let events = [
+    { id: ID.startup, ts: at(9.4), event: "bread.system.startup", source: "System", data: {}, by: "breadd" },
+    { id: ID.profileDefault, ts: at(9.2), event: "bread.profile.activated", source: "System", data: { profile: "default", previous: null }, by: "breadd" },
+    { id: ID.dockUsb, ts: at(8.15), event: "bread.device.connected", source: "Udev", data: { device: "dock", name: "CalDigit TS4", subsystem: "usb", vendor_id: "0x35f5", product_id: "0x0104", id: "/sys/devices/pci0000:00/0000:00:08.3/usb4/4-1" } },
+    { id: ID.dockNamed, ts: at(8.14), event: "bread.device.dock.connected", source: "Udev", data: { device: "dock", id: "/sys/devices/pci0000:00/0000:00:08.3/usb4/4-1" }, caused_by: ID.dockUsb },
+    { id: ID.monitor, ts: at(8.05), event: "bread.monitor.connected", source: "Hyprland", data: { name: "HDMI-A-1", resolution: "2560x1440", position: "0x0" } },
+    { id: ID.layout, ts: at(8.04), event: "bread.monitor.layout.applied", source: "System", by: "dock-layout", data: { layout: "dock", monitors: ["HDMI-A-1", "eDP-1"] }, caused_by: ID.monitor },
+    { id: ID.wsMoved, ts: at(8.03), event: "bread.workspace.moved", source: "System", by: "workspace-rules", data: { workspace: "4", from: "eDP-1", to: "HDMI-A-1" }, caused_by: ID.monitor },
+    { id: ID.profileDock, ts: at(7.98), event: "bread.profile.activated", source: "System", by: "dock-layout", data: { profile: "dock", previous: "default" }, caused_by: ID.layout },
+    { id: ID.barRefresh, ts: at(7.97), event: "bread.command.bar.refresh", source: "App", data: { app: "bar", verb: "refresh" }, by: "dock-layout", caused_by: ID.layout },
+    { id: ID.workspace, ts: at(6.3), event: "bread.workspace.changed", source: "Hyprland", data: { id: "3" } },
+    { id: ID.window, ts: at(6.28), event: "bread.window.opened", source: "Hyprland", data: { address: "0x55d3a1c2", class: "Alacritty", title: "cargo test -p breadd" } },
+    { id: ID.ac, ts: at(5.4), event: "bread.power.ac.connected", source: "Power", data: { ac_connected: true, battery_percent: 87 } },
+    { id: ID.profilePerf, ts: at(5.39), event: "bread.profile.activated", source: "System", by: "power-saver", data: { profile: "performance", previous: "dock" }, caused_by: ID.ac },
+    { id: ID.btPaired, ts: at(4.82), event: "bread.bluetooth.device.paired", source: "Bluetooth", data: { name: "Sony WH-1000XM5", address: "AC:80:0A:11:22:33", subsystem: "bluetooth" } },
+    { id: ID.btDevice, ts: at(4.8), event: "bread.device.connected", source: "Bluetooth", data: { device: "headphones", name: "Sony WH-1000XM5", address: "AC:80:0A:11:22:33", subsystem: "bluetooth" }, caused_by: ID.btPaired },
+    { id: ID.btNamed, ts: at(4.79), event: "bread.device.bluetooth.connected", source: "Bluetooth", data: { device: "headphones", id: "AC:80:0A:11:22:33" }, caused_by: ID.btDevice },
+    { id: ID.widgetClick, ts: at(4.1), event: "bread.bar.widget_clicked", source: "App", data: { widget_id: "weather.weather", action: "refresh" } },
+    { id: ID.networkUp, ts: at(3.85), event: "bread.network.connected", source: "Network", data: { online: true, interfaces: ["eth0"] } },
+    { id: ID.crash, ts: at(3.2), event: "bread.module.crashed", source: "System", data: { module: "weather", pid: 8412, reason: "panic", exit_code: 101, signal: null } },
+    { id: ID.manual, ts: at(2.6), event: "bread.custom.test", source: "Manual", data: { note: "poke from CLI", payload: { n: 1 } } },
+    { id: ID.monitorDown, ts: at(1.42), event: "bread.monitor.disconnected", source: "Hyprland", data: { name: "HDMI-A-1" } },
+    { id: ID.wsFallback, ts: at(1.4), event: "bread.workspace.moved", source: "System", by: "workspace-rules", data: { workspace: "4", from: "HDMI-A-1", to: "eDP-1" }, caused_by: ID.monitorDown },
+    { id: ID.profileMobile, ts: at(1.39), event: "bread.profile.activated", source: "System", by: "power-saver", data: { profile: "mobile", previous: "performance" }, caused_by: ID.monitorDown },
+    { id: ID.acDown, ts: at(0.3), event: "bread.power.ac.disconnected", source: "Power", data: { ac_connected: false, battery_percent: 86 }, by: "power-saver" }
+  ];
+
+  const moduleDefs = [
+    { name: "bread.devices", kind: "builtin", status: "loaded", patterns: ["bread.device.**"], store: {}, hooks: ["builtin"], desc: "Built-in device rule engine. Resolves udev and Bluetooth devices into named bread.device.<name> events." },
+    { name: "bread.monitors", kind: "builtin", status: "loaded", patterns: ["bread.monitor.**"], store: {}, hooks: ["builtin"], desc: "Built-in monitor layout helper. Applies named layouts when monitors connect or disconnect." },
+    { name: "bread.workspaces", kind: "builtin", status: "loaded", patterns: ["bread.workspace.**", "bread.window.**"], store: {}, hooks: ["builtin"], desc: "Built-in workspace and window state tracking, writing into RuntimeState." },
+    { name: "bread.binds", kind: "builtin", status: "loaded", patterns: ["bread.workspace.changed"], store: {}, hooks: ["builtin"], desc: "Installs and removes Hyprland keybinds tied to the active workspace and profile." },
+    { name: "bread.rules", kind: "builtin", status: "loaded", patterns: ["bread.power.ac.**", "bread.device.**"], store: {}, hooks: ["builtin"], desc: "Declarative rules.toml engine. Evaluates match conditions and runs actions without a Lua module." },
+    { name: "dock-layout", kind: "user", status: "loaded", patterns: ["bread.device.dock.connected", "bread.monitor.connected", "bread.monitor.disconnected"], store: { layout: "dock", last_profile: "performance" }, hooks: ["on_load", "on_reload"], desc: "Applies the dock monitor layout and switches to the dock profile when the TS4 is present." },
+    { name: "workspace-rules", kind: "user", status: "loaded", patterns: ["bread.workspace.changed", "bread.monitor.connected"], store: { rules: 3 }, hooks: ["on_load"], desc: "Moves named workspaces to their preferred monitor as the topology changes." },
+    { name: "power-saver", kind: "user", status: "loaded", patterns: ["bread.power.**", "bread.monitor.disconnected"], store: { last_ac: false, saved_brightness: 70 }, hooks: ["on_load", "on_unload"], desc: "Switches profiles on AC transitions and lowers brightness when the battery is low." },
+    { name: "presence-inhibitor", kind: "sandboxed", status: "loaded", pid: 9121, patterns: ["bread.device.**", "bread.custom.presence.**"], store: { inhibitors: 2, last_presence: "present" }, hooks: ["on_load"], desc: "Runs out of process with Landlock. Holds a systemd inhibitor while a trusted dock and keyboard are present." },
+    { name: "weather", kind: "user", status: "degraded", patterns: ["bread.network.connected", "bread.network.disconnected"], store: { city: "Perth", last_temp: 22 }, hooks: ["on_load", "on_error"], error: "on_event: attempt to index a nil value (field 'main')", desc: "Refreshes the weather widget when the network comes back. Currently degraded after a Lua panic." },
+    { name: "bar", kind: "user", status: "loaded", patterns: ["bread.bar.widget_clicked", "bread.command.bar.**"], store: {}, hooks: ["on_load"], desc: "Glue module for breadbar: handles widget clicks and command-bus requests." },
+    { name: "night-light", kind: "user", status: "disabled", patterns: ["bread.workspace.changed"], store: { enabled: false }, hooks: [], desc: "Disabled in breadd.toml. Kept for reference; no handlers are registered while disabled." }
+  ];
+
+  const adapters = [
+    { name: "udev", source: "Udev", status: "ok", last: "bread.device.connected", age: 4.8, errors: 0, detail: "usb, input" },
+    { name: "hyprland", source: "Hyprland", status: "ok", last: "bread.monitor.disconnected", age: 1.4, errors: 0, detail: "2 active monitors" },
+    { name: "power", source: "Power", status: "ok", last: "bread.power.ac.disconnected", age: 0.3, errors: 0, detail: "UPower" },
+    { name: "network", source: "Network", status: "ok", last: "bread.network.connected", age: 3.9, errors: 0, detail: "rtnetlink, eth0" },
+    { name: "bluetooth", source: "Bluetooth", status: "ok", last: "bread.device.bluetooth.connected", age: 4.8, errors: 0, detail: "BlueZ, 1 connected" },
+    { name: "systemd", source: "Systemd", status: "ok", last: "bread.service.changed", age: 12, errors: 0, detail: "user session bus" },
+    { name: "podman", source: "Podman", status: "degraded", last: "bread.container.started", age: 780, errors: 2, detail: "socket timeout, retry 3" },
+    { name: "filesystem", source: "Filesystem", status: "ok", last: "bread.project.changed", age: 41, errors: 0, detail: "4 watched roots" },
+    { name: "git", source: "Git", status: "ok", last: "bread.git.commit", age: 96, errors: 0, detail: "bread, infra" },
+    { name: "terminal", source: "Terminal", status: "ok", last: "bread.terminal.command", age: 27, errors: 0, detail: "zsh hooks" }
+  ];
+
+  const workflows = [
+    { name: "dock-connected", state: "running", step: "waiting for monitor", started: at(8.05), updated: at(1.42), error: null },
+    { name: "battery-guard", state: "done", step: "restored performance profile", started: at(5.4), updated: at(5.39), error: null },
+    { name: "profile-transition", state: "failed", step: "matched profile for DP-3", started: at(121), updated: at(120), error: "no profile matches monitor DP-3" },
+    { name: "podman-sync", state: "running", step: "subscribed to container events", started: at(9.4), updated: at(9.4), error: null }
+  ];
+
+  const widgets = [
+    {
+      id: "weather.weather", module: "weather", placement: "left_of_stats", order: 0, visible: true,
+      tooltip: "Perth: partly cloudy", updated: at(6),
+      root: { type: "box", orientation: "horizontal", spacing: 6, children: [
+        { type: "icon", name: "cloud", size: 16 },
+        { type: "label", text: "22C", style: { size: "sm", color: "fg" } }
+      ] }
+    },
+    {
+      id: "bar.battery", module: "bar", placement: "right_of_clock", order: 0, visible: true,
+      tooltip: "86 percent, on battery", updated: at(0.3),
+      root: { type: "box", children: [
+        { type: "label", text: "86%", style: { size: "xs", color: "yellow", weight: "bold" } },
+        { type: "progress", value: 0.86 }
+      ] }
+    },
+    {
+      id: "bar.cpu", module: "bar", placement: "right_of_clock", order: 1, visible: true,
+      tooltip: "CPU load 31 percent", updated: at(0.1),
+      root: { type: "box", children: [
+        { type: "icon", name: "cpu" },
+        { type: "label", text: "31%", style: { size: "xs", color: "dim" } },
+        { type: "progress", value: 0.31 }
+      ] }
+    },
+    {
+      id: "presence.status", module: "presence-inhibitor", placement: "left_of_stats", order: 10, visible: true,
+      tooltip: "Inhibitor held by bread", updated: at(2),
+      root: { type: "box", spacing: 5, children: [
+        { type: "label", text: "present", style: { size: "xs", color: "green", weight: "bold" } }
+      ] }
+    }
+  ];
+
+  const runtimeState = {
+    monitors: [
+      { name: "HDMI-A-1", connected: false, resolution: "2560x1440", position: "0x0" },
+      { name: "eDP-1", connected: true, resolution: "1920x1200", position: "0x0" }
+    ],
+    workspaces: [
+      { id: "1", monitor: "eDP-1" },
+      { id: "2", monitor: "eDP-1" },
+      { id: "3", monitor: "eDP-1" },
+      { id: "4", monitor: "eDP-1" }
+    ],
+    active_workspace: "3",
+    active_window: "0x55d3a1c2",
+    devices: {
+      connected: [
+        { id: "/sys/devices/pci0000:00/0000:00:08.3/usb4/4-1", name: "CalDigit TS4", device: "dock", subsystem: "usb", vendor_id: "0x35f5", product_id: "0x0104" },
+        { id: "AC:80:0A:11:22:33", name: "Sony WH-1000XM5", device: "headphones", subsystem: "bluetooth" }
+      ]
+    },
+    network: { interfaces: { eth0: { up: true }, wlan0: { up: false } }, online: true },
+    power: { ac_connected: false, battery_percent: 86, battery_low: false },
+    profile: { active: "mobile", history: ["performance", "dock", "default"], profiles: { default: {}, mobile: {}, dock: {}, performance: {} } },
+    modules: moduleDefs.map((m) => ({ name: m.name, status: m.status, last_error: m.error || null, builtin: m.kind === "builtin", store: m.store })),
+    workflows: workflows.map((w) => ({ name: w.name, state: w.state, step: w.step, started_at: w.started, updated_at: w.updated, error: w.error })),
+    widgets: widgets.map((w) => ({ id: w.id, module: w.module, placement: w.placement, order: w.order, visible: w.visible, tooltip: w.tooltip, root: w.root, updated_at: w.updated }))
+  };
+
+  const flowSources = [
+    { id: "udev", label: "Udev", count: 62, color: "#61afef" },
+    { id: "hyprland", label: "Hyprland", count: 88, color: "#c678dd" },
+    { id: "power", label: "Power", count: 21, color: "#e5c07b" },
+    { id: "network", label: "Network", count: 14, color: "#56b6c2" },
+    { id: "bluetooth", label: "Bluetooth", count: 9, color: "#7aa2f7" },
+    { id: "manual", label: "Manual", count: 6, color: "#8d8d8d" }
+  ];
+  const flowFamilies = [
+    { id: "device", label: "device", count: 64 },
+    { id: "monitor", label: "monitor", count: 26 },
+    { id: "workspace", label: "workspace", count: 38 },
+    { id: "window", label: "window", count: 16 },
+    { id: "power", label: "power", count: 23 },
+    { id: "network", label: "network", count: 14 },
+    { id: "bluetooth", label: "bluetooth", count: 9 },
+    { id: "system", label: "system", count: 10 }
+  ];
+  const flowModules = [
+    { id: "bread.devices", label: "bread.devices", count: 57 },
+    { id: "bread.monitors", label: "bread.monitors", count: 18 },
+    { id: "bread.workspaces", label: "bread.workspaces", count: 30 },
+    { id: "dock-layout", label: "dock-layout", count: 14 },
+    { id: "workspace-rules", label: "workspace-rules", count: 12 },
+    { id: "power-saver", label: "power-saver", count: 17 },
+    { id: "presence-inhibitor", label: "presence-inhibitor", count: 8 },
+    { id: "weather", label: "weather", count: 10 },
+    { id: "bar", label: "bar", count: 28 },
+    { id: "bread.rules", label: "bread.rules", count: 6 }
+  ];
+  const flowEdges = [
+    { from: "udev", to: "device", count: 52 }, { from: "udev", to: "window", count: 6 }, { from: "udev", to: "system", count: 4 },
+    { from: "hyprland", to: "monitor", count: 26 }, { from: "hyprland", to: "workspace", count: 38 }, { from: "hyprland", to: "window", count: 10 }, { from: "hyprland", to: "device", count: 10 }, { from: "hyprland", to: "system", count: 4 },
+    { from: "power", to: "power", count: 21 },
+    { from: "network", to: "network", count: 14 },
+    { from: "bluetooth", to: "bluetooth", count: 9 },
+    { from: "manual", to: "device", count: 2 }, { from: "manual", to: "power", count: 2 }, { from: "manual", to: "system", count: 2 },
+    { from: "device", to: "bread.devices", count: 52 }, { from: "device", to: "dock-layout", count: 8 }, { from: "device", to: "presence-inhibitor", count: 4 },
+    { from: "monitor", to: "bread.monitors", count: 18 }, { from: "monitor", to: "dock-layout", count: 6 }, { from: "monitor", to: "weather", count: 2 },
+    { from: "workspace", to: "bread.workspaces", count: 26 }, { from: "workspace", to: "workspace-rules", count: 12 },
+    { from: "window", to: "bread.workspaces", count: 4 }, { from: "window", to: "bar", count: 12 },
+    { from: "power", to: "power-saver", count: 15 }, { from: "power", to: "bar", count: 6 }, { from: "power", to: "weather", count: 2 },
+    { from: "network", to: "weather", count: 6 }, { from: "network", to: "bar", count: 4 }, { from: "network", to: "presence-inhibitor", count: 4 },
+    { from: "bluetooth", to: "bread.devices", count: 5 }, { from: "bluetooth", to: "bar", count: 4 },
+    { from: "system", to: "bread.rules", count: 6 }, { from: "system", to: "bar", count: 2 }, { from: "system", to: "power-saver", count: 2 }
+  ];
+  const flowDetails = {
+    udev: "usb, input", hyprland: "compositor ipc", power: "UPower", network: "rtnetlink", bluetooth: "BlueZ", manual: "ipc emit",
+    device: "bread.device.**", monitor: "bread.monitor.**", workspace: "bread.workspace.**", window: "bread.window.**",
+    power: "bread.power.**", network: "bread.network.**", bluetooth: "bread.bluetooth.**", system: "bread.system.**",
+    "bread.devices": "1 sub", "bread.monitors": "1 sub", "bread.workspaces": "2 subs", "dock-layout": "3 subs",
+    "workspace-rules": "2 subs", "power-saver": "2 subs", "presence-inhibitor": "2 subs", weather: "2 subs", bar: "2 subs", "bread.rules": "2 subs"
+  };
+  const flowPaths = [
+    { path: "Udev -> device -> bread.devices", count: 52 },
+    { path: "Hyprland -> workspace -> bread.workspaces", count: 26 },
+    { path: "Hyprland -> monitor -> bread.monitors", count: 18 },
+    { path: "Power -> power -> power-saver", count: 15 },
+    { path: "Hyprland -> workspace -> workspace-rules", count: 12 },
+    { path: "Hyprland -> window -> bar", count: 12 }
+  ];
+
+  const recentErrors = [
+    { time: at(3.2), module: "weather", message: "on_event: attempt to index a nil value (field 'main')" },
+    { time: at(13), module: "podman", message: "adapter retry: cannot connect to Podman socket: permission denied" }
+  ];
+
+  // ------------------------------------------------------------------
+  // ui state
+  // ------------------------------------------------------------------
+  const ui = {
+    view: "stream",
+    selectedEventId: ID.monitor,
+    selectedModule: "dock-layout",
+    selectedFlowNode: null,
+    sourceFilter: "all",
+    pattern: "",
+    order: "causal",
+    paused: false,
+    buffered: [],
+    liveCount: 1284,
+    stateTab: "runtime",
+    stateKey: "devices",
+    liveIndex: 0
+  };
+
+  function allEventsById() {
+    const map = new Map();
+    events.forEach((e) => map.set(e.id, e));
+    return map;
+  }
+
+  function filteredEvents() {
+    return events.filter((e) => {
+      if (ui.sourceFilter !== "all" && sourceKey(e) !== ui.sourceFilter) return false;
+      return matchesFilter(e, ui.pattern);
+    });
+  }
+
+  function depthInFiltered(evt, idSet, byId) {
+    let depth = 0;
+    let current = evt;
+    const seen = new Set([evt.id]);
+    while (current && current.caused_by && idSet.has(current.caused_by) && depth < 32) {
+      if (seen.has(current.caused_by)) break;
+      seen.add(current.caused_by);
+      current = byId.get(current.caused_by);
+      depth++;
+    }
+    return depth;
+  }
+
+  // ------------------------------------------------------------------
+  // stream
+  // ------------------------------------------------------------------
+  function renderStream() {
+    const list = filteredEvents();
+    const byId = allEventsById();
+    const idSet = new Set(list.map((e) => e.id));
+    const ordered = ui.order === "causal"
+      ? list.slice().sort((a, b) => a.ts - b.ts)
+      : list.slice().sort((a, b) => b.ts - a.ts);
+
+    $("#streamCount").textContent = list.length + " shown  ·  " + ui.liveCount.toLocaleString("en-AU") + " buffered";
+    $("#navStreamCount").textContent = ui.liveCount > 999 ? (ui.liveCount / 1000).toFixed(1) + "k" : String(ui.liveCount);
+
+    const rows = ordered.map((evt) => {
+      const depth = ui.order === "causal" ? depthInFiltered(evt, idSet, byId) : 0;
+      const color = sourceColor[sourceKey(evt)] || "#8d8d8d";
+      const selected = evt.id === ui.selectedEventId;
+      const connector = depth > 0 ? '<span class="tree-connector">' + "&#8627;" + "</span>" : '<span class="tree-connector"></span>';
+      return (
+        '<div class="event-row' + (selected ? " selected" : "") + '" data-event="' + esc(evt.id) + '" style="padding-left:' + (14 + depth * 20) + 'px">' +
+          connector +
+          '<span class="event-time">' + fmtTime(evt.ts) + "</span>" +
+          '<span class="event-dot" style="background:' + color + '"></span>' +
+          '<div class="event-main">' +
+            '<div class="event-name">' + esc(evt.event) + "</div>" +
+            '<div class="event-summary">' + esc(summarize(evt)) + "</div>" +
+          "</div>" +
+          '<div class="event-meta">' +
+            (evt.by ? '<span class="mini-tag by">' + esc(evt.by) + "</span>" : "") +
+            '<span class="mini-tag id">' + shortId(evt.id) + "</span>" +
+          "</div>" +
+        "</div>"
+      );
+    }).join("");
+
+    $("#eventsList").innerHTML = rows || '<div class="empty-state"><strong>No events match.</strong>Try a broader pattern such as bread.** or clear the source filter.</div>';
+    $$("#eventsList .event-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        ui.selectedEventId = row.getAttribute("data-event");
+        renderStream();
+        renderInspector();
+      });
+    });
+
+    renderVolume();
+    renderInspector();
+  }
+
+  function renderVolume() {
+    const bars = [];
+    const n = 46;
+    for (let i = 0; i < n; i++) {
+      const wave = Math.sin((i + ui.liveCount / 11) / 4.2) * 5 + Math.cos((i + 3) / 2.7) * 3;
+      const burst = ((i * 17 + Math.floor(ui.liveCount / 9)) % 13 === 0) ? 8 : 0;
+      let h = 5 + Math.max(0, wave) + burst;
+      if (ui.paused) h = Math.max(3, h - 4);
+      const hot = i > n - 8;
+      bars.push('<span class="bar' + (hot ? " hot" : "") + '" style="height:' + Math.round(h) + 'px"></span>');
+    }
+    bars.push('<span class="vol-label">' + (ui.paused ? "paused" : "live") + " · events/sec</span>");
+    $("#volumeStrip").innerHTML = bars.join("");
+  }
+
+  function renderInspector() {
+    const byId = allEventsById();
+    const evt = byId.get(ui.selectedEventId) || events.slice().sort((a, b) => b.ts - a.ts)[0];
+    if (!evt) {
+      $("#inspector").innerHTML = '<div class="empty-state">Select an event to inspect it.</div>';
+      return;
+    }
+    ui.selectedEventId = evt.id;
+    const color = sourceColor[sourceKey(evt)] || "#8d8d8d";
+    const ancestors = [];
+    let cur = byId.get(evt.caused_by);
+    const seen = new Set([evt.id]);
+    while (cur && !seen.has(cur.id) && ancestors.length < 12) {
+      seen.add(cur.id);
+      ancestors.unshift(cur);
+      cur = byId.get(cur.caused_by);
+    }
+    const children = events.filter((e) => e.caused_by === evt.id).sort((a, b) => a.ts - b.ts);
+    const handlers = moduleDefs
+      .filter((m) => m.status !== "disabled")
+      .map((m) => ({ module: m, pattern: m.patterns.find((p) => matchPattern(p, evt.event)) }))
+      .filter((h) => h.pattern);
+
+    const chainItems = ancestors.concat([evt], children).map((e) => {
+      const isCurrent = e.id === evt.id;
+      const role = e.id === evt.id ? "this event" : (ancestors.indexOf(e) !== -1 ? "caused by" : "effect");
+      return (
+        '<button class="chain-item' + (isCurrent ? " current" : "") + '" data-jump="' + esc(e.id) + '">' +
+          '<span class="arrow">' + (isCurrent ? "&#9679;" : "&#8627;") + "</span>" +
+          '<span class="cname">' + esc(e.event) + "</span>" +
+          '<span class="cmeta">' + role + "</span>" +
+        "</button>"
+      );
+    }).join("");
+
+    const handlerRows = handlers.length
+      ? handlers.map((h) => {
+          let hash = 0;
+          for (const ch of h.module.name + evt.event) hash = (hash * 31 + ch.charCodeAt(0)) % 997;
+          const lat = (0.2 + (hash % 380) / 100).toFixed(1);
+          return (
+            '<div class="handler-row">' +
+              '<div class="handler-name">' + esc(h.module.name) +
+                (h.module.kind === "builtin" ? '<span class="mini-tag">builtin</span>' : "") +
+                (h.module.kind === "sandboxed" ? '<span class="mini-tag">sandbox</span>' : "") +
+              "</div>" +
+              '<div class="handler-lat' + (parseFloat(lat) > 2.5 ? " slow" : "") + '">' + lat + " ms</div>" +
+              '<div class="handler-pattern">' + esc(h.pattern) + "</div>" +
+            "</div>"
+          );
+        }).join("")
+      : '<div class="note">No loaded module subscribed to this event. It was recorded and dropped.</div>';
+
+    const effects = children.length
+      ? children.map((c) => '<button class="chain-item" data-jump="' + esc(c.id) + '"><span class="arrow">&#8594;</span><span class="cname">' + esc(c.event) + '</span><span class="cmeta">' + (c.by || "event") + "</span></button>").join("")
+      : '<div class="note">This event emitted nothing further.</div>';
+
+    $("#inspector").innerHTML =
+      '<div class="insp-head"><span class="event-dot" style="background:' + color + '"></span><div class="insp-title">' + esc(evt.event) + "</div></div>" +
+      '<div class="insp-sub"><span class="src">' + esc(sourceLabel(evt)) + "</span>" +
+        (evt.by ? '<span class="src">emitted by ' + esc(evt.by) + "</span>" : "") +
+        '<span class="when">' + fmtTime(evt.ts) + " · " + fmtAge(evt.ts) + "</span></div>" +
+      '<div class="section-label">Causal chain</div>' +
+      '<div class="chain">' + chainItems + "</div>" +
+      '<div class="section-label">Handled by</div>' +
+      '<div>' + handlerRows + "</div>" +
+      '<div class="section-label">Effects</div>' +
+      '<div class="chain">' + effects + "</div>" +
+      '<div class="section-label">Data</div>' +
+      '<pre class="json">' + highlightJSON(evt.data) + "</pre>" +
+      '<div class="section-label">Event id</div>' +
+      '<div class="note" style="font-family:var(--mono);font-size:10px;word-break:break-all">' + esc(evt.id) + "</div>" +
+      '<div class="insp-actions"><button class="btn small" id="copyIdBtn">Copy id</button><button class="btn small" id="replayBtn">Replay</button></div>';
+
+    $$("#inspector [data-jump]").forEach((b) => {
+      b.addEventListener("click", () => {
+        ui.selectedEventId = b.getAttribute("data-jump");
+        renderStream();
+      });
+    });
+    const copyBtn = $("#copyIdBtn");
+    if (copyBtn) copyBtn.addEventListener("click", () => {
+      if (navigator.clipboard) navigator.clipboard.writeText(evt.id).catch(() => {});
+      toast("Event id copied");
+    });
+    const replayBtn = $("#replayBtn");
+    if (replayBtn) replayBtn.addEventListener("click", () => toast('Replayed <span class="t-ok">' + esc(evt.event) + "</span> into the buffer"));
+  }
+
+  // ------------------------------------------------------------------
+  // flow
+  // ------------------------------------------------------------------
+  let flowGeometry = null;
+
+  function layoutColumn(items, top, height, gap, minH) {
+    const avail = height - gap * (items.length - 1);
+    const total = items.reduce((a, i) => a + i.count, 0) || 1;
+    let heights = items.map((i) => Math.max(minH, (i.count / total) * avail));
+    const sum = heights.reduce((a, b) => a + b, 0);
+    if (sum > avail) {
+      const excess = heights.reduce((a, h) => a + Math.max(0, h - minH), 0) || 1;
+      const target = avail - minH * items.length;
+      const k = target / excess;
+      heights = heights.map((h) => minH + Math.max(0, h - minH) * k);
+    }
+    let y = top;
+    return items.map((item, idx) => {
+      const node = Object.assign({}, item, { x: 0, y, h: Math.max(minH, heights[idx]) });
+      y += node.h + gap;
+      return node;
+    });
+  }
+
+  function renderFlow() {
+    const W = 980, H = 620;
+    const cols = { source: 12, family: 400, module: 790 };
+    const nodeW = 158, top = 58, height = 520, gap = 13;
+    const sources = layoutColumn(flowSources, top, height, gap, 26).map((n) => Object.assign(n, { x: cols.source, col: "source" }));
+    const families = layoutColumn(flowFamilies, top, height, gap, 26).map((n) => Object.assign(n, { x: cols.family, col: "family" }));
+    const modules = layoutColumn(flowModules, top, height, gap, 26).map((n) => Object.assign(n, { x: cols.module, col: "module" }));
+    const nodeMap = new Map();
+    [sources, families, modules].forEach((col) => col.forEach((n) => nodeMap.set(n.id, n)));
+    flowGeometry = { sources, families, modules, nodeMap, nodeW };
+
+    const selected = ui.selectedFlowNode;
+    const connected = new Set();
+    if (selected) {
+      connected.add(selected);
+      flowEdges.forEach((e) => {
+        if (e.from === selected || e.to === selected) { connected.add(e.from); connected.add(e.to); }
+      });
+    }
+    const isDim = (id) => selected && !connected.has(id);
+
+    const stage1 = flowEdges.filter((e) => nodeMap.get(e.from) && nodeMap.get(e.from).col === "source");
+    const stage2 = flowEdges.filter((e) => nodeMap.get(e.from) && nodeMap.get(e.from).col === "family");
+    const edgePath = (e) => {
+      const a = nodeMap.get(e.from), b = nodeMap.get(e.to);
+      if (!a || !b) return "";
+      const x1 = a.x + nodeW, y1 = a.y + a.h / 2;
+      const x2 = b.x, y2 = b.y + b.h / 2;
+      const dx = Math.max(50, (x2 - x1) * 0.45);
+      return "M" + x1 + " " + y1 + " C" + (x1 + dx) + " " + y1 + " " + (x2 - dx) + " " + y2 + " " + x2 + " " + y2;
+    };
+    const edgeSvg = (e, idx) => {
+      const a = nodeMap.get(e.from), b = nodeMap.get(e.to);
+      if (!a || !b) return "";
+      const active = selected && (e.from === selected || e.to === selected);
+      const color = a.col === "source" ? (a.color || "#6a6a6a") : "#8a8a8a";
+      const w = 0.8 + e.count / 16;
+      const opacity = selected ? (active ? 0.85 : 0.05) : 0.22;
+      return '<path d="' + edgePath(e) + '" fill="none" stroke="' + color + '" stroke-width="' + w + '" stroke-opacity="' + opacity + '"><title>' + esc(e.from + " -> " + e.to + " · " + e.count + " events") + "</title></path>";
+    };
+
+    const nodeSvg = (n) => {
+      const dim = isDim(n.id) ? ' opacity="0.25"' : "";
+      const accent = n.col === "source" ? (n.color || "#8d8d8d") : (n.col === "family" ? "#9a9387" : "#d9a05b");
+      const selectedCls = selected === n.id ? ' stroke="#d9a05b" stroke-width="1.4"' : ' stroke="#333" stroke-width="1"';
+      const label = n.label.length > 19 ? n.label.slice(0, 18) + "…" : n.label;
+      return (
+        '<g class="flow-node" data-node="' + esc(n.id) + '" style="cursor:pointer"' + dim + ">" +
+          '<rect x="' + n.x + '" y="' + n.y + '" width="' + nodeW + '" height="' + n.h + '" rx="6" fill="#161616"' + selectedCls + "/>" +
+          '<rect x="' + n.x + '" y="' + n.y + '" width="3" height="' + n.h + '" rx="1.5" fill="' + accent + '" opacity="0.9"/>' +
+          '<text x="' + (n.x + 12) + '" y="' + (n.y + n.h / 2 + (n.h >= 44 ? -2 : 4)) + '" fill="#d8d8d8" font-family="var(--mono)" font-size="10.5">' + esc(label) + "</text>" +
+          (n.h >= 44 ? '<text x="' + (n.x + 12) + '" y="' + (n.y + n.h / 2 + 13) + '" fill="#5f5f5f" font-family="var(--mono)" font-size="8.5">' + esc(flowDetails[n.id] || "") + "</text>" : "") +
+          '<text x="' + (n.x + nodeW - 10) + '" y="' + (n.y + n.h / 2 + (n.h >= 44 ? -2 : 4)) + '" fill="#777" font-family="var(--mono)" font-size="9.5" text-anchor="end">' + n.count + "</text>" +
+        "</g>"
+      );
+    };
+
+    const colLabel = (x, text, sub) =>
+      '<text x="' + x + '" y="26" fill="#8d8d8d" font-family="var(--font)" font-size="11" font-weight="700">' + esc(text) + "</text>" +
+      '<text x="' + x + '" y="42" fill="#5f5f5f" font-family="var(--mono)" font-size="9">' + esc(sub) + "</text>";
+
+    const svg =
+      '<svg viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Event flow from sources through event families to modules">' +
+        colLabel(cols.source, "Sources", "adapter or IPC") +
+        colLabel(cols.family, "Event families", "bread.<domain>.*") +
+        colLabel(cols.module, "Modules", "handler") +
+        '<g class="edges">' + stage1.map(edgeSvg).join("") + stage2.map(edgeSvg).join("") + "</g>" +
+        '<g class="nodes">' + sources.map(nodeSvg).join("") + families.map(nodeSvg).join("") + modules.map(nodeSvg).join("") + "</g>" +
+      "</svg>";
+
+    $("#flowCanvas").innerHTML = svg;
+    $$("#flowCanvas .flow-node").forEach((g) => {
+      g.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const id = g.getAttribute("data-node");
+        ui.selectedFlowNode = ui.selectedFlowNode === id ? null : id;
+        renderFlow();
+      });
+    });
+
+    renderFlowSide();
+  }
+
+  function renderFlowSide() {
+    const sel = ui.selectedFlowNode;
+    if (!sel) {
+      const max = flowPaths[0].count;
+      $("#flowSide").innerHTML =
+        '<h3>Reading the map</h3>' +
+        '<div class="sub">Counts are events observed in the selected window. Widths share one scale across columns.</div>' +
+        '<div class="flow-stat"><span>sources</span><span class="n">6</span></div>' +
+        '<div class="flow-stat"><span>event families</span><span class="n">8</span></div>' +
+        '<div class="flow-stat"><span>subscribed modules</span><span class="n">10</span></div>' +
+        '<div class="flow-stat"><span>observed events</span><span class="n">200</span></div>' +
+        '<div class="section-label" style="margin-top:22px">Top paths</div>' +
+        flowPaths.map((p) =>
+          '<div class="path-row"><div class="p-top"><span class="p-name">' + esc(p.path) + '</span><span class="p-count">' + p.count + '</span></div>' +
+          '<div class="path-bar"><span style="width:' + Math.round((p.count / max) * 100) + '%"></span></div></div>'
+        ).join("") +
+        '<div class="note" style="margin-top:16px">A module can appear on several paths. Select a node to see its inbound and outbound edges.</div>';
+      return;
+    }
+
+    const node = flowGeometry && flowGeometry.nodeMap.get(sel);
+    if (!node) { ui.selectedFlowNode = null; return renderFlowSide(); }
+    const inbound = flowEdges.filter((e) => e.to === sel);
+    const outbound = flowEdges.filter((e) => e.from === sel);
+    const row = (e, dir) => {
+      const other = dir === "in" ? e.from : e.to;
+      const isModule = flowModules.some((m) => m.id === other);
+      const isSource = flowSources.some((s) => s.id === other);
+      const target = isModule || isSource ? other : other;
+      return '<button class="chain-item" data-node="' + esc(target) + '"><span class="arrow">' + (dir === "in" ? "&#8592;" : "&#8594;") + '</span><span class="cname">' + esc(other) + '</span><span class="cmeta">' + e.count + "</span></button>";
+    };
+    const type = node.col === "source" ? "source" : node.col === "family" ? "event family" : "module";
+    $("#flowSide").innerHTML =
+      '<h3>' + esc(node.label) + "</h3>" +
+      '<div class="sub">' + type + " · " + node.count + " events in the last 15 min</div>" +
+      '<div class="section-label" style="margin-top:8px">Inbound</div>' +
+      '<div class="chain">' + (inbound.length ? inbound.sort((a,b) => b.count - a.count).map((e) => row(e, "in")).join("") : '<div class="note">No inbound edges.</div>') + "</div>" +
+      '<div class="section-label">Outbound</div>' +
+      '<div class="chain">' + (outbound.length ? outbound.sort((a,b) => b.count - a.count).map((e) => row(e, "out")).join("") : '<div class="note">No outbound edges. This is a leaf.</div>') + "</div>" +
+      '<div class="insp-actions"><button class="btn small" id="flowStreamBtn">See events in stream</button></div>';
+
+    $$("#flowSide [data-node]").forEach((b) => b.addEventListener("click", () => {
+      ui.selectedFlowNode = b.getAttribute("data-node");
+      renderFlow();
+    }));
+    const seeBtn = $("#flowStreamBtn");
+    if (seeBtn) seeBtn.addEventListener("click", () => {
+      const moduleNode = flowModules.find((m) => m.id === sel);
+      if (moduleNode) {
+        ui.selectedModule = sel;
+        ui.pattern = "";
+        setView("modules");
+      } else {
+        ui.pattern = sel === "device" ? "bread.device.**" : "bread." + sel + ".**";
+        $("#patternInput").value = ui.pattern;
+        setView("stream");
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // modules
+  // ------------------------------------------------------------------
+  function moduleHandled(module) {
+    return events.filter((e) => module.patterns.some((p) => matchPattern(p, e.event))).length;
+  }
+  function moduleEmitted(module) {
+    return events.filter((e) => e.by === module.name).length;
+  }
+  function lastSeen(module) {
+    const hit = events.filter((e) => module.patterns.some((p) => matchPattern(p, e.event))).sort((a, b) => b.ts - a.ts)[0];
+    return hit ? fmtAge(hit.ts) : "never";
+  }
+
+  function renderModules() {
+    const loaded = moduleDefs.filter((m) => m.status === "loaded").length;
+    const degraded = moduleDefs.filter((m) => m.status === "degraded").length;
+    const disabled = moduleDefs.filter((m) => m.status === "disabled").length;
+    const subscriptions = moduleDefs.reduce((a, m) => a + m.patterns.length, 0);
+    const emits = events.filter((e) => e.by).length;
+
+    $("#moduleSummary").innerHTML =
+      statCard(String(moduleDefs.length), "modules") +
+      statCard(String(loaded), "loaded") +
+      statCard(String(degraded), "degraded", degraded ? "warn" : "") +
+      statCard(String(disabled), "disabled") +
+      statCard(String(subscriptions), "subscriptions · " + emits + " emitted");
+
+    $("#moduleGrid").innerHTML = moduleDefs.map((m) => {
+      const tags = m.patterns.slice(0, 3).map((p) => '<span class="pattern-chip">' + esc(p) + "</span>").join("") +
+        (m.patterns.length > 3 ? '<span class="pattern-chip">+' + (m.patterns.length - 3) + "</span>" : "");
+      const kindTag = m.kind === "builtin" ? "builtin" : m.kind === "sandboxed" ? "sandboxed" : "user";
+      return (
+        '<button class="module-card' + (m.status === "degraded" ? " degraded" : "") + (ui.selectedModule === m.name ? " selected" : "") + '" data-module="' + esc(m.name) + '">' +
+          '<div class="top"><span class="status-dot ' + m.status + '"></span><span class="name">' + esc(m.name) + "</span>" +
+            '<span class="kind"><span class="mini-tag">' + kindTag + "</span></span></div>" +
+          '<div class="tags">' + (tags || '<span class="pattern-chip">no subscriptions</span>') + "</div>" +
+          (m.error ? '<div class="err">' + esc(m.error) + "</div>" : "") +
+          '<div class="bottom"><span><b>' + moduleHandled(m) + "</b> handled</span><span><b>" + moduleEmitted(m) + "</b> emitted</span><span>last " + lastSeen(m) + "</span></div>" +
+        "</button>"
+      );
+    }).join("");
+
+    $$("#moduleGrid .module-card").forEach((card) => card.addEventListener("click", () => {
+      ui.selectedModule = card.getAttribute("data-module");
+      renderModules();
+    }));
+    renderModuleDetail();
+  }
+
+  function statCard(v, l, cls) {
+    return '<div class="stat-card ' + (cls || "") + '"><div class="v">' + esc(v) + '</div><div class="l">' + esc(l) + "</div></div>";
+  }
+
+  function renderModuleDetail() {
+    const m = moduleDefs.find((x) => x.name === ui.selectedModule) || moduleDefs[0];
+    const patternRows = m.patterns.map((p) => {
+      const n = events.filter((e) => matchPattern(p, e.event)).length;
+      return '<div class="pattern-chip"><span>' + esc(p) + '</span><span class="pc">' + n + "</span></div>";
+    }).join("") || '<div class="note">No patterns registered.</div>';
+    const storeKeys = Object.keys(m.store || {});
+    const store = storeKeys.length
+      ? '<div class="kv">' + storeKeys.map((k) => "<div><span>" + esc(k) + "</span><b>" + esc(JSON.stringify(m.store[k])) + "</b></div>").join("") + "</div>"
+      : '<div class="note">Store is empty.</div>';
+    const emitted = events.filter((e) => e.by === m.name).sort((a, b) => b.ts - a.ts).slice(0, 5);
+    const emittedRows = emitted.length
+      ? '<div class="chain">' + emitted.map((e) => '<button class="chain-item" data-see="' + esc(e.id) + '"><span class="arrow">&#8627;</span><span class="cname">' + esc(e.event) + '</span><span class="cmeta">' + fmtAge(e.ts) + "</span></button>").join("") + "</div>"
+      : '<div class="note">Nothing emitted in the current buffer.</div>';
+
+    $("#moduleDetail").innerHTML =
+      '<div class="module-detail">' +
+        '<div style="display:flex;align-items:center;gap:8px"><span class="status-dot ' + m.status + '"></span><h2>' + esc(m.name) + "</h2></div>" +
+        '<div class="detail-sub">' + esc(m.desc) + "</div>" +
+        '<div class="detail-row"><span class="k">status</span><span class="v">' + esc(m.status) + "</span></div>" +
+        '<div class="detail-row"><span class="k">kind</span><span class="v">' + esc(m.kind) + (m.pid ? " · pid " + m.pid : "") + "</span></div>" +
+        '<div class="detail-row"><span class="k">handled</span><span class="v">' + moduleHandled(m) + " events</span></div>" +
+        '<div class="detail-row"><span class="k">emitted</span><span class="v">' + moduleEmitted(m) + " events</span></div>" +
+        '<div class="detail-row"><span class="k">hooks</span><span class="v">' + esc(m.hooks.join(", ") || "none") + "</span></div>" +
+        (m.error ? '<div class="err" style="margin-top:10px">' + esc(m.error) + "</div>" : "") +
+        '<div class="section-label">Subscriptions</div>' +
+        '<div class="pattern-list">' + patternRows + "</div>" +
+        '<div class="section-label">Store</div>' + store +
+        '<div class="section-label">Recent emits</div>' + emittedRows +
+        '<div class="insp-actions"><button class="btn small" id="reloadModuleBtn">Reload</button><button class="btn small" id="filterModuleBtn">Filter stream</button></div>' +
+      "</div>";
+
+    $$("#moduleDetail [data-see]").forEach((b) => b.addEventListener("click", () => {
+      ui.selectedEventId = b.getAttribute("data-see");
+      setView("stream");
+    }));
+    const reload = $("#reloadModuleBtn");
+    if (reload) reload.addEventListener("click", () => toast("Called <span class=\"t-ok\">modules.reload</span> · registry cleared and rebuilt"));
+    const filter = $("#filterModuleBtn");
+    if (filter) filter.addEventListener("click", () => {
+      ui.pattern = m.patterns[0] || "";
+      $("#patternInput").value = ui.pattern;
+      setView("stream");
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // state
+  // ------------------------------------------------------------------
+  function renderState() {
+    $$("#stateTabs .tab").forEach((t) => t.classList.toggle("active", t.getAttribute("data-tab") === ui.stateTab));
+    if (ui.stateTab === "runtime") return renderRuntimeState();
+    if (ui.stateTab === "workflows") return renderWorkflows();
+    renderWidgets();
+  }
+
+  function renderRuntimeState() {
+    const keys = Object.keys(runtimeState);
+    const typeOf = (v) => Array.isArray(v) ? "array[" + v.length + "]" : typeof v === "object" && v !== null ? "object" : typeof v;
+    if (keys.indexOf(ui.stateKey) === -1) ui.stateKey = keys[0];
+    $("#stateBody").innerHTML =
+      '<div class="key-list">' + keys.map((k) =>
+        '<button class="key-item' + (k === ui.stateKey ? " active" : "") + '" data-key="' + k + '"><span>' + esc(k) + '</span><span class="t">' + typeOf(runtimeState[k]) + "</span></button>"
+      ).join("") + "</div>" +
+      '<div class="json-panel"><div class="panel-title"><h2>state.dump().' + esc(ui.stateKey) + '</h2><button class="btn small" id="copyStateBtn">Copy</button></div>' +
+      '<pre class="json">' + highlightJSON(runtimeState[ui.stateKey]) + "</pre></div>";
+
+    $$(".key-item").forEach((b) => b.addEventListener("click", () => {
+      ui.stateKey = b.getAttribute("data-key");
+      renderRuntimeState();
+    }));
+    const copy = $("#copyStateBtn");
+    if (copy) copy.addEventListener("click", () => {
+      if (navigator.clipboard) navigator.clipboard.writeText(JSON.stringify(runtimeState[ui.stateKey], null, 2)).catch(() => {});
+      toast("State copied");
+    });
+  }
+
+  function renderWorkflows() {
+    const rows = workflows.map((w) => {
+      const cls = w.state === "running" ? "blue" : w.state === "done" ? "green" : "red";
+      return "<tr><td class=\"mono\">" + esc(w.name) + '</td><td><span class="badge ' + cls + '">' + esc(w.state) + "</span></td><td>" + esc(w.step) + '</td><td class="mono">' + fmtAge(w.started) + '</td><td class="mono">' + fmtAge(w.updated) + "</td><td>" + (w.error ? esc(w.error) : "none") + "</td></tr>";
+    }).join("");
+    $("#stateBody").innerHTML =
+      '<div style="grid-column:1/-1;overflow:auto;padding:18px 22px 60px">' +
+        '<div class="panel-title"><h2>workflows.list()</h2><span class="badge blue">' + workflows.filter((w) => w.state === "running").length + " running</span></div>" +
+        '<table class="table"><thead><tr><th>name</th><th>state</th><th>step</th><th>started</th><th>updated</th><th>error</th></tr></thead><tbody>' + rows + "</tbody></table>" +
+      "</div>";
+  }
+
+  function widgetNode(node) {
+    const st = node.style || {};
+    const cls = ["wlabel"];
+    if (st.color) cls.push(st.color === "fg" ? "dim" : st.color);
+    if (st.weight === "bold") cls.push("bold");
+    if (st.size) cls.push(st.size);
+    const ts = "text-align:" + (st.align || "start");
+    if (node.type === "box") {
+      return '<div class="wbox" style="flex-direction:' + (node.orientation === "vertical" ? "column" : "row") + ';gap:' + (node.spacing || 6) + 'px">' + (node.children || []).map(widgetNode).join("") + "</div>";
+    }
+    if (node.type === "label") {
+      return '<span class="' + cls.join(" ") + '" style="' + ts + '">' + esc(node.text) + "</span>";
+    }
+    if (node.type === "icon") {
+      return '<span class="wicon">' + widgetIcon(node.name) + "</span>";
+    }
+    if (node.type === "progress") {
+      return '<span class="wprogress"><span style="width:' + Math.round((node.value || 0) * 100) + '%"></span></span>';
+    }
+    return "";
+  }
+
+  function widgetIcon(name) {
+    if (name === "cloud") return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12h7a2.5 2.5 0 0 0 .2-5A3.5 3.5 0 0 0 4.8 6.7 2.7 2.7 0 0 0 4.5 12z"/></svg>';
+    if (name === "cpu") return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.5" y="4.5" width="7" height="7" rx="1.5"/><path d="M6.5 2v2.5M9.5 2v2.5M6.5 11.5V14M9.5 11.5V14M2 6.5h2.5M2 9.5h2.5M11.5 6.5H14M11.5 9.5H14"/></svg>';
+    if (name === "battery") return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2.5" y="5" width="10" height="6" rx="1.5"/><path d="M14 7v2"/></svg>';
+    return '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="4"/></svg>';
+  }
+
+  function renderWidgets() {
+    const cards = widgets.map((w) =>
+      '<div class="widget-card"><div class="widget-preview">' + widgetNode(w.root) + '</div>' +
+        '<div class="widget-meta"><div class="wname">' + esc(w.id) + '</div><div class="wsub"><span class="badge">' + esc(w.placement) + '</span><span>order ' + w.order + '</span><span>' + fmtAge(w.updated) + "</span></div>" +
+        (w.tooltip ? '<div class="wsub">' + esc(w.tooltip) + "</div>" : "") + "</div></div>"
+    ).join("");
+    $("#stateBody").innerHTML =
+      '<div style="grid-column:1/-1;overflow:auto;padding:18px 22px 60px">' +
+        '<div class="panel-title"><h2>widgets.list()</h2><span class="badge">' + widgets.length + " widgets across " + new Set(widgets.map((w) => w.module)).size + " modules</span></div>" +
+        '<div class="widget-grid">' + cards + "</div>" +
+        '<div class="note" style="margin-top:14px">Preview renders the typed tree from <code>widgets.list</code>. Style enums map to the shared bread-theme palette.</div>' +
+      "</div>";
+  }
+
+  // ------------------------------------------------------------------
+  // adapters
+  // ------------------------------------------------------------------
+  function renderAdapters() {
+    const ok = adapters.filter((a) => a.status === "ok").length;
+    const degraded = adapters.filter((a) => a.status !== "ok").length;
+    const cards =
+      statCard(String(ok), "adapters healthy") +
+      statCard(String(degraded), "degraded", degraded ? "warn" : "") +
+      statCard("23", "Lua subscriptions") +
+      statCard("1,284", "events buffered");
+
+    const rows = adapters.map((a) =>
+      '<tr><td class="mono"><span class="status-dot ' + (a.status === "ok" ? "loaded" : "degraded") + '" style="display:inline-block;margin-right:7px"></span>' + esc(a.name) + "</td>" +
+      "<td>" + esc(a.source) + "</td>" +
+      '<td><span class="badge ' + (a.status === "ok" ? "green" : "yellow") + '">' + esc(a.status) + "</span></td>" +
+      '<td class="mono">' + esc(a.last) + "</td>" +
+      '<td class="mono">' + fmtAge(T0 - a.age * 1000) + "</td>" +
+      '<td class="mono">' + a.errors + "</td></tr>"
+    ).join("");
+
+    const errs = recentErrors.map((e) =>
+      '<div class="err-item"><span class="et">' + fmtAge(e.time) + "</span><b>" + esc(e.module) + "</b> " + esc(e.message) + "</div>"
+    ).join("");
+
+    $("#adaptersPage").innerHTML =
+      '<div class="summary-grid" style="grid-template-columns:repeat(4,minmax(0,1fr))">' + cards + "</div>" +
+      '<div class="panel-title"><h2>Adapters</h2><span class="badge">fd 27 · pid 3246 · v0.10.1 · api 1.8.0</span></div>' +
+      '<table class="table"><thead><tr><th>adapter</th><th>source</th><th>status</th><th>last event</th><th>last seen</th><th>errors</th></tr></thead><tbody>' + rows + "</tbody></table>" +
+      '<div class="panel-title" style="margin-top:24px"><h2>Recent handler errors</h2></div>' +
+      '<div class="err-list">' + errs + '</div>' +
+      '<div class="section-label" style="margin-top:24px">Daemon</div>' +
+      '<div class="kv" style="max-width:520px"><div><span>socket</span><b>$XDG_RUNTIME_DIR/bread/breadd.sock</b></div><div><span>event buffer</span><b>1,284 / 2,000</b></div><div><span>subscriptions</span><b>23</b></div><div><span>uptime</span><b>3h 12m 6s</b></div><div><span>bug store</span><b>enabled · 41 MB</b></div></div>';
+  }
+
+  // ------------------------------------------------------------------
+  // live simulation
+  // ------------------------------------------------------------------
+  const LIVE_CHAINS = [
+    [
+      { event: "bread.power.ac.connected", source: "Power", data: { ac_connected: true, battery_percent: 84 } },
+      { event: "bread.profile.activated", source: "System", by: "power-saver", data: { profile: "performance", previous: "mobile" }, parent: 0 }
+    ],
+    [
+      { event: "bread.workspace.changed", source: "Hyprland", data: { id: "2" } },
+      { event: "bread.workspace.moved", source: "System", by: "workspace-rules", data: { workspace: "2", from: "eDP-1", to: "HDMI-A-1" }, parent: 0 },
+      { event: "bread.command.bar.refresh", source: "App", data: { app: "bar", verb: "refresh" }, parent: 1 }
+    ],
+    [
+      { event: "bread.window.opened", source: "Hyprland", data: { address: "0x55d3b8f4", class: "Alacritty", title: "bread state | jq" } }
+    ],
+    [
+      { event: "bread.network.connected", source: "Network", data: { online: true, interfaces: ["eth0"] } },
+      { event: "bread.custom.ping", source: "Manual", data: { from: "mockup ticker" }, parent: 0 }
+    ],
+    [
+      { event: "bread.device.bluetooth.connected", source: "Bluetooth", data: { device: "headphones", name: "Sony WH-1000XM5", address: "AC:80:0A:11:22:33", subsystem: "bluetooth" } },
+      { event: "bread.command.bar.refresh", source: "App", data: { app: "bar", verb: "refresh" }, parent: 0 }
+    ],
+    [
+      { event: "bread.power.battery.low", source: "Power", data: { battery_percent: 14 } },
+      { event: "bread.profile.activated", source: "System", by: "power-saver", data: { profile: "battery", previous: "performance" }, parent: 0 }
+    ]
+  ];
+
+  function injectChain() {
+    const chain = LIVE_CHAINS[ui.liveIndex % LIVE_CHAINS.length];
+    ui.liveIndex++;
+    const now = Date.now();
+    const created = chain.map((c, i) => Object.assign({}, c, {
+      id: uid(),
+      ts: now + i,
+      caused_by: typeof c.parent === "number" ? null : undefined
+    }));
+    created.forEach((c, i) => {
+      if (typeof chain[i].parent === "number") c.caused_by = created[chain[i].parent].id;
+      if (c.caused_by === undefined) delete c.caused_by;
+    });
+    created.forEach((c) => {
+      c.ts = now + created.indexOf(c);
+      events.push(c);
+      ui.liveCount++;
+    });
+    if (events.length > 140) events = events.slice(-140);
+    if (ui.selectedEventId === ID.crash) {
+      // keep the interesting seeded selection; do not steal it
+    }
+    if (!ui.paused) {
+      if (ui.view === "stream") renderStream();
+      if (ui.view === "modules") renderModules();
+      if (ui.view === "adapters") renderAdapters();
+    } else {
+      ui.buffered.push(created);
+    }
+    renderVolume();
+  }
+
+  // ------------------------------------------------------------------
+  // navigation, controls
+  // ------------------------------------------------------------------
+  function setView(view) {
+    ui.view = view;
+    $$(".nav-btn").forEach((b) => b.classList.toggle("active", b.getAttribute("data-view") === view));
+    $$(".view").forEach((v) => v.classList.toggle("active", v.id === "view-" + view));
+    if (view === "stream") renderStream();
+    if (view === "flow") renderFlow();
+    if (view === "modules") renderModules();
+    if (view === "state") renderState();
+    if (view === "adapters") renderAdapters();
+  }
+
+  $$(".nav-btn").forEach((b) => b.addEventListener("click", () => setView(b.getAttribute("data-view"))));
+
+  $("#patternInput").addEventListener("input", (e) => {
+    ui.pattern = e.target.value.trim();
+    renderStream();
+  });
+  $$("#sourceChips .chip").forEach((chip) => chip.addEventListener("click", () => {
+    ui.sourceFilter = chip.getAttribute("data-source");
+    $$("#sourceChips .chip").forEach((c) => c.classList.toggle("active", c === chip));
+    renderStream();
+  }));
+  $$("#orderToggle button").forEach((b) => b.addEventListener("click", () => {
+    ui.order = b.getAttribute("data-order");
+    $$("#orderToggle button").forEach((x) => x.classList.toggle("active", x === b));
+    renderStream();
+  }));
+
+  function setPaused(paused) {
+    ui.paused = paused;
+    $("#pauseLabel").textContent = paused ? "Resume" : "Pause";
+    $("#daemonStatus").classList.toggle("paused", paused);
+    $("#daemonStatusText").textContent = paused ? "stream paused" : "connected";
+    if (!paused && ui.buffered.length) {
+      const n = ui.buffered.reduce((a, b) => a + b.length, 0);
+      ui.buffered = [];
+      toast("Resumed · delivered <span class=\"t-ok\">" + n + "</span> buffered events");
+    }
+    renderStream();
+  }
+  $("#pauseBtn").addEventListener("click", () => setPaused(!ui.paused));
+
+  $("#clearBtn").addEventListener("click", () => {
+    events = events.filter((e) => e.by === "breadd" || e.event === "bread.system.startup");
+    ui.liveCount = 0;
+    renderStream();
+    toast("Local view buffer cleared. breadd's ring is unchanged.");
+  });
+
+  const emitModal = $("#emitModal");
+  const emitError = $("#emitError");
+  function openEmit() {
+    emitError.classList.remove("show");
+    emitModal.classList.add("open");
+    setTimeout(() => $("#emitName").focus(), 30);
+  }
+  function closeEmit() { emitModal.classList.remove("open"); }
+  $("#emitBtn").addEventListener("click", openEmit);
+  $("#emitCancel").addEventListener("click", closeEmit);
+  emitModal.addEventListener("click", (e) => { if (e.target === emitModal) closeEmit(); });
+
+  const RESERVED = ["terminal", "git", "hyprland", "device", "power", "network", "service", "container", "project", "remote", "system", "profile", "notify", "command", "workflow", "bluetooth", "workspace", "window", "monitor", "module", "state", "widget", "reload", "bug"];
+
+  $("#emitPublish").addEventListener("click", () => {
+    const name = $("#emitName").value.trim();
+    const errEl = $("#emitError");
+    errEl.classList.remove("show");
+    if (!name) {
+      errEl.textContent = "event name is required";
+      errEl.classList.add("show");
+      return;
+    }
+    const segs = name.split(".");
+    const domain = segs[0] === "bread" ? segs[1] : segs[0];
+    const isCommand = segs[0] === "bread" && segs[1] === "command" && segs[2] && segs.length === 4;
+    if (RESERVED.indexOf(domain) !== -1 && !isCommand) {
+      errEl.textContent = "rejected: '" + domain + "' is an adapter-owned reserved domain. A manual emit cannot forge it; use a sourced emit from that adapter or a bread.command.<app>.<verb> name.";
+      errEl.classList.add("show");
+      return;
+    }
+    let data = {};
+    const raw = $("#emitData").value.trim();
+    if (raw) {
+      try { data = JSON.parse(raw); }
+      catch (err) {
+        errEl.textContent = "data is not valid JSON: " + err.message;
+        errEl.classList.add("show");
+        return;
+      }
+    }
+    const evt = { id: uid(), ts: Date.now(), event: name, source: "Manual", data: data };
+    events.push(evt);
+    ui.liveCount++;
+    ui.selectedEventId = evt.id;
+    closeEmit();
+    if (ui.view !== "stream") setView("stream"); else renderStream();
+    toast("emit accepted · <span class=\"t-ok\">" + esc(name) + "</span> tagged Manual");
+  });
+
+  $("#flowReset").addEventListener("click", () => {
+    ui.selectedFlowNode = null;
+    renderFlow();
+  });
+  $("#flowWindow").addEventListener("change", (e) => {
+    toast("Window changed to " + e.target.value + " (counts are static in this mockup)");
+  });
+  $("#reloadAllBtn").addEventListener("click", () => toast("Called <span class=\"t-ok\">modules.reload</span> · 12 modules re-registered"));
+
+  $$("#stateTabs .tab").forEach((t) => t.addEventListener("click", () => {
+    ui.stateTab = t.getAttribute("data-tab");
+    renderState();
+  }));
+
+  const notesPanel = $("#notesPanel");
+  $("#notesBtn").addEventListener("click", (e) => { e.stopPropagation(); notesPanel.classList.toggle("open"); });
+  $("#notesClose").addEventListener("click", () => notesPanel.classList.remove("open"));
+  document.addEventListener("click", (e) => {
+    if (notesPanel.classList.contains("open") && !notesPanel.contains(e.target) && e.target.id !== "notesBtn") notesPanel.classList.remove("open");
+  });
+
+  let toastTimer = null;
+  function toast(html) {
+    const el = $("#toast");
+    el.innerHTML = html;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 2600);
+  }
+
+  document.addEventListener("keydown", (e) => {
+    const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+    if (e.key === "Escape") {
+      if (emitModal.classList.contains("open")) closeEmit();
+      else if (notesPanel.classList.contains("open")) notesPanel.classList.remove("open");
+      else if (document.activeElement === $("#patternInput")) { $("#patternInput").value = ""; ui.pattern = ""; $("#patternInput").blur(); renderStream(); }
+    }
+    if (typing) return;
+    if (e.key === " ") { e.preventDefault(); setPaused(!ui.paused); }
+    if (e.key === "/") { e.preventDefault(); setView("stream"); $("#patternInput").focus(); }
+  });
+
+  // ------------------------------------------------------------------
+  // boot
+  // ------------------------------------------------------------------
+  renderStream();
+  setInterval(injectChain, 3400);
+})();
+</script>
+</body>
+</html>
