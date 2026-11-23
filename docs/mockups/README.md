@@ -7,6 +7,10 @@ Open `breadscope.html` directly in a browser. It is one self-contained file
 with no network or build step. The event ticker is simulated; the layout,
 filtering, causal tree, flow map, and dialogs are interactive.
 
+![Event stream](preview-stream.png)
+
+![Interaction map](preview-flow.png)
+
 ## Why this exists
 
 `bread events --tree` shows causality for one stream and `bread state` shows a
