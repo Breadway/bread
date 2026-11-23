@@ -331,6 +331,247 @@ button.event-row.selected .event-name { color: @accent; }
     font-size: 9.5px;
     color: alpha(@red, 0.95);
 }
+/* ---------------------------------------------------------------------
+   Polish pass: larger type, calmer surfaces, clearer hierarchy.
+   --------------------------------------------------------------------- */
+window.scope, .scope { font-size: 13px; }
+
+.topbar {
+    background-image: linear-gradient(180deg, shade(@surface, 1.04), @surface);
+    padding: 10px 18px;
+    border-bottom: 1px solid alpha(@fg, 0.10);
+}
+.brand-name { font-size: 18px; letter-spacing: 0.2px; }
+.brand-sub { font-size: 8.5px; letter-spacing: 2.4px; color: alpha(@fg, 0.38); }
+.mock-tag { font-size: 8.5px; padding: 3px 8px; }
+.status-pill {
+    padding: 5px 11px;
+    font-size: 11px;
+    background-color: alpha(@fg, 0.035);
+    border-color: alpha(@fg, 0.10);
+}
+.status-pill.ok { color: @green; background-color: alpha(@green, 0.07); border-color: alpha(@green, 0.22); }
+.status-pill.warn { color: @yellow; background-color: alpha(@yellow, 0.07); border-color: alpha(@yellow, 0.22); }
+.status-pill.bad { color: @red; background-color: alpha(@red, 0.08); border-color: alpha(@red, 0.25); }
+.top-meta { font-size: 10.5px; letter-spacing: 0.1px; }
+
+.sidebar { padding: 12px 10px; }
+.nav-group { font-size: 8.5px; letter-spacing: 1.6px; padding: 14px 10px 6px; }
+.nav-row { padding: 8px 10px; font-size: 12.5px; border-radius: 7px; }
+.nav-row.active { background-image: linear-gradient(90deg, alpha(@accent, 0.18), alpha(@accent, 0.05)); }
+.nav-row .nav-count { font-size: 9.5px; }
+.rail-card { padding: 10px; background-color: alpha(@fg, 0.035); }
+
+.toolbar {
+    padding: 9px 14px;
+    background-color: shade(@bg, 0.97);
+    border-bottom: 1px solid alpha(@fg, 0.07);
+}
+entry {
+    min-height: 22px;
+    padding: 5px 9px;
+    font-size: 11.5px;
+}
+.btn { padding: 6px 11px; font-size: 11.5px; }
+.btn.small { padding: 4px 8px; font-size: 10.5px; }
+dropdown.window-filter > button {
+    background-color: @surface;
+    border: 1px solid alpha(@fg, 0.11);
+    color: alpha(@fg, 0.70);
+    padding: 4px 9px;
+    font-size: 11px;
+    min-height: 22px;
+}
+dropdown.window-filter > button:hover { border-color: alpha(@accent, 0.45); color: @fg; }
+dropdown.window-filter popover { background-color: @surface; }
+dropdown.window-filter popover listview { background-color: @surface; }
+
+button.chip, togglebutton.chip {
+    padding: 3px 10px;
+    font-size: 11px;
+    color: alpha(@fg, 0.60);
+    background-color: alpha(@fg, 0.035);
+    border: 1px solid transparent;
+}
+button.chip:checked, togglebutton.chip:checked {
+    color: @fg;
+    background-color: alpha(@accent, 0.16);
+    border-color: alpha(@accent, 0.38);
+}
+.chip-count { font-family: monospace; font-size: 9px; color: alpha(@fg, 0.38); }
+button.chip:checked .chip-count { color: alpha(@accent, 0.95); }
+.toolbar .small.dim { font-size: 10.5px; }
+
+.events-scroll { background-image: linear-gradient(180deg, alpha(@fg, 0.012), transparent 120px); }
+button.event-row {
+    padding: 8px 12px;
+    min-height: 44px;
+    border-bottom: 1px solid alpha(@fg, 0.055);
+}
+button.event-row:hover { background-color: alpha(@fg, 0.045); }
+button.event-row.selected {
+    background-image: linear-gradient(90deg, alpha(@accent, 0.16), alpha(@accent, 0.045));
+    border-left: 3px solid @accent;
+    padding-left: 9px;
+}
+.event-time { font-size: 9.5px; color: alpha(@fg, 0.40); }
+.event-name { font-size: 12px; color: alpha(@fg, 0.92); }
+button.event-row.selected .event-name { color: @accent; }
+.event-summary { font-size: 10.5px; color: alpha(@fg, 0.46); }
+.mini-tag { font-size: 8.5px; padding: 1px 5px; }
+
+.inspector { padding: 14px 14px 36px; background-color: shade(@bg, 0.975); }
+.insp-title { font-size: 13.5px; }
+.insp-source { font-size: 10px; padding: 2px 9px; background-color: alpha(@fg, 0.04); }
+.section-label { font-size: 9px; letter-spacing: 1.4px; margin-top: 18px; }
+.chain-btn {
+    padding: 5px 7px;
+    font-size: 10.5px;
+    border: 1px solid alpha(@fg, 0.045);
+    background-color: alpha(@fg, 0.025);
+}
+.chain-btn:hover { border-color: alpha(@fg, 0.14); background-color: alpha(@fg, 0.055); }
+.chain-btn.current {
+    background-image: linear-gradient(90deg, alpha(@accent, 0.17), alpha(@accent, 0.05));
+    color: @accent;
+}
+button.handler-row {
+    background-color: alpha(@fg, 0.030);
+    border: 1px solid alpha(@fg, 0.055);
+    border-radius: 7px;
+    padding: 7px 9px;
+    margin: 2px 0;
+}
+button.handler-row:hover {
+    background-color: alpha(@accent, 0.075);
+    border-color: alpha(@accent, 0.30);
+}
+.handler-name { font-size: 11px; }
+.handler-pattern { font-size: 9px; color: alpha(@fg, 0.42); }
+.duration { font-size: 9.5px; }
+.json-view {
+    background-color: shade(@bg, 0.88);
+    border: 1px solid alpha(@fg, 0.09);
+    border-radius: 7px;
+    padding: 2px;
+}
+.json-view text { font-size: 10.5px; }
+
+.banner {
+    background-color: alpha(@red, 0.10);
+    border-bottom: 1px solid alpha(@red, 0.28);
+    color: alpha(@red, 0.95);
+    padding: 8px 18px;
+    font-size: 11px;
+}
+.statusbar {
+    background-color: @surface;
+    border-top: 1px solid alpha(@fg, 0.09);
+    padding: 4px 16px;
+    min-height: 24px;
+}
+.status-text { font-family: monospace; font-size: 9.5px; color: alpha(@fg, 0.46); }
+.status-text.ok { color: @green; }
+.status-text.bad { color: @red; }
+.status-text.warn { color: @yellow; }
+
+.page { padding: 16px 20px; }
+.page-title { font-size: 19px; letter-spacing: 0.1px; }
+.page-sub { font-size: 11px; }
+.stat-card { padding: 10px 13px; background-image: linear-gradient(160deg, shade(@surface, 1.05), @surface); }
+.stat-value { font-size: 22px; }
+.stat-label { font-size: 9.5px; }
+.module-card { padding: 12px; border-radius: 9px; }
+.module-card:hover { background-image: linear-gradient(160deg, shade(@surface, 1.08), shade(@surface, 1.03)); }
+.module-name { font-size: 11.5px; }
+.card-stat { font-size: 9px; }
+.pattern-chip { font-size: 8.5px; padding: 1px 5px; }
+.detail-panel { padding: 14px; border-radius: 9px; }
+.flow-side { padding: 16px; }
+.path-name { font-size: 9.5px; }
+.badge { font-size: 9px; padding: 2px 7px; }
+.state-key { padding: 5px 8px; font-size: 10.5px; }
+.table-head { font-size: 9px; }
+.table-row { padding: 7px 2px; }
+.table-text { font-size: 10.5px; }
+.widget-card { border-radius: 9px; }
+.widget-preview { padding: 22px; }
+
+.keycap {
+    background-color: alpha(@fg, 0.06);
+    border: 1px solid alpha(@fg, 0.12);
+    border-radius: 5px;
+    color: @accent;
+    font-family: monospace;
+    font-size: 10px;
+    padding: 3px 7px;
+}
+
+button.path-button {
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    border: 0;
+    border-radius: 5px;
+    padding: 3px 4px;
+    min-height: 0;
+}
+button.path-button:hover { background-color: alpha(@accent, 0.07); }
+progressbar.path-progress trough {
+    background-color: alpha(@fg, 0.09);
+    min-height: 4px;
+    border-radius: 2px;
+}
+progressbar.path-progress progress {
+    background-color: alpha(@accent, 0.72);
+    min-height: 4px;
+    border-radius: 2px;
+}
+progressbar.path-progress text { color: alpha(@fg, 0.0); }
+
+.adapter-card {
+    background-color: @surface;
+    border: 1px solid alpha(@fg, 0.09);
+    border-radius: 9px;
+    padding: 12px;
+    min-width: 230px;
+}
+.adapter-card:hover { border-color: alpha(@fg, 0.18); }
+.error-card {
+    background-color: alpha(@red, 0.045);
+    border: 1px solid alpha(@red, 0.16);
+    border-radius: 7px;
+    padding: 8px 10px;
+}
+.table-row.alt { background-color: alpha(@fg, 0.018); }
+
+.mock-tag {
+    color: alpha(@fg, 0.42);
+    border-color: alpha(@fg, 0.12);
+    background-color: alpha(@fg, 0.03);
+    letter-spacing: 1.4px;
+}
+stackswitcher > button {
+    background-color: alpha(@fg, 0.035);
+    border: 1px solid alpha(@fg, 0.09);
+    color: alpha(@fg, 0.60);
+    padding: 4px 12px;
+    font-size: 11px;
+    min-height: 22px;
+}
+stackswitcher > button:checked {
+    background-color: alpha(@accent, 0.16);
+    color: @accent;
+    border-color: alpha(@accent, 0.35);
+}
+
+.btn, button.pill, button.chip, button.path-button { min-height: 0; }
+progressbar.path-progress progress {
+    background-image: none;
+    border: 0;
+}
+dropdown.window-filter > button { min-height: 22px; }
+
 "#;
 
 /// Apply the app sheet globally as well as per window. The per-window bind

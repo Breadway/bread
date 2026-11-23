@@ -1,9 +1,12 @@
 //! Adapter liveness, daemon metadata, and recent handler errors from `health`.
 
 use gtk4::prelude::*;
-use gtk4::{pango, Box as GBox, Label};
+use gtk4::{pango, Align, Box as GBox, FlowBox, Label};
 
-use super::{dim_label, hbox, horizontal_spacer, label, page_sub, section_label, vbox, Shared};
+use super::{
+    button, dim_label, hbox, horizontal_spacer, label, page_sub, section_label, vbox, Action,
+    Shared,
+};
 use crate::model;
 
 pub struct AdaptersView {
@@ -12,7 +15,7 @@ pub struct AdaptersView {
 }
 
 impl AdaptersView {
-    pub fn new(shared: &Shared) -> Self {
+    pub fn new(shared: &Shared, actions: std::sync::mpsc::Sender<Action>) -> Self {
         let root = vbox(0);
         let header = hbox(12);
         header.add_css_class("page");
@@ -25,9 +28,18 @@ impl AdaptersView {
         ));
         header.append(&titles);
         header.append(&horizontal_spacer());
+        let refresh = button("Refresh", "small");
+        refresh.set_valign(Align::Center);
+        {
+            let actions = actions.clone();
+            refresh.connect_clicked(move |_| {
+                let _ = actions.send(Action::RefreshAdapters);
+            });
+        }
+        header.append(&refresh);
         root.append(&header);
 
-        let content = vbox(12);
+        let content = vbox(14);
         content.add_css_class("page");
         let scroll = gtk4::ScrolledWindow::new();
         scroll.set_child(Some(&content));
@@ -50,9 +62,15 @@ impl AdaptersView {
         }
         let state = shared.borrow();
         let Some(health) = state.health.as_ref() else {
-            self.content.append(&dim_label(
-                "breadd is not reachable. Start the daemon or check its socket path in the rail.",
+            let empty = vbox(6);
+            empty.set_margin_top(30);
+            let title = label("breadd is not reachable.");
+            title.add_css_class("bold");
+            empty.append(&title);
+            empty.append(&dim_label(
+                "Start the daemon or check the socket path in the sidebar. The stream view reconnects automatically.",
             ));
+            self.content.append(&empty);
             return;
         };
 
@@ -83,55 +101,73 @@ impl AdaptersView {
         ));
         self.content.append(&cards);
 
-        let table = vbox(0);
-        let head = hbox(10);
-        head.add_css_class("table-head");
-        let adapter_head = Label::new(Some("ADAPTER"));
-        adapter_head.set_width_chars(18);
-        adapter_head.set_xalign(0.0);
-        head.append(&adapter_head);
-        let status_head = Label::new(Some("STATUS"));
-        status_head.set_width_chars(14);
-        status_head.set_xalign(0.0);
-        head.append(&status_head);
-        let note_head = Label::new(Some("MEANING"));
-        note_head.set_hexpand(true);
-        note_head.set_xalign(0.0);
-        head.append(&note_head);
-        table.append(&head);
+        self.content.append(&section_label("Adapters"));
+        let grid = FlowBox::new();
+        grid.set_selection_mode(gtk4::SelectionMode::None);
+        grid.set_homogeneous(true);
+        grid.set_min_children_per_line(2);
+        grid.set_max_children_per_line(3);
+        grid.set_column_spacing(10);
+        grid.set_row_spacing(10);
+        grid.set_valign(Align::Start);
+        grid.set_hexpand(true);
         for (name, status) in &adapters {
-            let row = hbox(10);
-            row.add_css_class("table-row");
-            let name_label = Label::new(Some(name.as_str()));
-            name_label.add_css_class("mono");
-            name_label.add_css_class("table-text");
-            name_label.set_width_chars(18);
-            name_label.set_xalign(0.0);
-            row.append(&name_label);
+            let card = vbox(4);
+            card.add_css_class("adapter-card");
+            card.set_hexpand(true);
+            let top = hbox(7);
+            let (r, g, b) = super::hex_rgb(match status.as_str() {
+                "connected" => "#98c379",
+                "unavailable" => "#e5c07b",
+                _ => "#e06c75",
+            })
+            .unwrap_or((0.6, 0.6, 0.6));
+            let dot = gtk4::DrawingArea::new();
+            dot.set_content_width(8);
+            dot.set_content_height(8);
+            dot.set_valign(Align::Center);
+            dot.set_draw_func(move |_, cr, width, height| {
+                cr.set_source_rgb(r, g, b);
+                cr.arc(
+                    width as f64 / 2.0,
+                    height as f64 / 2.0,
+                    3.2,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                let _ = cr.fill();
+            });
+            top.append(&dot);
+            let name = Label::new(Some(name.as_str()));
+            name.add_css_class("module-name");
+            name.set_hexpand(true);
+            name.set_xalign(0.0);
+            top.append(&name);
             let class = match status.as_str() {
                 "connected" => "green",
                 "unavailable" => "yellow",
                 _ => "red",
             };
-            let status_badge = super::badge(status, class);
-            status_badge.set_width_chars(13);
-            row.append(&status_badge);
+            top.append(&super::badge(status, class));
+            card.append(&top);
             let meaning = Label::new(Some(match status.as_str() {
-                "connected" => "running",
-                "unavailable" => "dependency missing, terminal until reconfigured",
-                "disconnected" => "enabled but not connected, retrying",
-                _ => "",
+                "connected" => "running, delivering events",
+                "unavailable" => "dependency missing; terminal until reconfigured",
+                "disconnected" => "enabled but not connected; retrying",
+                _ => "unknown state",
             }));
-            meaning.add_css_class("table-text");
-            meaning.set_hexpand(true);
+            meaning.add_css_class("tiny");
+            meaning.add_css_class("faint");
             meaning.set_xalign(0.0);
-            row.append(&meaning);
-            table.append(&row);
+            meaning.set_wrap(true);
+            card.append(&meaning);
+            grid.insert(&card, -1);
         }
-        self.content.append(&table);
+        self.content.append(&grid);
 
         self.content.append(&section_label("Daemon"));
-        let details = vbox(0);
+        let daemon = vbox(4);
+        daemon.add_css_class("detail-panel");
         for (key, value) in [
             ("socket", health.socket.clone()),
             ("pid", health.pid.to_string()),
@@ -143,7 +179,7 @@ impl AdaptersView {
             row.set_margin_top(2);
             let key_label = Label::new(Some(key));
             key_label.add_css_class("detail-key");
-            key_label.set_width_chars(12);
+            key_label.set_width_chars(10);
             key_label.set_xalign(0.0);
             row.append(&key_label);
             let value_label = Label::new(Some(&value));
@@ -152,9 +188,9 @@ impl AdaptersView {
             value_label.set_ellipsize(pango::EllipsizeMode::Middle);
             value_label.set_hexpand(true);
             row.append(&value_label);
-            details.append(&row);
+            daemon.append(&row);
         }
-        self.content.append(&details);
+        self.content.append(&daemon);
 
         self.content.append(&section_label("Recent handler errors"));
         if health.recent_errors.is_empty() {
@@ -162,9 +198,9 @@ impl AdaptersView {
                 .append(&dim_label("No handler errors reported."));
         }
         for error in &health.recent_errors {
-            let box_ = vbox(1);
-            box_.add_css_class("handler-row");
-            let top = hbox(6);
+            let card = vbox(3);
+            card.add_css_class("error-card");
+            let top = hbox(7);
             let time = Label::new(Some(&model::timestamp_label(error.timestamp)));
             time.add_css_class("tiny");
             time.add_css_class("faint");
@@ -173,15 +209,24 @@ impl AdaptersView {
             module.add_css_class("mono");
             module.add_css_class("small");
             top.append(&module);
-            box_.append(&top);
+            let age = Label::new(Some(&model::age_label(error.timestamp)));
+            age.add_css_class("tiny");
+            age.add_css_class("faint");
+            top.append(&age);
+            card.append(&top);
             let message = Label::new(Some(&error.message));
             message.add_css_class("tiny");
             message.add_css_class("bad");
             message.set_wrap(true);
             message.set_xalign(0.0);
-            box_.append(&message);
-            self.content.append(&box_);
+            message.set_selectable(true);
+            card.append(&message);
+            self.content.append(&card);
         }
+
+        self.content.append(&dim_label(
+            "Health is polled every two seconds. Adapter status comes from breadd's health response; this view never probes a device directly.",
+        ));
     }
 }
 

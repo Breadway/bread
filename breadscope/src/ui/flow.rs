@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{Align, Box as GBox, DrawingArea, Label, ScrolledWindow};
+use gtk4::{Align, Box as GBox, DrawingArea, DropDown, Label, ScrolledWindow};
 
-use super::{button, hbox, horizontal_spacer, label, mono, section_label, vbox, Shared};
+use super::{button, hbox, horizontal_spacer, label, mono, section_label, vbox, Action, Shared};
 use crate::model;
 
 #[derive(Clone)]
@@ -22,13 +22,20 @@ struct NodeAgg {
     color: (f64, f64, f64),
 }
 
+#[derive(Clone)]
+struct PathAgg {
+    module_id: String,
+    label: String,
+    count: usize,
+}
+
 #[derive(Default)]
 struct FlowData {
     sources: Vec<NodeAgg>,
     families: Vec<NodeAgg>,
     modules: Vec<NodeAgg>,
     edges: Vec<(String, String, usize)>,
-    paths: Vec<(String, usize)>,
+    paths: Vec<PathAgg>,
     total_events: usize,
 }
 
@@ -51,10 +58,12 @@ pub struct FlowView {
     area: DrawingArea,
     side: GBox,
     data: Rc<RefCell<FlowData>>,
+    window_filter: DropDown,
+    actions: std::sync::mpsc::Sender<Action>,
 }
 
 impl FlowView {
-    pub fn new(shared: &Shared) -> Self {
+    pub fn new(shared: &Shared, actions: std::sync::mpsc::Sender<Action>) -> Self {
         let root = vbox(0);
 
         let header = hbox(14);
@@ -68,11 +77,20 @@ impl FlowView {
         ));
         header.append(&titles);
         header.append(&horizontal_spacer());
-        let window_label = mono("buffered window");
-        window_label.add_css_class("tiny");
-        window_label.add_css_class("faint");
-        header.append(&window_label);
+        let window_filter =
+            DropDown::from_strings(&["Whole buffer", "Last 1m", "Last 5m", "Last 15m"]);
+        window_filter.add_css_class("window-filter");
+        window_filter.set_tooltip_text(Some("Only aggregate events from this window"));
+        let selected_window = match shared.borrow().flow_window_minutes {
+            1 => 1,
+            5 => 2,
+            15 => 3,
+            _ => 0,
+        };
+        window_filter.set_selected(selected_window);
+        header.append(&window_filter);
         let reset = button("Reset", "small");
+        reset.set_valign(Align::Center);
         header.append(&reset);
         root.append(&header);
 
@@ -98,15 +116,32 @@ impl FlowView {
         body.append(&side_scroll);
         root.append(&body);
 
+        {
+            let shared = shared.clone();
+            let actions = actions.clone();
+            window_filter.connect_selected_notify(move |dropdown| {
+                let minutes = match dropdown.selected() {
+                    1 => 1,
+                    2 => 5,
+                    3 => 15,
+                    _ => 0,
+                };
+                shared.borrow_mut().flow_window_minutes = minutes;
+                let _ = actions.send(Action::RefreshFlow);
+            });
+        }
+
         let data = Rc::new(RefCell::new(FlowData::default()));
         let geometry = Rc::new(RefCell::new(Geometry::default()));
+        let hover: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         {
             let data = data.clone();
             let geometry = geometry.clone();
+            let hover = hover.clone();
             let shared = shared.clone();
             area.set_draw_func(move |_, cr, width, height| {
-                draw_map(cr, width, height, &shared, &data, &geometry);
+                draw_map(cr, width, height, &shared, &data, &geometry, &hover);
             });
         }
 
@@ -116,6 +151,7 @@ impl FlowView {
             let data = data.clone();
             let geometry = geometry.clone();
             let area_for_click = area.clone();
+            let actions = actions.clone();
             let gesture = gtk4::GestureClick::new();
             gesture.connect_pressed(move |_, _, x, y| {
                 let hit = geometry
@@ -139,10 +175,47 @@ impl FlowView {
                     state.selected_flow = Some(hit);
                 }
                 drop(state);
-                render_side(&side, &shared, &data);
+                render_side(&side, &area_for_click, &actions, &shared, &data);
                 area_for_click.queue_draw();
             });
             area.add_controller(gesture);
+        }
+
+        {
+            let hover_motion = hover.clone();
+            let hover_leave = hover.clone();
+            let geometry = geometry.clone();
+            let area_motion = area.clone();
+            let area_leave = area.clone();
+            let motion = gtk4::EventControllerMotion::new();
+            motion.connect_motion(move |_, x, y| {
+                let hit = geometry
+                    .borrow()
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        x >= node.x
+                            && x <= node.x + node.width
+                            && y >= node.y
+                            && y <= node.y + node.height
+                    })
+                    .map(|node| node.id.clone());
+                if *hover_motion.borrow() != hit {
+                    *hover_motion.borrow_mut() = hit.clone();
+                    area_motion.queue_draw();
+                }
+                area_motion.set_cursor_from_name(if hit.is_some() {
+                    Some("pointer")
+                } else {
+                    Some("default")
+                });
+            });
+            motion.connect_leave(move |_| {
+                if hover_leave.borrow_mut().take().is_some() {
+                    area_leave.queue_draw();
+                }
+            });
+            area.add_controller(motion);
         }
 
         {
@@ -150,9 +223,16 @@ impl FlowView {
             let side_for_reset = side.clone();
             let data = data.clone();
             let area_for_reset = area.clone();
+            let actions_for_reset = actions.clone();
             reset.connect_clicked(move |_| {
                 shared.borrow_mut().selected_flow = None;
-                render_side(&side_for_reset, &shared, &data);
+                render_side(
+                    &side_for_reset,
+                    &area_for_reset,
+                    &actions_for_reset,
+                    &shared,
+                    &data,
+                );
                 area_for_reset.queue_draw();
             });
         }
@@ -162,6 +242,8 @@ impl FlowView {
             area,
             side,
             data,
+            window_filter,
+            actions,
         };
         view.refresh(shared);
         view
@@ -185,7 +267,14 @@ impl FlowView {
         if selection_exists == Some(false) {
             shared.borrow_mut().selected_flow = None;
         }
-        render_side(&self.side, shared, &self.data);
+        let minutes = shared.borrow().flow_window_minutes;
+        self.window_filter.set_selected(match minutes {
+            1 => 1,
+            5 => 2,
+            15 => 3,
+            _ => 0,
+        });
+        render_side(&self.side, &self.area, &self.actions, shared, &self.data);
         self.area.queue_draw();
     }
 }
@@ -211,9 +300,12 @@ fn compute_data(shared: &Shared) -> FlowData {
     let mut families: HashMap<String, usize> = HashMap::new();
     let mut modules: HashMap<String, usize> = HashMap::new();
     let mut edges: HashMap<(String, String), usize> = HashMap::new();
-    let mut paths: HashMap<String, usize> = HashMap::new();
+    let mut paths: HashMap<(String, String, String), (String, usize)> = HashMap::new();
 
     for event in &state.events {
+        if !state.in_flow_window(event) {
+            continue;
+        }
         let source_key = model::source_key(&event.source);
         let source_id = format!("s:{source_key}");
         let source_label = model::source_label(&event.source);
@@ -241,14 +333,20 @@ fn compute_data(shared: &Shared) -> FlowData {
             *edges
                 .entry((family_id.clone(), module_id.clone()))
                 .or_insert(0) += 1;
-            *paths
-                .entry(format!(
-                    "{} → {} → {}",
-                    model::source_label(&event.source),
-                    family,
-                    module
-                ))
-                .or_insert(0) += 1;
+            let path = paths
+                .entry((source_id.clone(), family_id.clone(), module_id.clone()))
+                .or_insert_with(|| {
+                    (
+                        format!(
+                            "{} → {} → {}",
+                            model::source_label(&event.source),
+                            family,
+                            module
+                        ),
+                        0,
+                    )
+                });
+            path.1 += 1;
         }
     }
 
@@ -323,8 +421,17 @@ fn compute_data(shared: &Shared) -> FlowData {
         .map(|((from, to), count)| (from, to, count))
         .collect();
     edges.sort_by_key(|edge| std::cmp::Reverse(edge.2));
-    let mut paths: Vec<(String, usize)> = paths.into_iter().collect();
-    paths.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut paths: Vec<PathAgg> = paths
+        .into_iter()
+        .map(
+            |((_source_id, _family_id, module_id), (label, count))| PathAgg {
+                module_id,
+                label,
+                count,
+            },
+        )
+        .collect();
+    paths.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
     paths.truncate(7);
 
     FlowData {
@@ -405,6 +512,7 @@ fn draw_map(
     shared: &Shared,
     data: &Rc<RefCell<FlowData>>,
     geometry: &Rc<RefCell<Geometry>>,
+    hover: &Rc<RefCell<Option<String>>>,
 ) {
     let data = data.borrow();
     let state = shared.borrow();
@@ -417,13 +525,13 @@ fn draw_map(
     let top = 52.0;
     let bottom = 18.0;
     let node_width = 158.0;
-    let gap = 11.0;
+    let gap = 9.0;
     let available_height = (height - top - bottom).max(120.0);
     let columns_x = [18.0, (width - node_width) / 2.0, width - node_width - 18.0];
 
-    let source_layout = layout_column(&data.sources, top, available_height, gap, 26.0);
-    let family_layout = layout_column(&data.families, top, available_height, gap, 26.0);
-    let module_layout = layout_column(&data.modules, top, available_height, gap, 26.0);
+    let source_layout = layout_column(&data.sources, top, available_height, gap, 24.0);
+    let family_layout = layout_column(&data.families, top, available_height, gap, 24.0);
+    let module_layout = layout_column(&data.modules, top, available_height, gap, 24.0);
 
     let mut nodes = Vec::new();
     let mut position: HashMap<&str, (f64, f64, f64)> = HashMap::new();
@@ -465,10 +573,12 @@ fn draw_map(
     };
 
     let selected = state.selected_flow.as_deref();
+    let hovered = hover.borrow().clone();
+    let focus = selected.or(hovered.as_deref());
     let connected: HashMap<&str, bool> = data
         .edges
         .iter()
-        .filter(|(from, to, _)| selected.is_some_and(|selected| selected == from || selected == to))
+        .filter(|(from, to, _)| focus.is_some_and(|focus| focus == from || focus == to))
         .flat_map(|(from, to, _)| [(from.as_str(), true), (to.as_str(), true)])
         .collect();
 
@@ -483,7 +593,7 @@ fn draw_map(
         let x2 = *tx;
         let y2 = ty + th / 2.0;
         let control = ((x2 - x1) * 0.45).max(45.0);
-        let active = selected.is_some_and(|selected| selected == from || selected == to);
+        let active = focus.is_some_and(|focus| focus == from || focus == to);
         let dim = selected.is_some() && !active;
         let (r, g, b) = if from.starts_with("s:") {
             data.node(from)
@@ -533,7 +643,7 @@ fn draw_map(
     );
     cr.set_font_size(8.0);
     cr.set_source_rgba(0.55, 0.55, 0.55, 0.70);
-    let subtitles = ["adapter or ipc", "bread.<domain>.*", "handler"];
+    let subtitles = ["event source", "bread.<domain>.*", "subscribed module"];
     for (index, title) in subtitles.iter().enumerate() {
         cr.move_to(columns_x[index], 39.0);
         let _ = cr.show_text(title);
@@ -556,8 +666,11 @@ fn draw_map(
         cr.set_source_rgb(shade + 0.02, shade + 0.02, shade + 0.02);
         let _ = cr.fill_preserve();
         if selected == Some(node.id.as_str()) {
-            cr.set_source_rgba(0.85, 0.63, 0.36, 0.9);
-            cr.set_line_width(1.4);
+            cr.set_source_rgba(0.85, 0.63, 0.36, 0.95);
+            cr.set_line_width(1.5);
+        } else if hovered.as_deref() == Some(node.id.as_str()) {
+            cr.set_source_rgba(0.85, 0.63, 0.36, 0.65);
+            cr.set_line_width(1.2);
         } else {
             cr.set_source_rgba(0.35, 0.35, 0.35, if dim { 0.25 } else { 0.55 });
             cr.set_line_width(0.8);
@@ -632,6 +745,34 @@ fn draw_map(
         }
     }
 
+    // Hover readout, bottom left, so the map answers "what is this?" without
+    // leaving the canvas.
+    if let Some(hovered) = hovered.as_deref().and_then(|id| data.node(id)) {
+        let text = format!(
+            "{}  ·  {} events  ·  click to isolate",
+            hovered.label, hovered.count
+        );
+        cr.select_font_face(
+            "monospace",
+            gtk4::cairo::FontSlant::Normal,
+            gtk4::cairo::FontWeight::Normal,
+        );
+        cr.set_font_size(9.0);
+        let text_width = cr
+            .text_extents(&text)
+            .map(|extents| extents.width())
+            .unwrap_or(0.0);
+        super::rounded_rect(cr, 18.0, height - 34.0, text_width + 20.0, 20.0, 5.0);
+        cr.set_source_rgba(0.10, 0.10, 0.10, 0.92);
+        let _ = cr.fill_preserve();
+        cr.set_source_rgba(0.85, 0.63, 0.36, 0.45);
+        cr.set_line_width(0.8);
+        let _ = cr.stroke();
+        cr.set_source_rgba(0.88, 0.88, 0.88, 0.9);
+        cr.move_to(28.0, height - 20.0);
+        let _ = cr.show_text(&text);
+    }
+
     if data.total_events == 0 {
         cr.set_source_rgba(0.65, 0.65, 0.65, 0.75);
         cr.select_font_face(
@@ -650,15 +791,22 @@ fn draw_map(
     }
 }
 
-fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
+fn render_side(
+    side: &GBox,
+    area: &DrawingArea,
+    actions: &std::sync::mpsc::Sender<Action>,
+    shared: &Shared,
+    data_rc: &Rc<RefCell<FlowData>>,
+) {
     while let Some(child) = side.first_child() {
         side.remove(&child);
     }
+    let data_rc = data_rc.clone();
     let (selected, subscriptions) = {
         let state = shared.borrow();
         (state.selected_flow.clone(), state.subscriptions.len())
     };
-    let data = data.borrow();
+    let data = data_rc.borrow();
 
     if let Some(selected) = selected {
         let Some(node) = data.node(&selected) else {
@@ -666,6 +814,7 @@ fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
         };
         let title = label(&node.label);
         title.add_css_class("bold");
+        title.set_wrap(true);
         side.append(&title);
         let kind = if selected.starts_with("s:") {
             "source"
@@ -674,12 +823,49 @@ fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
         } else {
             "module"
         };
+        let share = if data.total_events > 0 {
+            (node.count as f64 / data.total_events as f64) * 100.0
+        } else {
+            0.0
+        };
         side.append(&super::dim_label(&format!(
-            "{kind} · {} events in the buffer",
+            "{kind} · {} events · {share:.0}% of the window",
             node.count
         )));
+
+        let filter_pattern = if selected.starts_with("f:") {
+            Some(format!("bread.{}.**", selected.trim_start_matches("f:")))
+        } else if selected.starts_with("m:") {
+            let module = selected.trim_start_matches("m:");
+            let state = shared.borrow();
+            state
+                .subscriptions
+                .iter()
+                .find(|entry| entry.module_label() == module)
+                .map(|entry| entry.pattern.clone())
+        } else {
+            None
+        };
+        if let Some(pattern) = filter_pattern {
+            let filter = button("Filter stream", "small primary");
+            let actions = actions.clone();
+            filter.connect_clicked(move |_| {
+                let _ = actions.send(Action::FilterStream(pattern.clone()));
+            });
+            side.append(&filter);
+        }
+        if let Some(module) = selected.strip_prefix("m:") {
+            let open = button("Open module", "small");
+            let actions = actions.clone();
+            let module = module.to_string();
+            open.connect_clicked(move |_| {
+                let _ = actions.send(Action::OpenModule(module.clone()));
+            });
+            side.append(&open);
+        }
+
         side.append(&section_label("Inbound"));
-        let inbound: Vec<(String, usize)> = data
+        let inbound: Vec<(String, String, usize)> = data
             .edges
             .iter()
             .filter(|(_, to, _)| to == &selected)
@@ -688,17 +874,19 @@ fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
                     .node(from)
                     .map(|node| node.label.clone())
                     .unwrap_or_else(|| from.clone());
-                (label, *count)
+                (from.clone(), label, *count)
             })
             .collect();
         if inbound.is_empty() {
             side.append(&super::dim_label("No inbound edges."));
         }
-        for (label, count) in inbound {
-            side.append(&edge_row(&label, count));
+        for (id, label, count) in inbound {
+            side.append(&edge_button(
+                "←", &label, count, side, area, actions, shared, &data_rc, &id,
+            ));
         }
         side.append(&section_label("Outbound"));
-        let outbound: Vec<(String, usize)> = data
+        let outbound: Vec<(String, String, usize)> = data
             .edges
             .iter()
             .filter(|(from, _, _)| from == &selected)
@@ -707,24 +895,26 @@ fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
                     .node(to)
                     .map(|node| node.label.clone())
                     .unwrap_or_else(|| to.clone());
-                (label, *count)
+                (to.clone(), label, *count)
             })
             .collect();
         if outbound.is_empty() {
             side.append(&super::dim_label("No outbound edges. This is a leaf."));
         }
-        for (label, count) in outbound {
-            side.append(&edge_row(&label, count));
+        for (id, label, count) in outbound {
+            side.append(&edge_button(
+                "→", &label, count, side, area, actions, shared, &data_rc, &id,
+            ));
         }
         side.append(&wrapped_note(
-            "Click the selected node again to clear the isolation.",
+            "Click the selected node again, or Reset, to clear the isolation.",
         ));
         return;
     }
 
     side.append(&label("Reading the map"));
     side.append(&wrapped_note(
-        "Counts are events in the current buffer. Widths share one scale across columns.",
+        "Each event walks source, then event family, then every matching subscription. Width is volume in the selected time window.",
     ));
     stat_row(side, "sources", data.sources.len());
     stat_row(side, "event families", data.families.len());
@@ -735,7 +925,7 @@ fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
     let max = data
         .paths
         .first()
-        .map(|(_, count)| *count)
+        .map(|path| path.count)
         .unwrap_or(1)
         .max(1);
     if data.paths.is_empty() {
@@ -743,33 +933,116 @@ fn render_side(side: &GBox, shared: &Shared, data: &Rc<RefCell<FlowData>>) {
             "No path has been observed yet. Paths appear when a subscription matches a buffered event.",
         ));
     }
-    for (path, count) in &data.paths {
-        let row = vbox(2);
+    for path in &data.paths {
+        let row = gtk4::Button::new();
         row.add_css_class("path-row");
+        row.add_css_class("path-button");
+        row.set_tooltip_text(Some("Isolate this path in the map"));
+        let content = vbox(2);
         let top = hbox(6);
-        let name = Label::new(Some(path));
+        let name = Label::new(Some(&path.label));
         name.add_css_class("path-name");
         name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         name.set_max_width_chars(24);
         name.set_hexpand(true);
         name.set_xalign(0.0);
         top.append(&name);
-        let count_label = Label::new(Some(&count.to_string()));
-        count_label.add_css_class("path-count");
-        top.append(&count_label);
-        row.append(&top);
-        let bar = gtk4::ProgressBar::new();
-        bar.set_fraction(*count as f64 / max as f64);
-        bar.set_show_text(false);
-        bar.add_css_class("path-progress");
-        row.append(&bar);
+        let share = if data.total_events > 0 {
+            (path.count as f64 / data.total_events as f64) * 100.0
+        } else {
+            0.0
+        };
+        let count = Label::new(Some(&format!("{} · {share:.0}%", path.count)));
+        count.add_css_class("path-count");
+        top.append(&count);
+        content.append(&top);
+        let fraction = path.count as f64 / max as f64;
+        let bar = DrawingArea::new();
+        bar.set_content_height(4);
+        bar.set_hexpand(true);
+        bar.set_draw_func(move |_, cr, width, height| {
+            let width = width as f64;
+            let height = height as f64;
+            cr.set_source_rgba(0.75, 0.75, 0.75, 0.10);
+            super::rounded_rect(cr, 0.0, 0.0, width, height, 2.0);
+            let _ = cr.fill();
+            cr.set_source_rgba(0.85, 0.63, 0.36, 0.78);
+            super::rounded_rect(cr, 0.0, 0.0, width * fraction, height, 2.0);
+            let _ = cr.fill();
+        });
+        content.append(&bar);
+        row.set_child(Some(&content));
+        {
+            let side = side.clone();
+            let area = area.clone();
+            let actions = actions.clone();
+            let shared = shared.clone();
+            let data = data_rc.clone();
+            let id = path.module_id.clone();
+            row.connect_clicked(move |_| {
+                select_node(&side, &area, &actions, &shared, &data, id.clone());
+            });
+        }
         side.append(&row);
     }
     side.append(&wrapped_note(
-        "A module can appear on several paths. Select a node to see its inbound and outbound edges.",
+        "Click a path to isolate its module, then use Filter stream. A module can appear on several paths.",
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
+fn edge_button(
+    arrow: &str,
+    label: &str,
+    count: usize,
+    side: &GBox,
+    area: &DrawingArea,
+    actions: &std::sync::mpsc::Sender<Action>,
+    shared: &Shared,
+    data: &Rc<RefCell<FlowData>>,
+    id: &str,
+) -> gtk4::Button {
+    let row = gtk4::Button::new();
+    row.add_css_class("path-row");
+    row.add_css_class("path-button");
+    let content = hbox(8);
+    let arrow = Label::new(Some(arrow));
+    arrow.add_css_class("accent");
+    content.append(&arrow);
+    let name = Label::new(Some(label));
+    name.add_css_class("path-name");
+    name.set_hexpand(true);
+    name.set_xalign(0.0);
+    name.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    content.append(&name);
+    let count = Label::new(Some(&count.to_string()));
+    count.add_css_class("path-count");
+    content.append(&count);
+    row.set_child(Some(&content));
+    let side = side.clone();
+    let area = area.clone();
+    let actions = actions.clone();
+    let shared = shared.clone();
+    let data = data.clone();
+    let id = id.to_string();
+    row.connect_clicked(move |_| {
+        select_node(&side, &area, &actions, &shared, &data, id.clone());
+    });
+    row
+}
+
+fn select_node(
+    side: &GBox,
+    area: &DrawingArea,
+    actions: &std::sync::mpsc::Sender<Action>,
+    shared: &Shared,
+    data: &Rc<RefCell<FlowData>>,
+    id: String,
+) {
+    shared.borrow_mut().selected_flow = Some(id);
+    render_side(side, area, actions, shared, data);
+    area.queue_draw();
+}
 fn wrapped_note(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("note");
@@ -786,17 +1059,4 @@ fn stat_row(side: &GBox, key: &str, value: usize) {
     row.append(&horizontal_spacer());
     row.append(&mono(&value.to_string()));
     side.append(&row);
-}
-
-fn edge_row(name: &str, count: usize) -> GBox {
-    let row = hbox(8);
-    row.add_css_class("path-row");
-    let label = Label::new(Some(name));
-    label.add_css_class("path-name");
-    label.set_hexpand(true);
-    label.set_xalign(0.0);
-    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    row.append(&label);
-    row.append(&mono(&count.to_string()));
-    row
 }

@@ -1,18 +1,20 @@
 //! Live event stream with causal ordering and a per-event inspector.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use bread_shared::AdapterSource;
 use gtk4::prelude::*;
 use gtk4::{
-    pango, Align, ApplicationWindow, Box as GBox, Button, Label, ScrolledWindow, SearchEntry,
-    ToggleButton,
+    pango, Align, ApplicationWindow, Box as GBox, Button, DropDown, Label, ScrolledWindow,
+    SearchEntry, ToggleButton,
 };
 
+use super::json::JsonView;
 use super::{
     badge, button, dim_label, dot_widget, ellipsize, hbox, horizontal_spacer, label, mono,
-    section_label, text_view, vbox, Action, Shared, View,
+    section_label, vbox, Action, Shared, View,
 };
 use crate::model;
 
@@ -21,12 +23,16 @@ pub struct StreamView {
     search: SearchEntry,
     causal: ToggleButton,
     pause: Button,
-    summary: Label,
     list: GBox,
     list_scroll: ScrolledWindow,
     inspector: GBox,
     inspector_scroll: ScrolledWindow,
     volume: gtk4::DrawingArea,
+    follow: ToggleButton,
+    window_filter: DropDown,
+    counts: RefCell<HashMap<String, Label>>,
+    row_widgets: RefCell<HashMap<String, Button>>,
+    pending_scroll: Cell<bool>,
     window: ApplicationWindow,
     actions: std::sync::mpsc::Sender<Action>,
     last_inspector_key: RefCell<String>,
@@ -43,7 +49,7 @@ struct RowData {
     selected: bool,
 }
 
-fn chip(text: &str, color: Option<&str>) -> ToggleButton {
+fn chip(text: &str, color: Option<&str>) -> (ToggleButton, Label) {
     let button = ToggleButton::new();
     button.add_css_class("chip");
     let row = hbox(5);
@@ -67,8 +73,11 @@ fn chip(text: &str, color: Option<&str>) -> ToggleButton {
         row.append(&swatch);
     }
     row.append(&label(text));
+    let count = Label::new(Some("0"));
+    count.add_css_class("chip-count");
+    row.append(&count);
     button.set_child(Some(&row));
-    button
+    (button, count)
 }
 
 impl StreamView {
@@ -97,18 +106,52 @@ impl StreamView {
         }
         toolbar.append(&search);
 
-        let causal = ToggleButton::with_label("Causal tree");
-        causal.add_css_class("pill");
-        causal.set_active(shared.borrow().causal);
+        let window_filter = DropDown::from_strings(&["All time", "Last 1m", "Last 5m", "Last 15m"]);
+        window_filter.add_css_class("window-filter");
+        window_filter.set_tooltip_text(Some("Hide events older than this window"));
+        let selected_window = match shared.borrow().window_minutes {
+            1 => 1,
+            5 => 2,
+            15 => 3,
+            _ => 0,
+        };
+        window_filter.set_selected(selected_window);
         {
             let shared = shared.clone();
             let actions = actions.clone();
-            causal.connect_toggled(move |button| {
-                shared.borrow_mut().causal = button.is_active();
+            window_filter.connect_selected_notify(move |dropdown| {
+                let minutes = match dropdown.selected() {
+                    1 => 1,
+                    2 => 5,
+                    3 => 15,
+                    _ => 0,
+                };
+                shared.borrow_mut().window_minutes = minutes;
                 let _ = actions.send(Action::RefreshStream);
             });
         }
-        toolbar.append(&causal);
+        toolbar.append(&window_filter);
+
+        let follow = ToggleButton::with_label("Follow");
+        follow.add_css_class("pill");
+        follow.set_active(shared.borrow().follow_tail);
+        follow.set_tooltip_text(Some(
+            "Keep the newest event selected and pinned to the bottom (f)",
+        ));
+        {
+            let shared = shared.clone();
+            let actions = actions.clone();
+            follow.connect_toggled(move |button| {
+                let mut state = shared.borrow_mut();
+                state.follow_tail = button.is_active();
+                if button.is_active() {
+                    state.selection_locked = false;
+                }
+                drop(state);
+                let _ = actions.send(Action::RefreshStream);
+            });
+        }
+        toolbar.append(&follow);
 
         let pause = button("Pause", "");
         {
@@ -154,8 +197,10 @@ impl StreamView {
             ("manual", "manual", Some("#8d8d8d")),
             ("app", "app", Some("#d9a05b")),
         ];
-        let all_chip = chip("all", None);
+        let mut counts = HashMap::new();
+        let (all_chip, all_count) = chip("all", None);
         all_chip.set_active(true);
+        counts.insert("all".to_string(), all_count);
         chips.append(&all_chip);
         {
             let shared = shared.clone();
@@ -168,8 +213,9 @@ impl StreamView {
             });
         }
         for (value, text, color) in values.into_iter().filter(|(value, _, _)| *value != "all") {
-            let button = chip(text, color);
+            let (button, count) = chip(text, color);
             button.set_group(Some(&all_chip));
+            counts.insert(value.to_string(), count);
             {
                 let shared = shared.clone();
                 let actions = actions.clone();
@@ -185,10 +231,18 @@ impl StreamView {
             chips.append(&button);
         }
         chips.append(&horizontal_spacer());
-        let summary = label("0 shown");
-        summary.add_css_class("small");
-        summary.add_css_class("dim");
-        chips.append(&summary);
+        let causal = ToggleButton::with_label("Causal tree");
+        causal.add_css_class("pill");
+        causal.set_active(shared.borrow().causal);
+        {
+            let shared = shared.clone();
+            let actions = actions.clone();
+            causal.connect_toggled(move |button| {
+                shared.borrow_mut().causal = button.is_active();
+                let _ = actions.send(Action::RefreshStream);
+            });
+        }
+        chips.append(&causal);
         root.append(&chips);
 
         // ---- volume ------------------------------------------------------
@@ -220,7 +274,7 @@ impl StreamView {
         let inspector_scroll = ScrolledWindow::new();
         inspector_scroll.set_child(Some(&inspector));
         inspector_scroll.set_vexpand(true);
-        inspector_scroll.set_width_request(350);
+        inspector_scroll.set_width_request(330);
         inspector_scroll.set_hexpand(false);
         inspector_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
         inspector_scroll.set_min_content_width(0);
@@ -237,12 +291,16 @@ impl StreamView {
             search,
             causal,
             pause,
-            summary,
             list,
             list_scroll,
             inspector,
             inspector_scroll,
             volume,
+            follow,
+            window_filter,
+            counts: RefCell::new(counts),
+            row_widgets: RefCell::new(HashMap::new()),
+            pending_scroll: Cell::new(false),
             window: window.clone(),
             actions,
             last_inspector_key: RefCell::new(String::new()),
@@ -266,27 +324,124 @@ impl StreamView {
         self.search.grab_focus();
     }
 
-    pub fn refresh_pending(&self, shared: &Shared) {
-        let state = shared.borrow();
-        let shown = state.visible_events().len();
-        let pending = state.pending_count();
-        if pending > 0 {
-            self.summary
-                .set_text(&format!("{shown} shown  ·  paused, {pending} buffered"));
-        } else {
-            self.summary.set_text(&format!(
-                "{shown} shown  ·  {} buffered",
-                state.events.len()
-            ));
+    pub fn clear_filter(&self) {
+        if !self.search.text().is_empty() {
+            self.search.set_text("");
         }
+    }
+
+    pub fn toggle_follow(&self, shared: &Shared) {
+        let next = !shared.borrow().follow_tail;
+        {
+            let mut state = shared.borrow_mut();
+            state.follow_tail = next;
+            if next {
+                state.selection_locked = false;
+            }
+        }
+        self.follow.set_active(next);
+        let _ = self.actions.send(Action::RefreshStream);
+    }
+
+    pub fn select_offset(&self, shared: &Shared, delta: isize) -> bool {
+        let (id, causal) = {
+            let state = shared.borrow();
+            let visible: Vec<&bread_shared::BreadEvent> = state
+                .visible_events()
+                .into_iter()
+                .map(|(event, _)| event)
+                .collect();
+            if visible.is_empty() {
+                return false;
+            }
+            let current = state
+                .selected_event
+                .as_deref()
+                .and_then(|id| visible.iter().position(|event| event.id == id));
+            let base = current.unwrap_or_else(|| if state.causal { visible.len() - 1 } else { 0 });
+            let next = (base as isize + delta).clamp(0, visible.len() as isize - 1) as usize;
+            (visible[next].id.clone(), state.causal)
+        };
+        let _ = causal;
+        let mut state = shared.borrow_mut();
+        state.selected_event = Some(id);
+        state.selection_locked = true;
+        state.follow_tail = false;
+        drop(state);
+        self.follow.set_active(false);
+        self.pending_scroll.set(true);
+        true
+    }
+
+    pub fn select_end(&self, shared: &Shared, newest: bool) -> bool {
+        let id = {
+            let state = shared.borrow();
+            let visible: Vec<&bread_shared::BreadEvent> = state
+                .visible_events()
+                .into_iter()
+                .map(|(event, _)| event)
+                .collect();
+            if visible.is_empty() {
+                return false;
+            }
+            let index = if state.causal == newest {
+                visible.len() - 1
+            } else {
+                0
+            };
+            visible[index].id.clone()
+        };
+        let mut state = shared.borrow_mut();
+        state.selected_event = Some(id);
+        state.selection_locked = true;
+        state.follow_tail = false;
+        drop(state);
+        self.follow.set_active(false);
+        self.pending_scroll.set(true);
+        true
+    }
+
+    fn scroll_to_event(&self, event_id: &str) {
+        let Some(row) = self.row_widgets.borrow().get(event_id).cloned() else {
+            return;
+        };
+        let list = self.list.clone();
+        let scroll = self.list_scroll.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            let Some(bounds) = row.compute_bounds(&list) else {
+                return;
+            };
+            let adjustment = scroll.vadjustment();
+            let top = bounds.y() as f64;
+            let bottom = top + bounds.height() as f64;
+            if top < adjustment.value() + 4.0 {
+                adjustment.set_value((top - 6.0).max(adjustment.lower()));
+            } else if bottom > adjustment.value() + adjustment.page_size() - 4.0 {
+                adjustment
+                    .set_value((bottom - adjustment.page_size() + 6.0).max(adjustment.lower()));
+            }
+        });
     }
 
     pub fn refresh(&self, shared: &Shared) {
         self.last_refresh.set(Instant::now());
-        let (rows, shown, total, paused, pending, selected, causal) = {
+        let (
+            rows,
+            shown,
+            total,
+            paused,
+            pending,
+            selected,
+            causal,
+            counts,
+            window_minutes,
+            follow_tail,
+        ) = {
             let state = shared.borrow();
             let visible = state.visible_events();
-            let selected = if state.selection_locked {
+            let selected = if state.follow_tail {
+                None
+            } else if state.selection_locked {
                 state
                     .selected_event
                     .clone()
@@ -303,6 +458,7 @@ impl StreamView {
                     .map(|(event, _)| event.id.clone())
                     .or_else(|| state.events.back().map(|event| event.id.clone()))
             });
+            let (_, counts) = state.source_counts();
             let rows = visible
                 .iter()
                 .map(|(event, depth)| RowData {
@@ -323,23 +479,40 @@ impl StreamView {
                 state.pending_count(),
                 selected,
                 state.causal,
+                counts,
+                state.window_minutes,
+                state.follow_tail,
             )
         };
         shared.borrow_mut().selected_event = selected.clone();
 
-        self.summary.set_text(&if paused {
-            format!("{shown} shown  ·  paused, {pending} buffered")
-        } else {
-            format!("{shown} shown  ·  {total} buffered")
-        });
+        let _ = (shown, pending);
         self.pause
             .set_label(if paused { "Resume" } else { "Pause" });
         self.causal.set_active(causal);
+        self.follow.set_active(follow_tail);
+        self.window_filter.set_selected(match window_minutes {
+            1 => 1,
+            5 => 2,
+            15 => 3,
+            _ => 0,
+        });
+        if let Some(all) = self.counts.borrow().get("all") {
+            all.set_text(&total.to_string());
+        }
+        for (key, label) in self.counts.borrow().iter() {
+            if key == "all" {
+                continue;
+            }
+            let count = counts.get(key).copied().unwrap_or(0);
+            label.set_text(&count.to_string());
+        }
         self.volume.queue_draw();
 
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
+        self.row_widgets.borrow_mut().clear();
         if rows.is_empty() {
             let empty = vbox(4);
             empty.set_margin_top(50);
@@ -359,17 +532,23 @@ impl StreamView {
             self.list.append(&empty);
         } else {
             for row in rows {
-                self.list.append(&self.event_row(shared, row));
+                let id = row.id.clone();
+                let widget = self.event_row(shared, row);
+                self.row_widgets.borrow_mut().insert(id, widget.clone());
+                self.list.append(&widget);
             }
         }
-        let follow = !shared.borrow().selection_locked;
-        if follow && self.list.first_child().is_some() {
+        if follow_tail && self.list.first_child().is_some() {
             let adjustment = self.list_scroll.vadjustment();
             gtk4::glib::idle_add_local_once(move || {
                 adjustment.set_value(
                     (adjustment.upper() - adjustment.page_size()).max(adjustment.lower()),
                 );
             });
+        } else if self.pending_scroll.replace(false) {
+            if let Some(selected) = selected.as_deref() {
+                self.scroll_to_event(selected);
+            }
         }
         if let Some(selected) = selected {
             self.render_inspector(shared, &selected);
@@ -408,6 +587,7 @@ impl StreamView {
         let dot = dot_widget(&row.source);
         dot.set_valign(Align::Start);
         dot.set_margin_top(4);
+        dot.set_tooltip_text(Some(&model::source_label(&row.source)));
         content.append(&dot);
 
         let main = vbox(0);
@@ -439,6 +619,7 @@ impl StreamView {
             let mut state = shared.borrow_mut();
             state.selected_event = Some(event_id.clone());
             state.selection_locked = true;
+            state.follow_tail = false;
             drop(state);
             let _ = actions.send(Action::RefreshStream);
         });
@@ -471,6 +652,11 @@ impl StreamView {
                 .collect();
             children.sort_by(|a, b| a.1.cmp(&b.1));
 
+            let statuses: HashMap<String, String> = state
+                .modules
+                .iter()
+                .map(|module| (module.name.clone(), module.status.clone()))
+                .collect();
             let traces: Vec<(String, String, u64, bool)> = state
                 .traces_for(event_id)
                 .into_iter()
@@ -495,11 +681,12 @@ impl StreamView {
                 })
                 .collect();
             let key = format!(
-                "{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}",
                 event_id,
                 traces.len(),
                 subscriptions.len(),
-                children.len()
+                children.len(),
+                event.data.to_string().len()
             );
             (
                 event.event.clone(),
@@ -511,13 +698,14 @@ impl StreamView {
                 children,
                 traces,
                 subscriptions,
+                statuses,
                 key,
             )
         };
-        if *self.last_inspector_key.borrow() == data.9 {
+        if *self.last_inspector_key.borrow() == data.10 {
             return;
         }
-        *self.last_inspector_key.borrow_mut() = data.9;
+        *self.last_inspector_key.borrow_mut() = data.10;
         while let Some(child) = self.inspector.first_child() {
             self.inspector.remove(&child);
         }
@@ -532,6 +720,7 @@ impl StreamView {
             children,
             traces,
             subscriptions,
+            statuses,
             _,
         ) = data;
 
@@ -576,42 +765,102 @@ impl StreamView {
         }
 
         self.inspector.append(&section_label("Handled by"));
+        let mut handler_modules: Vec<String> = Vec::new();
         if !traces.is_empty() {
             for (module, pattern, duration_us, ok) in &traces {
-                self.inspector.append(&handler_row(
+                let status = statuses.get(module).map(String::as_str).unwrap_or("init");
+                self.inspector.append(&self.handler_button(
                     module,
                     pattern,
                     &format!("{:.1} ms", *duration_us as f64 / 1000.0),
                     *ok,
+                    status,
                 ));
+                if module != "init.lua" && !handler_modules.contains(module) {
+                    handler_modules.push(module.clone());
+                }
             }
         } else if !subscriptions.is_empty() {
             for (module, pattern, count) in &subscriptions {
-                self.inspector.append(&handler_row(
+                let status = statuses.get(module).map(String::as_str).unwrap_or("init");
+                self.inspector.append(&self.handler_button(
                     module,
                     pattern,
                     &format!("{count} lifetime"),
                     true,
+                    status,
                 ));
+                if module != "init.lua" && !handler_modules.contains(module) {
+                    handler_modules.push(module.clone());
+                }
             }
-            self.inspector.append(&dim_label(
-                "Timing unavailable for this event (it predates tracing or tracing is off).",
+            self.inspector.append(&wrapped_note(
+                "Timing not recorded yet for this event. Tracing records timing only after an event has been dispatched with the window open.",
             ));
         } else {
-            self.inspector.append(&dim_label(
+            let warning = Label::new(Some(
                 "No subscription matched. The event was recorded and dropped.",
             ));
+            warning.add_css_class("note");
+            warning.add_css_class("warn");
+            warning.set_wrap(true);
+            warning.set_xalign(0.0);
+            self.inspector.append(&warning);
         }
-
-        self.inspector.append(&section_label("Effects"));
-        if children.is_empty() {
-            self.inspector
-                .append(&dim_label("This event emitted nothing further."));
+        if !traces.is_empty() || !subscriptions.is_empty() {
+            self.inspector.append(&wrapped_note(
+                "Click a handler to filter the stream to its subscription pattern.",
+            ));
         }
 
         self.inspector.append(&section_label("Data"));
-        let pretty = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
-        self.inspector.append(&text_view(&pretty, 190));
+        let json = JsonView::new(200);
+        json.set_value(&payload);
+        self.inspector.append(&json.root);
+
+        let actions_row = hbox(6);
+        let copy_data = button("Copy data", "small");
+        {
+            let window = self.window.clone();
+            let text =
+                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+            let actions = self.actions.clone();
+            copy_data.connect_clicked(move |_| {
+                window.clipboard().set_text(&text);
+                let _ = actions.send(Action::Toast("Event data copied".to_string()));
+            });
+        }
+        actions_row.append(&copy_data);
+        let copy_name = button("Copy event", "small");
+        {
+            let window = self.window.clone();
+            let name = name.clone();
+            let actions = self.actions.clone();
+            copy_name.connect_clicked(move |_| {
+                window.clipboard().set_text(&name);
+                let _ = actions.send(Action::Toast("Event name copied".to_string()));
+            });
+        }
+        actions_row.append(&copy_name);
+        let stream_filter = button("Filter family", "small");
+        {
+            let family = model::event_family(&name);
+            let actions = self.actions.clone();
+            stream_filter.connect_clicked(move |_| {
+                let _ = actions.send(Action::FilterStream(format!("bread.{family}.**")));
+            });
+        }
+        actions_row.append(&stream_filter);
+        if let Some(module) = handler_modules.first() {
+            let open = button("Open module", "small");
+            let module = module.clone();
+            let actions = self.actions.clone();
+            open.connect_clicked(move |_| {
+                let _ = actions.send(Action::OpenModule(module.clone()));
+            });
+            actions_row.append(&open);
+        }
+        self.inspector.append(&actions_row);
 
         self.inspector.append(&section_label("Event id"));
         let id_label = Label::new(Some(&event_id));
@@ -621,9 +870,8 @@ impl StreamView {
         id_label.set_selectable(true);
         id_label.set_wrap(true);
         self.inspector.append(&id_label);
-
-        let actions_row = hbox(6);
         let copy = button("Copy id", "small");
+        copy.set_halign(Align::Start);
         {
             let window = self.window.clone();
             let event_id = event_id.clone();
@@ -633,19 +881,53 @@ impl StreamView {
                 let _ = actions.send(Action::Toast("Event id copied".to_string()));
             });
         }
-        actions_row.append(&copy);
-        let stream_filter = button("Filter to family", "small");
-        {
-            let family = model::event_family(&name);
-            let actions = self.actions.clone();
-            stream_filter.connect_clicked(move |_| {
-                let _ = actions.send(Action::FilterStream(format!("bread.{family}.**")));
-            });
-        }
-        actions_row.append(&stream_filter);
-        self.inspector.append(&actions_row);
+        self.inspector.append(&copy);
     }
 
+    fn handler_button(
+        &self,
+        module: &str,
+        pattern: &str,
+        trailing: &str,
+        ok: bool,
+        status: &str,
+    ) -> Button {
+        let button = Button::new();
+        button.add_css_class("handler-row");
+        button.set_tooltip_text(Some(&format!("Filter the stream to {pattern}")));
+        let row = vbox(1);
+        let top = hbox(6);
+        top.append(&mono(module));
+        let class = match status {
+            "loaded" => "green",
+            "degraded" | "load_error" => "yellow",
+            _ => "",
+        };
+        if !class.is_empty() {
+            top.append(&badge(status, class));
+        }
+        top.append(&horizontal_spacer());
+        let trailing = Label::new(Some(trailing));
+        trailing.add_css_class("duration");
+        if !ok {
+            trailing.add_css_class("slow");
+        }
+        top.append(&trailing);
+        row.append(&top);
+        let pattern_label = Label::new(Some(pattern));
+        pattern_label.add_css_class("handler-pattern");
+        pattern_label.set_xalign(0.0);
+        pattern_label.set_ellipsize(pango::EllipsizeMode::End);
+        pattern_label.set_max_width_chars(36);
+        row.append(&pattern_label);
+        button.set_child(Some(&row));
+        let actions = self.actions.clone();
+        let pattern = pattern.to_string();
+        button.connect_clicked(move |_| {
+            let _ = actions.send(Action::FilterStream(pattern.clone()));
+        });
+        button
+    }
     fn chain_button(
         &self,
         shared: &Shared,
@@ -662,7 +944,7 @@ impl StreamView {
         let row = hbox(6);
         row.append(&label(if current { "●" } else { "↳" }));
         let name_label = mono(name);
-        ellipsize(&name_label, 40);
+        ellipsize(&name_label, 34);
         row.append(&name_label);
         row.append(&horizontal_spacer());
         let role = Label::new(Some(role));
@@ -698,26 +980,12 @@ impl StreamView {
     }
 }
 
-fn handler_row(module: &str, pattern: &str, trailing: &str, ok: bool) -> GBox {
-    let row = vbox(1);
-    row.add_css_class("handler-row");
-    let top = hbox(6);
-    top.append(&mono(module));
-    top.append(&horizontal_spacer());
-    let trailing = Label::new(Some(trailing));
-    trailing.add_css_class("duration");
-    if !ok {
-        trailing.add_css_class("slow");
-    }
-    top.append(&trailing);
-    row.append(&top);
-    let pattern = Label::new(Some(pattern));
-    pattern.add_css_class("handler-pattern");
-    pattern.set_xalign(0.0);
-    pattern.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    pattern.set_max_width_chars(44);
-    row.append(&pattern);
-    row
+fn wrapped_note(text: &str) -> Label {
+    let label = dim_label(text);
+    label.set_wrap(true);
+    label.set_max_width_chars(30);
+    label.set_xalign(0.0);
+    label
 }
 
 fn draw_volume(cr: &gtk4::cairo::Context, width: i32, height: i32, shared: &Shared) {

@@ -1,7 +1,7 @@
 //! Module registry: cards for status, subscriptions, store, and errors.
 
 use gtk4::prelude::*;
-use gtk4::{pango, Align, Box as GBox, Button, FlowBox, Label, ScrolledWindow};
+use gtk4::{pango, Align, Box as GBox, Button, FlowBox, Label, ScrolledWindow, SearchEntry};
 
 use super::{
     button, dim_label, ellipsize, hbox, horizontal_spacer, label, page_sub, section_label,
@@ -31,6 +31,20 @@ impl ModulesView {
         ));
         header.append(&titles);
         header.append(&horizontal_spacer());
+        let search = SearchEntry::new();
+        search.set_placeholder_text(Some("filter modules"));
+        search.set_width_chars(15);
+        search.set_max_width_chars(22);
+        search.set_valign(Align::Center);
+        {
+            let shared = shared.clone();
+            let actions = actions.clone();
+            search.connect_search_changed(move |entry| {
+                shared.borrow_mut().module_search = entry.text().to_string();
+                let _ = actions.send(Action::RefreshModules);
+            });
+        }
+        header.append(&search);
         let reload = button("Reload all", "small");
         {
             let actions = actions.clone();
@@ -190,7 +204,47 @@ fn render_cards(
     }
     let state = shared.borrow();
     let selected = state.selected_module.clone();
-    for module in &state.modules {
+    let query = state.module_search.trim().to_lowercase();
+    let mut modules: Vec<&crate::model::Module> = state
+        .modules
+        .iter()
+        .filter(|module| {
+            if query.is_empty() {
+                return true;
+            }
+            module.name.to_lowercase().contains(&query)
+                || module
+                    .last_error
+                    .as_deref()
+                    .map(|error| error.to_lowercase().contains(&query))
+                    .unwrap_or(false)
+                || state.subscriptions.iter().any(|entry| {
+                    entry.module.as_deref() == Some(module.name.as_str())
+                        && entry.pattern.to_lowercase().contains(&query)
+                })
+        })
+        .collect();
+    modules.sort_by(|a, b| {
+        let rank = |module: &crate::model::Module| {
+            if module.is_degraded() {
+                0
+            } else if module.status == "loaded" {
+                1
+            } else if module.status == "disabled" {
+                3
+            } else {
+                2
+            }
+        };
+        rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
+    });
+    if modules.is_empty() {
+        let empty = super::dim_label("No module matches the filter.");
+        cards.insert(&empty, -1);
+        render_detail(detail, actions, shared);
+        return;
+    }
+    for module in modules {
         let card = Button::new();
         card.add_css_class("module-card");
         card.set_hexpand(true);
@@ -210,7 +264,9 @@ fn render_cards(
         ellipsize(&name, 36);
         name.set_hexpand(true);
         top.append(&name);
-        let kind = if module.builtin {
+        let kind = if module.is_degraded() {
+            "degraded"
+        } else if module.builtin {
             "builtin"
         } else if module.ungated {
             "ungated"
@@ -219,7 +275,11 @@ fn render_cards(
         };
         top.append(&super::badge(
             kind,
-            if module.ungated { "yellow" } else { "" },
+            if module.is_degraded() || module.ungated {
+                "yellow"
+            } else {
+                ""
+            },
         ));
         content.append(&top);
 
@@ -401,8 +461,10 @@ fn render_detail(detail: &GBox, actions: &std::sync::mpsc::Sender<Action>, share
         panel.append(&dim_label("No event subscriptions registered."));
     }
     for entry in &subs {
-        let row = vbox(1);
+        let row = Button::new();
         row.add_css_class("handler-row");
+        row.set_tooltip_text(Some("Filter the stream to this pattern"));
+        let content = vbox(2);
         let top = hbox(6);
         let pattern = Label::new(Some(&entry.pattern));
         pattern.add_css_class("handler-name");
@@ -413,7 +475,7 @@ fn render_detail(detail: &GBox, actions: &std::sync::mpsc::Sender<Action>, share
         let count = Label::new(Some(&format!("{}", entry.count)));
         count.add_css_class("duration");
         top.append(&count);
-        row.append(&top);
+        content.append(&top);
         let meta = hbox(6);
         meta.append(&super::badge(&entry.kind, "blue"));
         if entry.once {
@@ -431,7 +493,13 @@ fn render_detail(detail: &GBox, actions: &std::sync::mpsc::Sender<Action>, share
             last.add_css_class("faint");
             meta.append(&last);
         }
-        row.append(&meta);
+        content.append(&meta);
+        row.set_child(Some(&content));
+        let actions = actions.clone();
+        let pattern = entry.pattern.clone();
+        row.connect_clicked(move |_| {
+            let _ = actions.send(Action::FilterStream(pattern.clone()));
+        });
         panel.append(&row);
     }
 

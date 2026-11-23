@@ -6,11 +6,16 @@
 
 pub mod ipc;
 pub mod model;
+pub mod session;
 pub mod style;
 pub mod ui;
 
 use gtk4::{Application, ApplicationWindow};
 
-pub fn build_window(app: &Application, initial_view: Option<ui::View>) -> ApplicationWindow {
-    ui::build_window(app, initial_view)
+pub fn build_window(
+    app: &Application,
+    initial_view: Option<ui::View>,
+    initial_tab: Option<String>,
+) -> ApplicationWindow {
+    ui::build_window(app, initial_view, initial_tab)
 }

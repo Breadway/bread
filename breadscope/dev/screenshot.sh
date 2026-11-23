@@ -53,11 +53,15 @@ if [ ! -S "$T/runtime/wayland-1" ]; then
     exit 1
 fi
 
-env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
+EXTRA=()
+if [ -n "${TAB:-}" ]; then
+    EXTRA+=(--tab "$TAB")
+fi
+dbus-run-session -- env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
     WAYLAND_DISPLAY=wayland-1 GDK_BACKEND=wayland GTK_USE_PORTAL=0 \
     HOME="$T/home" XDG_STATE_HOME="$T/state" XDG_CONFIG_HOME="$T/cfg" \
     XDG_CACHE_HOME="$T/cache" XDG_RUNTIME_DIR="$T/runtime" \
-    "$BIN" --view "$VIEW" >"$T/app.log" 2>&1 &
+    "$BIN" --view "$VIEW" "${EXTRA[@]}" >"$T/app.log" 2>&1 &
 PIDS+=($!)
 
 sleep "${SHOT_WAIT:-6}"
