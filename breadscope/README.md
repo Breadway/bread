@@ -9,6 +9,13 @@ Unix socket as `bread`, never opens a network listener, and never edits runtime
 state. The only writes are the documented `emit`, `trace.set`, and
 `modules.reload` IPC methods.
 
+![Event stream](docs/screenshots/stream.png)
+
+![Interaction map](docs/screenshots/flow.png)
+
+Screenshots use the development fake daemon; the stream-real-daemon.png image
+is the same window against a real `breadd`.
+
 ## Run
 
 ```bash
