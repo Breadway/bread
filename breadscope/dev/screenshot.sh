@@ -25,10 +25,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$T/runtime" "$T/home" "$T/state" "$T/cfg" "$T/cache"
+mkdir -p "$T/runtime" "$T/home" "$T/state" "$T/cfg" "$T/cache" "$T/state/breadscope"
 chmod 700 "$T/runtime"
-cat > "$T/sway.conf" <<'EOF'
-output HEADLESS-1 resolution 1400x900
+if [ -n "${SESSION:-}" ]; then
+    printf '%s' "$SESSION" > "$T/state/breadscope/session.json"
+fi
+cat > "$T/sway.conf" <<EOF
+output HEADLESS-1 resolution ${SHOT_WIDTH:-1400}x${SHOT_HEIGHT:-900}
 default_border none
 gaps inner 0
 gaps outer 0

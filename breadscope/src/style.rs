@@ -572,6 +572,66 @@ progressbar.path-progress progress {
 }
 dropdown.window-filter > button { min-height: 22px; }
 
+/* Readability: body text and metadata must survive the fixed dark base. */
+.dim { color: alpha(@fg, 0.72); }
+.faint { color: alpha(@fg, 0.54); }
+.note { color: alpha(@fg, 0.66); }
+.section-label { color: alpha(@fg, 0.58); }
+.top-meta { color: alpha(@fg, 0.60); }
+.nav-row { color: alpha(@fg, 0.68); }
+.event-summary { color: alpha(@fg, 0.76); }
+.event-time { color: alpha(@fg, 0.64); }
+.handler-pattern { color: alpha(@fg, 0.62); }
+.status-text { color: alpha(@fg, 0.72); font-size: 10.5px; }
+.status-text.ok { color: @green; }
+.status-text.bad { color: @red; }
+.badge { color: alpha(@fg, 0.72); }
+.json-view text { color: alpha(@fg, 0.90); font-size: 11px; }
+.json-view { background-color: #0f0f0f; border-color: alpha(@fg, 0.13); }
+
+.table-header {
+    background-color: shade(@bg, 0.96);
+    border-bottom: 1px solid alpha(@fg, 0.11);
+    padding: 6px 10px 5px;
+}
+.col-head {
+    font-size: 9px;
+    letter-spacing: 1.1px;
+    color: alpha(@fg, 0.64);
+}
+button.event-row {
+    padding: 5px 10px;
+    min-height: 36px;
+    border-bottom: 1px solid alpha(@fg, 0.065);
+}
+button.event-row.alt { background-color: alpha(@fg, 0.024); }
+button.event-row.selected {
+    background-image: linear-gradient(90deg, alpha(@accent, 0.20), alpha(@accent, 0.06));
+    box-shadow: inset 3px 0 0 @accent;
+    padding-left: 10px;
+    border-left: 0;
+}
+button.event-row.selected .event-name { color: #fff1d6; }
+.event-name { font-size: 12.5px; color: #f2f2f2; }
+.event-summary { font-size: 10.8px; }
+.event-id { font-family: monospace; font-size: 8.5px; color: alpha(@fg, 0.48); }
+.tree-gutter { font-family: monospace; font-size: 10px; color: alpha(@fg, 0.38); }
+.source-text { font-family: monospace; font-size: 10px; }
+.handler-count { font-family: monospace; font-size: 9px; color: @green; }
+.handler-count.zero { color: alpha(@fg, 0.34); }
+button.group-row {
+    padding: 7px 10px;
+    min-height: 40px;
+    border-bottom: 1px solid alpha(@fg, 0.07);
+    background-color: transparent;
+    background-image: none;
+    border-radius: 0;
+}
+button.group-row.alt { background-color: alpha(@fg, 0.024); }
+button.group-row:hover { background-color: alpha(@accent, 0.07); }
+button.group-row.selected { background-color: alpha(@accent, 0.13); box-shadow: inset 3px 0 0 @accent; }
+.group-count { font-family: monospace; font-size: 11px; font-weight: 700; color: @accent; }
+
 "#;
 
 /// Apply the app sheet globally as well as per window. The per-window bind

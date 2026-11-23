@@ -9,7 +9,9 @@ Unix socket as `bread`, never opens a network listener, and never edits runtime
 state. The only writes are the documented `emit`, `trace.set`, and
 `modules.reload` IPC methods.
 
-![Event stream](docs/screenshots/stream.png)
+![Grouped event stream](docs/screenshots/stream.png)
+
+![Chronological event stream](docs/screenshots/stream-flat.png)
 
 ![Interaction map](docs/screenshots/flow.png)
 
@@ -40,10 +42,15 @@ automatically if the daemon restarts.
 ## Views
 
 - **Event stream**: live subscription plus a replay of the last two minutes,
-  pattern and source filters with live counts, time windows (all, 1m, 5m, 15m),
-  follow mode, flat or causal ordering, a volume strip, and an inspector with
-  the causal chain, matching subscriptions, exact handler timings, downstream
-  effects, and a syntax-highlighted payload.
+  pattern and source filters with live counts, and time windows (all, 1m, 5m,
+  15m). The default **Grouped** table shows one row per event type with its
+  instance count, latest summary, source, and handler count; toggle it off for
+  the chronological table with causal indentation and per-event IDs. **Raw**
+  and **Legacy** chips reveal the `bread.hyprland.event` firehose and the
+  compatibility `bread.hyprland.*` names, both hidden by default. The inspector
+  shows the causal chain, matching subscriptions, exact handler timings,
+  downstream effects, and a syntax-highlighted payload. An event-rate sparkline
+  and follow mode sit above the table.
 - **Interaction map**: sources to event families to modules, with edge width by
   observed volume and a selectable time window. Hover a node for its count,
   click to isolate its paths, and click a ranked path to isolate its module.
@@ -77,12 +84,16 @@ fabricated number.
 - `Up`/`Down`, `PgUp`/`PgDn`, `Home`/`End`: move the event selection. Selecting
   an event turns off follow mode and scrolls the row into view.
 - `f`: toggle follow mode.
+- `g`: toggle the grouped event table.
+- `r`: show or hide raw Hyprland events.
+- `l`: show or hide legacy Hyprland event names.
 - `t`: toggle handler tracing.
 - `Esc`: clear the filter and release the selection.
 - `?`: show the full shortcut list.
 
-Window size, view, filter, source, ordering, follow mode, and time windows are
-remembered in `~/.local/state/breadscope/session.json`.
+Window size, view, filter, source, ordering, follow mode, time windows, and the
+Grouped/Raw/Legacy toggles are remembered in
+`~/.local/state/breadscope/session.json`.
 
 The emit dialog mirrors breadd's reserved-domain guard: a manual emit cannot
 forge `bread.power.*`, `bread.hyprland.*`, and the other adapter-owned domains,

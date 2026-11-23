@@ -25,8 +25,8 @@ fi
 T="$(mktemp -d)"
 mkdir -p "$T/runtime" "$T/home" "$T/state" "$T/cfg" "$T/cache"
 chmod 700 "$T/runtime"
-cat > "$T/sway.conf" <<'EOF'
-output HEADLESS-1 resolution 1400x900
+cat > "$T/sway.conf" <<EOF
+output HEADLESS-1 resolution ${SHOT_WIDTH:-1400}x${SHOT_HEIGHT:-900}
 default_border none
 gaps inner 0
 gaps outer 0

@@ -72,6 +72,7 @@ pub enum Action {
     SetTrace(bool),
     ReloadModules,
     FilterStream(String),
+    ShowInstances(String),
     RefreshStream,
     RefreshFlow,
     RefreshModules,
@@ -90,6 +91,14 @@ pub struct AppState {
     pub filter: String,
     pub source: String,
     pub causal: bool,
+    /// Summary mode: one row per event type, with a count.
+    pub grouped: bool,
+    /// Hide the raw `bread.hyprland.event` firehose unless asked for.
+    pub hide_raw: bool,
+    /// Hide the legacy `bread.hyprland.*` compatibility names when the
+    /// canonical `bread.window.*` / `bread.monitor.*` / `bread.workspace.*`
+    /// events carry the same signal.
+    pub hide_legacy: bool,
     /// Keep the newest visible event selected and pinned to the bottom.
     pub follow_tail: bool,
     /// Event age filter in minutes; 0 means the whole buffer.
@@ -129,6 +138,9 @@ impl Default for AppState {
             filter: String::new(),
             source: "all".to_string(),
             causal: true,
+            grouped: true,
+            hide_raw: true,
+            hide_legacy: true,
             follow_tail: true,
             window_minutes: 0,
             flow_window_minutes: 0,
@@ -284,6 +296,22 @@ impl AppState {
         }
     }
 
+    pub fn is_raw(event: &BreadEvent) -> bool {
+        event.event == "bread.hyprland.event"
+    }
+
+    pub fn is_legacy(event: &BreadEvent) -> bool {
+        event.event.starts_with("bread.hyprland.") && !Self::is_raw(event)
+    }
+
+    pub fn raw_is_visible(&self) -> bool {
+        !self.hide_raw || self.filter.contains("hyprland.event")
+    }
+
+    pub fn legacy_is_visible(&self) -> bool {
+        !self.hide_legacy || self.filter.contains("hyprland.")
+    }
+
     pub fn in_window(&self, event: &BreadEvent) -> bool {
         if self.window_minutes == 0 {
             return true;
@@ -318,7 +346,11 @@ impl AppState {
     }
 
     pub fn matches_filter(&self, event: &BreadEvent) -> bool {
-        self.in_window(event) && self.source_matches(event) && self.passes_text_filter(event)
+        self.in_window(event)
+            && self.source_matches(event)
+            && self.passes_text_filter(event)
+            && (self.raw_is_visible() || !Self::is_raw(event))
+            && (self.legacy_is_visible() || !Self::is_legacy(event))
     }
 
     /// Counts per source chip for the current text filter and time window,
@@ -327,7 +359,11 @@ impl AppState {
         let mut counts = std::collections::HashMap::new();
         let mut total = 0usize;
         for event in &self.events {
-            if !self.in_window(event) || !self.passes_text_filter(event) {
+            if !self.in_window(event)
+                || !self.passes_text_filter(event)
+                || (!self.raw_is_visible() && Self::is_raw(event))
+                || (!self.legacy_is_visible() && Self::is_legacy(event))
+            {
                 continue;
             }
             total += 1;
@@ -337,12 +373,33 @@ impl AppState {
         (total, counts)
     }
 
+    pub fn legacy_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| {
+                self.in_window(event) && self.passes_text_filter(event) && Self::is_legacy(event)
+            })
+            .count()
+    }
+
+    pub fn raw_count(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|event| {
+                self.in_window(event) && self.passes_text_filter(event) && Self::is_raw(event)
+            })
+            .count()
+    }
+
     pub fn session(&self) -> Session {
         Session {
             view: Some(self.view.id().to_string()),
             filter: Some(self.filter.clone()),
             source: Some(self.source.clone()),
             causal: Some(self.causal),
+            grouped: Some(self.grouped),
+            hide_raw: Some(self.hide_raw),
+            hide_legacy: Some(self.hide_legacy),
             follow_tail: Some(self.follow_tail),
             window_minutes: Some(self.window_minutes),
             flow_window_minutes: Some(self.flow_window_minutes),
@@ -363,6 +420,15 @@ impl AppState {
         }
         if let Some(causal) = session.causal {
             self.causal = causal;
+        }
+        if let Some(grouped) = session.grouped {
+            self.grouped = grouped;
+        }
+        if let Some(hide_raw) = session.hide_raw {
+            self.hide_raw = hide_raw;
+        }
+        if let Some(hide_legacy) = session.hide_legacy {
+            self.hide_legacy = hide_legacy;
         }
         if let Some(follow) = session.follow_tail {
             self.follow_tail = follow;
@@ -845,6 +911,19 @@ impl Hub {
                 self.stream.set_filter(&pattern);
                 self.switch_view(View::Stream);
             }
+            Action::ShowInstances(event_name) => {
+                {
+                    let mut state = self.shared.borrow_mut();
+                    state.filter = event_name.clone();
+                    state.grouped = false;
+                    state.causal = false;
+                    state.selection_locked = false;
+                    state.follow_tail = true;
+                }
+                self.stream.set_filter(&event_name);
+                self.stream.set_grouped(false);
+                self.switch_view(View::Stream);
+            }
             Action::RefreshStream => {
                 self.stream.refresh(&self.shared);
                 self.statusbar.refresh(&self.shared);
@@ -1272,6 +1351,25 @@ pub fn build_window(
                     hub_for_keys.handle_action(Action::SetTrace(enabled));
                     glib::Propagation::Stop
                 }
+                Key::g => {
+                    let grouped = !hub_for_keys.shared.borrow().grouped;
+                    hub_for_keys.shared.borrow_mut().grouped = grouped;
+                    hub_for_keys.stream.set_grouped(grouped);
+                    let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    glib::Propagation::Stop
+                }
+                Key::r => {
+                    let hide = !hub_for_keys.shared.borrow().hide_raw;
+                    hub_for_keys.shared.borrow_mut().hide_raw = hide;
+                    let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    glib::Propagation::Stop
+                }
+                Key::l => {
+                    let hide = !hub_for_keys.shared.borrow().hide_legacy;
+                    hub_for_keys.shared.borrow_mut().hide_legacy = hide;
+                    let _ = hub_for_keys.actions.send(Action::RefreshStream);
+                    glib::Propagation::Stop
+                }
                 Key::Up => {
                     if hub_for_keys.current.get() == View::Stream
                         && hub_for_keys.stream.select_offset(&hub_for_keys.shared, -1)
@@ -1465,7 +1563,7 @@ fn show_shortcuts(parent: &ApplicationWindow) {
     let grid = gtk4::Grid::new();
     grid.set_row_spacing(7);
     grid.set_column_spacing(14);
-    let rows: [(&str, &str); 13] = [
+    let rows: [(&str, &str); 16] = [
         ("Ctrl+F  /  /", "focus the event filter"),
         ("F2  /  Ctrl+Shift+E", "open the emit dialog"),
         ("Ctrl+Enter", "publish from the emit dialog"),
@@ -1474,6 +1572,9 @@ fn show_shortcuts(parent: &ApplicationWindow) {
         ("PgUp  /  PgDn", "move ten events"),
         ("Home  /  End", "first or newest event"),
         ("f", "follow the newest event"),
+        ("g", "toggle grouped event table"),
+        ("r", "show or hide raw Hyprland events"),
+        ("l", "show or hide legacy Hyprland names"),
         ("t", "toggle handler tracing"),
         ("Esc", "clear the filter and release the selection"),
         ("?", "show this list"),
@@ -1676,6 +1777,9 @@ mod tests {
             source: Some("power".into()),
             causal: Some(false),
             follow_tail: Some(false),
+            grouped: Some(false),
+            hide_raw: Some(true),
+            hide_legacy: Some(true),
             window_minutes: Some(5),
             flow_window_minutes: Some(15),
             width: Some(1400),

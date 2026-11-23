@@ -21,6 +21,12 @@ pub struct Session {
     #[serde(default)]
     pub follow_tail: Option<bool>,
     #[serde(default)]
+    pub grouped: Option<bool>,
+    #[serde(default)]
+    pub hide_raw: Option<bool>,
+    #[serde(default)]
+    pub hide_legacy: Option<bool>,
+    #[serde(default)]
     pub window_minutes: Option<u64>,
     #[serde(default)]
     pub flow_window_minutes: Option<u64>,
@@ -77,6 +83,9 @@ mod tests {
             source: Some("udev".into()),
             causal: Some(false),
             follow_tail: Some(true),
+            grouped: Some(true),
+            hide_raw: Some(true),
+            hide_legacy: Some(true),
             window_minutes: Some(5),
             flow_window_minutes: Some(15),
             width: Some(1400),
