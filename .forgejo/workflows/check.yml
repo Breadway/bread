@@ -68,6 +68,20 @@ jobs:
       - name: breadscope test
         run: cd "$BREAD_CI_JOB_DIR/src" && bash ci/build.sh cargo test --manifest-path breadscope/Cargo.toml --locked
 
+      - name: diagnose copyback
+        run: |
+          set -euo pipefail
+          cd "$BREAD_CI_JOB_DIR/src"
+          echo "job dir: $BREAD_CI_JOB_DIR"
+          echo "cwd: $(pwd)"
+          echo "--- before no-op copyback ---"
+          ls -la target/release 2>&1 | head -20 || true
+          find "$BREAD_CI_JOB_DIR" -maxdepth 5 -type f -name breadd -printf '%p %s\n' 2>/dev/null | head -10 || true
+          bash ci/build.sh true
+          echo "--- after no-op copyback ---"
+          ls -la target/release 2>&1 | head -20 || true
+          find "$BREAD_CI_JOB_DIR" -maxdepth 5 -type f -name breadd -printf '%p %s\n' 2>/dev/null | head -10 || true
+
       - name: clean owned checkout
         if: always()
         shell: bash
