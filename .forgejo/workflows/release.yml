@@ -8,6 +8,7 @@ jobs:
   build:
     if: ${{ !contains(github.ref_name, '-rc.') }}
     runs-on: [self-hosted]
+    timeout-minutes: 120
     steps:
       - name: checkout
         shell: bash

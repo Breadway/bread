@@ -214,9 +214,9 @@ async fn emit_without_source_is_tagged_manual_not_system() -> Result<()> {
         .await?;
 
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     // The subscribe ack is written to the client before the server task
@@ -324,9 +324,9 @@ async fn emit_with_known_app_source_routes_through_normalizer() -> Result<()> {
         .await?;
 
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     harness
@@ -343,7 +343,10 @@ async fn emit_with_known_app_source_routes_through_normalizer() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut received: Option<Value> = None;
     while Instant::now() < deadline {
-        let Some(line) = reader.next_line().await? else {
+        let Some(line) = timeout(Duration::from_secs(5), reader.next_line())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for bread.clip.copied"))??
+        else {
             break;
         };
         let event: Value = serde_json::from_str(&line)?;
@@ -1108,7 +1111,7 @@ async fn event_stream_filter_excludes_non_matching_events() -> Result<()> {
 
     let mut reader = BufReader::new(read_half).lines();
     // Consume the ack line.
-    reader.next_line().await?;
+    common::next_line_bounded(&mut reader, "subscribe ack", Duration::from_secs(5)).await?;
 
     // Emit one matching and one non-matching event.
     harness
@@ -1121,7 +1124,10 @@ async fn event_stream_filter_excludes_non_matching_events() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut matched = false;
     while Instant::now() < deadline {
-        let Some(line) = reader.next_line().await? else {
+        let Some(line) =
+            common::next_line_bounded(&mut reader, "matching event", Duration::from_secs(5))
+                .await?
+        else {
             break;
         };
         let event: Value = serde_json::from_str(&line)?;
@@ -1158,7 +1164,13 @@ async fn multiple_concurrent_clients_each_get_response() -> Result<()> {
                 .write_all(format!("{}\n", serde_json::to_string(&req)?).as_bytes())
                 .await?;
             let mut lines = BufReader::new(read_half).lines();
-            let line = lines.next_line().await?.ok_or_else(|| anyhow!("eof"))?;
+            let line = common::next_line_bounded(
+                &mut lines,
+                "concurrent ping response",
+                Duration::from_secs(60),
+            )
+            .await?
+            .ok_or_else(|| anyhow!("eof"))?;
             let parsed: Value = serde_json::from_str(&line)?;
             assert_eq!(
                 parsed.get("id").and_then(Value::as_str),
@@ -1200,8 +1212,7 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
 
     let mut reader = BufReader::new(read_half).lines();
 
-    let ack = reader
-        .next_line()
+    let ack = common::next_line_bounded(&mut reader, "subscribe ack", Duration::from_secs(5))
         .await?
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
     let ack_json: Value = serde_json::from_str(&ack)?;
@@ -1226,7 +1237,9 @@ async fn events_stream_receives_emitted_events() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut got = false;
     while Instant::now() < deadline {
-        let Some(line) = reader.next_line().await? else {
+        let Some(line) =
+            common::next_line_bounded(&mut reader, "event stream", Duration::from_secs(5)).await?
+        else {
             break;
         };
         let event: Value = serde_json::from_str(&line)?;
@@ -1282,8 +1295,7 @@ async fn event_causality_chain_threads_caused_by_across_handlers() -> Result<()>
         .await?;
 
     let mut reader = BufReader::new(read_half).lines();
-    let ack = reader
-        .next_line()
+    let ack = common::next_line_bounded(&mut reader, "subscribe ack", Duration::from_secs(5))
         .await?
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
     let ack_json: Value = serde_json::from_str(&ack)?;
@@ -1308,7 +1320,9 @@ async fn event_causality_chain_threads_caused_by_across_handlers() -> Result<()>
     let mut events: HashMap<String, Value> = HashMap::new();
     let deadline = Instant::now() + Duration::from_secs(5);
     while events.len() < 4 && Instant::now() < deadline {
-        let Some(line) = reader.next_line().await? else {
+        let Some(line) =
+            common::next_line_bounded(&mut reader, "event stream", Duration::from_secs(5)).await?
+        else {
             break;
         };
         let event: Value = serde_json::from_str(&line)?;
@@ -1850,9 +1864,9 @@ async fn bug_marker_is_stored_and_published_on_the_bus() -> Result<()> {
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     let res = harness
@@ -1962,9 +1976,9 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     // A live breadclip-named child is the tracked app instance.
@@ -2162,7 +2176,7 @@ async fn configured_excluded_app_never_tracks_or_publishes_a_freeze() -> Result<
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader.next_line().await?;
+    common::next_line_bounded(&mut reader, "bug event ack", Duration::from_secs(5)).await?;
     harness
         .send_request(
             "bug.heartbeat",
@@ -2195,7 +2209,7 @@ async fn frozen_dead_process_is_retired_and_next_instance_is_not_recovery() -> R
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader.next_line().await?;
+    common::next_line_bounded(&mut reader, "bug event ack", Duration::from_secs(5)).await?;
 
     // A real child whose executable matches the bread app.
     let mut child = harness.spawn_app_child("clip").await?;
@@ -2295,7 +2309,7 @@ async fn bug_reload_drops_an_excluded_app_from_freeze_tracking() -> Result<()> {
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader.next_line().await?;
+    common::next_line_bounded(&mut reader, "bug event ack", Duration::from_secs(5)).await?;
 
     let mut child = harness.spawn_app_child("clip").await?;
     let pid = child.id();
@@ -2708,10 +2722,17 @@ enabled = false
             .await?;
 
         let mut lines = BufReader::new(read_half).lines();
-        let line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("missing ipc response"))?;
+        // A wedged daemon must fail this test, not hold the shared cargo
+        // build lock and the CI runner forever (INFRA-100). 60s stays above
+        // module_host::READY_TIMEOUT (45s) so a slow out-of-process reload is
+        // not misreported as an IPC hang.
+        let line = common::next_line_bounded(
+            &mut lines,
+            &format!("ipc response for {method}"),
+            Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("missing ipc response"))?;
         let parsed: Value = serde_json::from_str(&line)?;
 
         if let Some(err) = parsed.get("error").and_then(Value::as_str) {
@@ -2778,7 +2799,9 @@ enabled = false
             .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
             .await?;
         let mut reader = BufReader::new(read_half).lines();
-        let _ack = reader.next_line().await?;
+        let _ack =
+            common::next_line_bounded(&mut reader, "result event ack", Duration::from_secs(5))
+                .await?;
 
         self.send_request("emit", json!({ "event": "test.trigger", "data": {} }))
             .await?;

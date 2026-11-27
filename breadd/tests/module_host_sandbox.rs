@@ -202,10 +202,13 @@ enabled = false
             .await?;
 
         let mut lines = BufReader::new(read_half).lines();
-        let line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("missing ipc response"))?;
+        let line = common::next_line_bounded(
+            &mut lines,
+            "module-host ipc response",
+            Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("missing ipc response"))?;
         let parsed: Value = serde_json::from_str(&line)?;
 
         if let Some(err) = parsed.get("error").and_then(Value::as_str) {
@@ -408,7 +411,8 @@ return M
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    let _ack = reader.next_line().await?;
+    let _ack =
+        common::next_line_bounded(&mut reader, "test event ack", Duration::from_secs(5)).await?;
 
     harness
         .send_request("emit", json!({ "event": "test.trigger", "data": {} }))
@@ -507,7 +511,9 @@ return M
         )
         .await?;
     let mut crash_reader = BufReader::new(crash_read).lines();
-    let _ack = crash_reader.next_line().await?;
+    let _ack =
+        common::next_line_bounded(&mut crash_reader, "crash event ack", Duration::from_secs(5))
+            .await?;
 
     let victim_pid = harness.find_module_host_pid("victim")?;
     let kill_status = Command::new("kill")
@@ -540,7 +546,12 @@ return M
         )
         .await?;
     let mut control_reader = BufReader::new(control_read).lines();
-    let _ack = control_reader.next_line().await?;
+    let _ack = common::next_line_bounded(
+        &mut control_reader,
+        "control event ack",
+        Duration::from_secs(5),
+    )
+    .await?;
 
     harness
         .send_request(
