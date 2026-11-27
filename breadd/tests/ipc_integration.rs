@@ -214,9 +214,9 @@ async fn emit_without_source_is_tagged_manual_not_system() -> Result<()> {
         .await?;
 
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     // The subscribe ack is written to the client before the server task
@@ -324,9 +324,9 @@ async fn emit_with_known_app_source_routes_through_normalizer() -> Result<()> {
         .await?;
 
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     harness
@@ -343,7 +343,10 @@ async fn emit_with_known_app_source_routes_through_normalizer() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut received: Option<Value> = None;
     while Instant::now() < deadline {
-        let Some(line) = reader.next_line().await? else {
+        let Some(line) = timeout(Duration::from_secs(5), reader.next_line())
+            .await
+            .map_err(|_| anyhow!("timed out waiting for bread.clip.copied"))??
+        else {
             break;
         };
         let event: Value = serde_json::from_str(&line)?;
@@ -1850,9 +1853,9 @@ async fn bug_marker_is_stored_and_published_on_the_bus() -> Result<()> {
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     let res = harness
@@ -1962,9 +1965,9 @@ async fn silent_app_with_live_process_is_reported_frozen_then_recovered() -> Res
         .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
         .await?;
     let mut reader = BufReader::new(read_half).lines();
-    reader
-        .next_line()
-        .await?
+    timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .map_err(|_| anyhow!("timed out waiting for subscribe ack"))??
         .ok_or_else(|| anyhow!("missing subscribe ack"))?;
 
     // A live breadclip-named child is the tracked app instance.
@@ -2708,9 +2711,11 @@ enabled = false
             .await?;
 
         let mut lines = BufReader::new(read_half).lines();
-        let line = lines
-            .next_line()
-            .await?
+        // A wedged daemon must fail this test, not hold the shared cargo
+        // build lock and the CI runner forever (INFRA-100).
+        let line = timeout(Duration::from_secs(30), lines.next_line())
+            .await
+            .map_err(|_| anyhow!("ipc response timed out waiting for {method}"))??
             .ok_or_else(|| anyhow!("missing ipc response"))?;
         let parsed: Value = serde_json::from_str(&line)?;
 

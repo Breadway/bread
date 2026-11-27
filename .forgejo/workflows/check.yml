@@ -9,6 +9,7 @@ on:
 jobs:
   check:
     runs-on: [self-hosted]
+    timeout-minutes: 60
     steps:
       - name: checkout
         shell: bash
