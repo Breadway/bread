@@ -8,8 +8,32 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::Duration;
 
+use anyhow::{anyhow, Result};
 use serde_json::Value;
+use tokio::io::{AsyncRead, BufReader, Lines};
+use tokio::time::timeout;
+
+/// Read one line from an IPC stream with a hard deadline.
+///
+/// The deadline loops elsewhere in these tests only check between reads, so a
+/// wedged daemon blocks `next_line()` forever and the test binary, the cargo
+/// build lock and the CI runner all stay held (INFRA-100). Every read should
+/// go through this helper.
+pub async fn next_line_bounded<R>(
+    lines: &mut Lines<BufReader<R>>,
+    label: &str,
+    duration: Duration,
+) -> Result<Option<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    match timeout(duration, lines.next_line()).await {
+        Ok(result) => Ok(result?),
+        Err(_) => Err(anyhow!("timed out waiting for {label}")),
+    }
+}
 
 /// The env var callers should set, to [`ensure_module_host_built`]'s
 /// returned path, on every `breadd` `Command` they spawn:

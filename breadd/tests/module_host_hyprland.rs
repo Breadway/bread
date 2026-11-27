@@ -188,10 +188,13 @@ enabled = false
             .write_all(format!("{}\n", serde_json::to_string(&req)?).as_bytes())
             .await?;
         let mut lines = BufReader::new(read_half).lines();
-        let line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("missing ipc response"))?;
+        let line = common::next_line_bounded(
+            &mut lines,
+            "module-host ipc response",
+            Duration::from_secs(60),
+        )
+        .await?
+        .ok_or_else(|| anyhow!("missing ipc response"))?;
         let parsed: Value = serde_json::from_str(&line)?;
         if let Some(err) = parsed.get("error").and_then(Value::as_str) {
             return Err(anyhow!(err.to_string()));
@@ -248,7 +251,9 @@ enabled = false
             .write_all(format!("{}\n", serde_json::to_string(&subscribe)?).as_bytes())
             .await?;
         let mut reader = BufReader::new(read_half).lines();
-        let _ack = reader.next_line().await?;
+        let _ack =
+            common::next_line_bounded(&mut reader, "result event ack", Duration::from_secs(5))
+                .await?;
 
         self.request("emit", json!({ "event": "test.trigger", "data": {} }))
             .await?;
